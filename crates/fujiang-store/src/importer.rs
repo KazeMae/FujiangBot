@@ -122,7 +122,7 @@ async fn import_learn(store: &Store, path: &Path) -> anyhow::Result<Option<(usiz
                 _ => vec![],
             };
             for r in replies {
-                // 旧 JSON 没有群号，记入私聊空间，不会串到群。
+                // 旧 JSON 是全局词库。group_id 为空：群里没有本群条目时会回落到这里。
                 store.learn_add(k, &r, 0, None).await?;
                 learn_n += 1;
             }

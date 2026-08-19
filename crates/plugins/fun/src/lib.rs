@@ -3,7 +3,7 @@ use fujiang_core::{BotContext, Event, Flow, Media, Plugin};
 use fujiang_store::{AttachResult, DetachResult};
 use tracing::warn;
 
-const HELP: &str = ".learn add <触发词> <回复>   （仅当前群/私聊）\n\
+const HELP: &str = ".learn add <触发词> <回复>   （写入当前群/私聊；无本群条目时用全局词库）\n\
 .learn list [触发词]\n\
 .learn del <触发词> [n]\n\
 .star / .star add|set|del\n\
@@ -76,12 +76,28 @@ impl Plugin for FunPlugin {
             }
         }
 
-        if let Some(reply) = ctx.store.learn_random(msg.source.group_id(), &line).await? {
+        if let Some(reply) = learn_reply(ctx, msg.source.group_id(), &line).await? {
             ctx.reply_text(msg, reply).await?;
             return Ok(Flow::Continue);
         }
         Ok(Flow::Continue)
     }
+}
+
+async fn learn_reply(
+    ctx: &BotContext,
+    group_id: Option<i64>,
+    line: &str,
+) -> anyhow::Result<Option<String>> {
+    if let Some(reply) = ctx.store.learn_random(group_id, line).await? {
+        return Ok(Some(reply));
+    }
+    // 旧 bot 按第一个空格分词匹配，例如「活着？ 啊」仍能中。
+    let first = line.split_whitespace().next().unwrap_or("");
+    if first.is_empty() || first == line {
+        return Ok(None);
+    }
+    ctx.store.learn_random(group_id, first).await
 }
 
 async fn can_mutate(ctx: &BotContext, qq: i64) -> bool {

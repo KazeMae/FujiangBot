@@ -69,7 +69,7 @@ cargo run -p fujiang -- migrate --from ./FujiangBot --config config.toml
 | contest | `.contest` `.cf` `.lg` `.nc` `.atc` `.scpc` `*all` `.day` `.bot` `.remindHH:MM` `.remindoff` |
 | rank | `.rank` / `.rk` |
 | problem | `.problem` `.cftag` `.每日一题` |
-| fun | `.learn`（按群隔离） `.star` `.tag` `来只xx` 回图挂/摘 tag |
+| fun | `.learn`（本群优先，否则用导入/全局词库） `.star` `.tag` `来只xx` 回图挂/摘 tag |
 | luck | `.luck N` |
 
 ## 文档

@@ -422,24 +422,26 @@ impl Store {
         group_id: Option<i64>,
         trigger: &str,
     ) -> anyhow::Result<Option<String>> {
-        let row = if let Some(gid) = group_id {
-            sqlx::query(
+        if let Some(gid) = group_id {
+            let row = sqlx::query(
                 "SELECT reply FROM learn_replies
                  WHERE group_id = ? AND trigger = ? ORDER BY RANDOM() LIMIT 1",
             )
             .bind(gid)
             .bind(trigger)
             .fetch_optional(&self.pool)
-            .await?
-        } else {
-            sqlx::query(
-                "SELECT reply FROM learn_replies
-                 WHERE group_id IS NULL AND trigger = ? ORDER BY RANDOM() LIMIT 1",
-            )
-            .bind(trigger)
-            .fetch_optional(&self.pool)
-            .await?
-        };
+            .await?;
+            if row.is_some() {
+                return Ok(row.map(|r| r.get::<String, _>(0)));
+            }
+        }
+        let row = sqlx::query(
+            "SELECT reply FROM learn_replies
+             WHERE group_id IS NULL AND trigger = ? ORDER BY RANDOM() LIMIT 1",
+        )
+        .bind(trigger)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.map(|r| r.get::<String, _>(0)))
     }
 
@@ -546,10 +548,26 @@ mod tests {
         );
         assert_eq!(store.learn_list(Some(11), None).await.unwrap().len(), 1);
         assert_eq!(store.learn_del(Some(11), "hi", None).await.unwrap(), 1);
-        assert!(store.learn_random(Some(11), "hi").await.unwrap().is_none());
+        assert_eq!(
+            store.learn_random(Some(11), "hi").await.unwrap().as_deref(),
+            Some("pm"),
+            "group with no own trigger falls back to imported/global"
+        );
         assert_eq!(
             store.learn_random(Some(22), "hi").await.unwrap().as_deref(),
             Some("g2")
+        );
+        store
+            .learn_add("活着？", "打赢牢大啦！", 0, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .learn_random(Some(741798363), "活着？")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("打赢牢大啦！")
         );
         let _ = std::fs::remove_dir_all(dir);
     }

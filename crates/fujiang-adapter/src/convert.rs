@@ -133,14 +133,99 @@ pub fn to_send(s: &Segment) -> SendSegment {
         } => Structs::at(*qq),
         Segment::Reply { id } => Structs::reply(*id),
         Segment::Image { src, summary } => {
-            let mut img = Structs::image(src.as_file_str());
+            let mut img = Structs::image(onebot_file(src));
             if let SendSegment::Image { summary: slot, .. } = &mut img {
                 *slot = summary.clone();
             }
             img
         }
-        Segment::File { src, name } => Structs::file(src.as_file_str(), name.clone()),
+        Segment::File { src, name } => Structs::file(onebot_file(src), name.clone()),
         Segment::Face { id } => Structs::face(id),
         Segment::Unknown { .. } => Structs::text(""),
+    }
+}
+
+/// NapCat / LLOneBot reject relative paths (`识别URL失败`). Local files go out as `file://`.
+fn onebot_file(src: &Media) -> String {
+    match src {
+        Media::Url(s) | Media::FileId(s) => s.clone(),
+        Media::Base64(s) => {
+            if s.starts_with("base64://") {
+                s.clone()
+            } else {
+                format!("base64://{s}")
+            }
+        }
+        Media::Path(s) => local_path_to_file_uri(s),
+    }
+}
+
+fn local_path_to_file_uri(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.starts_with("file://")
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("base64://")
+    {
+        return trimmed.to_string();
+    }
+    let p = std::path::PathBuf::from(trimmed);
+    let abs = if p.is_absolute() {
+        p
+    } else {
+        std::env::current_dir().map(|cwd| cwd.join(&p)).unwrap_or(p)
+    };
+    let abs = abs.canonicalize().unwrap_or(abs);
+    url::Url::from_file_path(&abs)
+        .map(|u| u.to_string())
+        .unwrap_or_else(|_| {
+            let s = abs.to_string_lossy().replace('\\', "/");
+            if s.starts_with('/') {
+                format!("file://{s}")
+            } else {
+                format!("file:///{s}")
+            }
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_path_becomes_file_uri() {
+        let uri = local_path_to_file_uri("data/images/ae052129e8426c1bf63251c77b171a90.jpg");
+        assert!(uri.starts_with("file://"), "{uri}");
+        assert!(
+            uri.contains("data/images/ae052129e8426c1bf63251c77b171a90.jpg"),
+            "{uri}"
+        );
+        assert!(!uri.starts_with("file://data"), "{uri}");
+    }
+
+    #[test]
+    fn already_uri_left_alone() {
+        assert_eq!(
+            local_path_to_file_uri("file:///tmp/a.jpg"),
+            "file:///tmp/a.jpg"
+        );
+        assert_eq!(
+            local_path_to_file_uri("https://example.com/a.jpg"),
+            "https://example.com/a.jpg"
+        );
+    }
+
+    #[test]
+    fn image_segment_uses_file_uri() {
+        let seg = Segment::Image {
+            src: Media::Path("data/images/x.jpg".into()),
+            summary: None,
+        };
+        match to_send(&seg) {
+            SendSegment::Image { file, .. } => {
+                assert!(file.starts_with("file://"), "{file}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }
