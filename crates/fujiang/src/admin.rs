@@ -99,6 +99,8 @@ struct PluginEntryView {
     pub enabled: bool,
     pub state: &'static str,
     pub config: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -298,6 +300,7 @@ async fn plugins_view(state: &AppState) -> PluginsView {
                 enabled,
                 state: if enabled { "active" } else { "disabled" },
                 config: b.config.clone(),
+                last_error: None,
             }
         })
         .collect();
@@ -312,6 +315,7 @@ async fn plugins_view(state: &AppState) -> PluginsView {
             enabled: d.enabled,
             state: if d.enabled { "active" } else { "loaded" },
             config: d.config.clone(),
+            last_error: d.last_error.clone(),
         });
     }
     PluginsView {

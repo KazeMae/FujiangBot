@@ -150,6 +150,36 @@ impl Dispatcher {
         Ok(false)
     }
 
+    /// Start `plugin` first; only then stop the previous instance with the same name.
+    /// If `on_start` fails the old plugin (if any) keeps running.
+    pub async fn replace(&self, plugin: Arc<dyn Plugin>, ctx: &BotContext) -> anyhow::Result<()> {
+        let name = plugin.name();
+        let scope = Arc::new(PluginScope::new());
+        if let Err(e) = plugin.on_start(ctx, &scope).await {
+            scope.dispose().await;
+            return Err(e);
+        }
+        let old = {
+            let mut guard = self.plugins.write().await;
+            let old = guard
+                .iter()
+                .position(|s| s.plugin.name() == name)
+                .map(|i| guard.remove(i));
+            guard.push(PluginSlot { plugin, scope });
+            old
+        };
+        if let Some(old) = old {
+            info!(plugin = name, "replaced plugin");
+            if let Err(e) = old.plugin.on_stop().await {
+                error!(plugin = name, error = %e, "plugin stop");
+            }
+            old.scope.dispose().await;
+        } else {
+            info!(plugin = name, "hot-enable plugin");
+        }
+        Ok(())
+    }
+
     pub async fn handle(&self, ctx: &BotContext, ev: &Event) {
         let mut prefix = String::new();
         if let Some(msg) = ev.as_message() {
@@ -401,5 +431,137 @@ mod tests {
         let idx = route_targets(listed, &ev, ".");
         let names: Vec<_> = idx.into_iter().map(|i| p[i].name).collect();
         assert_eq!(names, vec!["fun"]);
+    }
+
+    struct NoopMessenger;
+    #[async_trait]
+    impl crate::plugin::Messenger for NoopMessenger {
+        async fn send(
+            &self,
+            _target: crate::event::Source,
+            _segs: &[crate::event::Segment],
+        ) -> anyhow::Result<i64> {
+            Ok(0)
+        }
+        async fn get_message(&self, _id: i64) -> anyhow::Result<crate::event::MessageEvent> {
+            anyhow::bail!("no")
+        }
+        async fn get_image(&self, _file: &str) -> anyhow::Result<std::path::PathBuf> {
+            anyhow::bail!("no")
+        }
+        async fn get_file(&self, _file_id: &str) -> anyhow::Result<std::path::PathBuf> {
+            anyhow::bail!("no")
+        }
+    }
+
+    async fn test_ctx() -> BotContext {
+        let dir = std::env::temp_dir().join(format!(
+            "fujiang-core-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = fujiang_store::Store::open(dir.join("t.db").to_str().unwrap(), dir.join("img"))
+            .await
+            .unwrap();
+        BotContext {
+            messenger: Arc::new(tokio::sync::RwLock::new(
+                Arc::new(NoopMessenger) as Arc<dyn crate::plugin::Messenger>
+            )),
+            store,
+            http: reqwest::Client::new(),
+            config: Arc::new(tokio::sync::RwLock::new(crate::BotConfig {
+                command_prefix: ".".into(),
+                groups: vec![],
+                allow_private: true,
+                clist_username: String::new(),
+                clist_api_key: String::new(),
+                clist_limit: 10,
+                contest_update_minutes: 60,
+                rank_update_minutes: 60,
+                daily_reset_hour: 4,
+                fun_allow_mutate: true,
+                fun_admins: vec![],
+                fun_delete_files: false,
+            })),
+            plugin_configs: Arc::new(tokio::sync::RwLock::new(Default::default())),
+        }
+    }
+
+    struct Named {
+        name: &'static str,
+        fail_start: bool,
+        started: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait]
+    impl Plugin for Named {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn help(&self) -> &'static str {
+            ""
+        }
+        async fn on_start(&self, _ctx: &BotContext, _scope: &PluginScope) -> anyhow::Result<()> {
+            if self.fail_start {
+                anyhow::bail!("boom");
+            }
+            self.started
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        async fn handle(
+            &self,
+            _ctx: &BotContext,
+            _ev: &Event,
+            _scope: &PluginScope,
+        ) -> anyhow::Result<Flow> {
+            Ok(Flow::Continue)
+        }
+    }
+
+    #[tokio::test]
+    async fn replace_rolls_back_when_start_fails() {
+        let ctx = test_ctx().await;
+        let old = Arc::new(Named {
+            name: "x",
+            fail_start: false,
+            started: std::sync::atomic::AtomicU32::new(0),
+        });
+        let d = Dispatcher::new(vec![old.clone()]);
+        d.start_all(&ctx).await.unwrap();
+        assert_eq!(old.started.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let newp = Arc::new(Named {
+            name: "x",
+            fail_start: true,
+            started: std::sync::atomic::AtomicU32::new(0),
+        });
+        assert!(d.replace(newp, &ctx).await.is_err());
+        assert_eq!(d.names().await, vec!["x".to_string()]);
+        assert_eq!(old.started.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn replace_swaps_when_start_ok() {
+        let ctx = test_ctx().await;
+        let old = Arc::new(Named {
+            name: "x",
+            fail_start: false,
+            started: std::sync::atomic::AtomicU32::new(0),
+        });
+        let d = Dispatcher::new(vec![old.clone()]);
+        d.start_all(&ctx).await.unwrap();
+        let newp = Arc::new(Named {
+            name: "x",
+            fail_start: false,
+            started: std::sync::atomic::AtomicU32::new(0),
+        });
+        d.replace(newp.clone(), &ctx).await.unwrap();
+        assert_eq!(newp.started.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(d.names().await, vec!["x".to_string()]);
     }
 }

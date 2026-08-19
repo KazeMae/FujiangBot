@@ -367,7 +367,9 @@
           '<div><strong>' + d.name + '</strong> v' + d.version +
           ' · ' + d.kind + ' · ' + d.state +
           '<div class="hint">' + (d.description || '') +
-          (d.path ? '<br>' + d.path : '') + '</div></div>' +
+          (d.path ? '<br>' + d.path : '') +
+          (d.last_error ? '<br><span style="color:var(--accent)">失败：' + escapeHtml(d.last_error) + '</span>' : '') +
+          '</div></div>' +
           '<div class="actions">' + toggle + dynBtns + '</div></div>' +
           cfgBox +
         '</div>';

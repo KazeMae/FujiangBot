@@ -170,6 +170,8 @@ msg.sender.nickname / card
 
 卸载时会先 `on_stop`，再 cancel/abort scope 里的任务，再等 in-flight `handle` 结束才 `dlclose`。
 
+重载 `.so`：先打开新库并 `on_start`。失败则丢掉新库，**旧实例继续跑**，管理页会显示 `last_error`。成功才停掉旧的并 `dlclose`。
+
 ## 动态 .so
 
 ABI 号 `fujiang_plugin_abi() == 2`（`PLUGIN_ABI`）。`.so` **必须用本仓库、同一套 rustc 编译**，不能跨版本乱拷。内置插件名不能用 so 覆盖。

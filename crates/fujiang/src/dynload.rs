@@ -28,6 +28,7 @@ pub struct PluginHub {
     dir: PathBuf,
     loaded: Mutex<HashMap<String, LoadedSo>>,
     disabled: Mutex<HashSet<String>>,
+    last_error: Mutex<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -39,6 +40,8 @@ pub struct DynamicPluginView {
     pub path: String,
     pub enabled: bool,
     pub config: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 impl PluginHub {
@@ -47,6 +50,16 @@ impl PluginHub {
             dir: dir.into(),
             loaded: Mutex::new(HashMap::new()),
             disabled: Mutex::new(HashSet::new()),
+            last_error: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn set_error(&self, name: &str, err: Option<String>) {
+        let mut g = self.last_error.lock().await;
+        if let Some(e) = err {
+            g.insert(name.to_string(), e);
+        } else {
+            g.remove(name);
         }
     }
 
@@ -67,6 +80,7 @@ impl PluginHub {
         running: &[String],
         configs: &std::collections::HashMap<String, serde_json::Value>,
     ) -> Vec<DynamicPluginView> {
+        let errors = self.last_error.lock().await.clone();
         self.loaded
             .lock()
             .await
@@ -82,6 +96,7 @@ impl PluginHub {
                     .get(&s.snapshot.name)
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({})),
+                last_error: errors.get(&s.snapshot.name).cloned(),
             })
             .collect()
     }
@@ -150,8 +165,56 @@ impl PluginHub {
                 .map(|s| s.path.clone())
                 .ok_or_else(|| anyhow::anyhow!("动态插件「{name}」未加载"))?
         };
-        self.unload(name, dispatcher).await?;
-        self.load(&path, dispatcher, ctx).await
+        let (lib, plugin) = match unsafe { open_plugin(&path) } {
+            Ok(v) => v,
+            Err(e) => {
+                self.set_error(name, Some(format!("{e:#}"))).await;
+                return Err(e);
+            }
+        };
+        let new_name = plugin.name().to_string();
+        if new_name != name {
+            self.set_error(
+                name,
+                Some(format!("新库名字是「{new_name}」，不是「{name}」")),
+            )
+            .await;
+            anyhow::bail!("新库名字是「{new_name}」，不是「{name}」");
+        }
+        if plugins::NAMES.contains(&new_name.as_str()) {
+            anyhow::bail!("「{new_name}」是内置插件，不能用 .so 覆盖");
+        }
+
+        let running = dispatcher.names().await.iter().any(|n| n == name);
+        let start = running || !self.is_disabled(name).await;
+        if start {
+            if let Err(e) = dispatcher.replace(plugin.clone(), ctx).await {
+                self.set_error(name, Some(format!("{e:#}"))).await;
+                drop(plugin);
+                drop(lib);
+                return Err(e);
+            }
+        }
+
+        let snapshot = PluginSnapshot::from_plugin(plugin.as_ref());
+        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let old = self.loaded.lock().await.insert(
+            name.to_string(),
+            LoadedSo {
+                path,
+                mtime,
+                snapshot,
+                plugin,
+                _lib: lib,
+            },
+        );
+        if let Some(old) = old {
+            wait_unique(&old.plugin).await;
+            drop(old);
+        }
+        self.set_error(name, None).await;
+        info!(plugin = name, "reloaded dynamic plugin");
+        Ok(name.to_string())
     }
 
     /// Load new files, reload changed, unload missing. Returns names that changed.
