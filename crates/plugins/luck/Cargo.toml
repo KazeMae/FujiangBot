@@ -1,0 +1,12 @@
+[package]
+name = "fujiang-plugin-luck"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+fujiang-core = { path = "../../fujiang-core" }
+rand.workspace = true

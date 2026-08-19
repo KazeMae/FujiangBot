@@ -1,0 +1,63 @@
+use async_trait::async_trait;
+use chrono::Local;
+use fujiang_core::{BotContext, Event, Flow, Plugin};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+
+pub struct LuckPlugin;
+
+#[async_trait]
+impl Plugin for LuckPlugin {
+    fn name(&self) -> &'static str {
+        "luck"
+    }
+
+    fn help(&self) -> &'static str {
+        ".luck N  — 今天的幸运数字（1..=N，同一天同一人固定）"
+    }
+
+    fn commands(&self) -> &'static [&'static str] {
+        &[".luck"]
+    }
+
+    async fn handle(&self, ctx: &BotContext, ev: &Event) -> anyhow::Result<Flow> {
+        let Some(msg) = ev.as_message() else {
+            return Ok(Flow::Continue);
+        };
+        let line = msg.command_line();
+        let mut parts = line.split_whitespace();
+        if parts.next() != Some(".luck") {
+            return Ok(Flow::Continue);
+        }
+        let Some(lim) = parts.next().and_then(|s| s.parse::<i64>().ok()) else {
+            ctx.reply_text(msg, "格式：.luck N").await?;
+            return Ok(Flow::Stop);
+        };
+        if lim < 1 {
+            ctx.reply_text(msg, "N 必须 >= 1").await?;
+            return Ok(Flow::Stop);
+        }
+        let n = luck_number(lim, msg.user_id());
+        ctx.reply_text(msg, format!("你的幸运数字是{n}")).await?;
+        Ok(Flow::Stop)
+    }
+}
+
+fn luck_number(lim: i64, qq: i64) -> i64 {
+    let d = Local::now().date_naive();
+    let ymd = d.format("%Y%m%d").to_string().parse::<i64>().unwrap_or(0);
+    let mut rng = StdRng::seed_from_u64((qq.wrapping_add(ymd)) as u64);
+    rng.gen_range(1..=lim)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stable_same_seed() {
+        // same qq same day => same number; just ensure range
+        let n = luck_number(100, 12345);
+        assert!((1..=100).contains(&n));
+    }
+}

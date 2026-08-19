@@ -1,0 +1,17 @@
+/target
+/data
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+.env.*
+config.toml
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# old Python project (nested git + secrets + image dump)
+/FujiangBot/
+/legacy/

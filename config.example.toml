@@ -1,0 +1,38 @@
+[napcat]
+ws_url = "ws://127.0.0.1:3001"
+access_token = ""
+
+[bot]
+command_prefix = "."
+groups = [741798363, 749764026, 827689130, 187695029, 555973858, 956907657]
+allow_private = true
+
+[store]
+db = "data/fujiang.db"
+image_root = "data/images"
+
+[clist]
+username = ""
+api_key = ""
+limit = 10
+
+[plugins.contest]
+enabled = true
+update_minutes = 60
+
+[plugins.rank]
+enabled = true
+update_minutes = 60
+
+[plugins.problem]
+enabled = true
+daily_reset_hour = 4
+
+[plugins.fun]
+enabled = true
+allow_mutate = true
+admins = []
+delete_files_on_album_del = false
+
+[plugins.luck]
+enabled = true

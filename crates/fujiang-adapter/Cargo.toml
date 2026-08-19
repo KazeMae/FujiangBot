@@ -1,0 +1,14 @@
+[package]
+name = "fujiang-adapter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+fujiang-core = { path = "../fujiang-core" }
+napcat-sdk = { path = "../napcat-sdk" }
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
