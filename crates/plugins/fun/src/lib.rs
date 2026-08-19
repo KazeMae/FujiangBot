@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use fujiang_core::{BotContext, Event, Flow, Plugin, PluginScope};
+use fujiang_core::{BotContext, Event, Flow, Interest, Plugin, PluginScope};
 use fujiang_store::{AttachResult, DetachResult};
 use tracing::warn;
 
@@ -45,6 +45,14 @@ impl Plugin for FunPlugin {
         &[
             ".learn", ".star", ".tag", ".idea", ".album", ".添加", ".删除", ".标签", ".想法",
         ]
+    }
+
+    fn command_prefixes(&self) -> &'static [&'static str] {
+        &[".添加", ".删除"]
+    }
+
+    fn interest(&self) -> Interest {
+        Interest::Messages
     }
 
     async fn handle(

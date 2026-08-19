@@ -14,11 +14,15 @@
 | `help()` | 是 | `.help` 和插件入口命令展示的说明 |
 | `handle(ctx, ev, scope)` | 是 | 处理事件。`Flow::Stop` 截胡后面的插件；`Continue` 继续 |
 | `meta()` | 否 | 名字、版本、简介、命令列表。默认用 `name()` + 空简介 |
-| `commands()` | 否 | 命令清单，给管理页 / 元数据用，**不会**自动路由 |
+| `commands()` | 否 | 命令清单。分发层按**首词精确匹配**交给这个插件 |
+| `command_prefixes()` | 否 | 无空格入口，如 `.remind08:30`、`.添加猫` |
+| `interest()` | 否 | 默认 `Commands`（只收自己的命令）。`Messages` 收全部消息；`All` 还收通知/请求 |
 | `on_start(ctx, scope)` | 否 | 启动或热加载时。后台循环用 `scope.spawn` / `scope.sleep` |
 | `on_stop()` | 否 | 卸载前额外清理。scope 会在这之后 `dispose`，不必自己 cancel |
 
 宿主调用顺序：`on_start` → 多条 `handle` → `on_stop` → `scope.dispose()`。群白名单和 `.help` 在分发层先处理，插件里不必再做 ACL。后台任务必须 `scope.spawn`，卸载时才会被 cancel/abort。
+
+分发：先把匹配 `commands()` / `command_prefixes()` 的插件叫一遍（`Stop` 则结束）。没截胡再把消息交给 `Interest::Messages` / `All`（命令主人不跑第二遍）。学话、来只这类非命令入口把 `interest()` 设成 `Messages`。非消息事件只给 `All`。
 
 `handle` 里自己解析 `msg.command_line()`（已 `trim`）。前缀默认 `.`，以实际配置为准：`ctx.bot_config().await.command_prefix`。
 

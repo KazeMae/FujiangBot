@@ -44,9 +44,26 @@ impl Plugin for ContestPlugin {
 
     fn commands(&self) -> &'static [&'static str] {
         &[
-            ".contest", ".cf", ".lg", ".nc", ".atc", ".scpc", ".cfall", ".lgall", ".ncall",
-            ".atcall", ".scpcall", ".day", ".bot", ".remind",
+            ".contest",
+            ".cf",
+            ".lg",
+            ".nc",
+            ".atc",
+            ".scpc",
+            ".cfall",
+            ".lgall",
+            ".ncall",
+            ".atcall",
+            ".scpcall",
+            ".day",
+            ".bot",
+            ".remind",
+            ".remindoff",
         ]
+    }
+
+    fn command_prefixes(&self) -> &'static [&'static str] {
+        &[".remind"]
     }
 
     async fn on_start(&self, ctx: &BotContext, scope: &PluginScope) -> anyhow::Result<()> {

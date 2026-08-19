@@ -14,6 +14,17 @@ pub enum Flow {
     Stop,
 }
 
+/// What events a plugin wants after command routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interest {
+    /// Only messages whose first token or prefix matches this plugin's commands.
+    Commands,
+    /// All allowed messages (and still receives its own commands first).
+    Messages,
+    /// Every event, including notice / request / meta.
+    All,
+}
+
 #[async_trait]
 pub trait Messenger: Send + Sync {
     async fn send(&self, target: Source, segs: &[Segment]) -> anyhow::Result<i64>;
@@ -156,6 +167,15 @@ pub trait Plugin: Send + Sync {
     fn help(&self) -> &'static str;
     fn commands(&self) -> &'static [&'static str] {
         &[]
+    }
+
+    /// Prefix matches for commands that eat the rest of the token (`.remind08:30`).
+    fn command_prefixes(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn interest(&self) -> Interest {
+        Interest::Commands
     }
 
     async fn on_start(&self, _ctx: &BotContext, _scope: &PluginScope) -> anyhow::Result<()> {

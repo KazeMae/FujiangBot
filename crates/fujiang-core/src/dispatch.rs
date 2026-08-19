@@ -4,7 +4,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use crate::event::Event;
-use crate::plugin::{BotContext, Flow, Plugin, PluginMeta};
+use crate::plugin::{BotContext, Flow, Interest, Plugin, PluginMeta};
 use crate::scope::PluginScope;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -151,6 +151,7 @@ impl Dispatcher {
     }
 
     pub async fn handle(&self, ctx: &BotContext, ev: &Event) {
+        let mut prefix = String::new();
         if let Some(msg) = ev.as_message() {
             let cfg = ctx.bot_config().await;
             if !cfg.allowed(msg.source) {
@@ -169,6 +170,7 @@ impl Dispatcher {
                 }
                 return;
             }
+            prefix = cfg.command_prefix;
         } else if let Event::Request(req) = ev {
             if req.kind == "friend" {
                 // ignore
@@ -182,8 +184,10 @@ impl Dispatcher {
             .iter()
             .map(|s| (s.plugin.clone(), s.scope.clone()))
             .collect();
-        for (p, scope) in slots {
-            match p.handle(ctx, ev, &scope).await {
+        let targets = route_targets(slots.iter().map(|(p, _)| p.as_ref()), ev, &prefix);
+        for i in targets {
+            let (p, scope) = &slots[i];
+            match p.handle(ctx, ev, scope).await {
                 Ok(Flow::Stop) => return,
                 Ok(Flow::Continue) => {}
                 Err(e) => {
@@ -191,6 +195,83 @@ impl Dispatcher {
                 }
             }
         }
+    }
+}
+
+fn expand_cmd(declared: &str, bot_prefix: &str) -> String {
+    if let Some(rest) = declared.strip_prefix('.') {
+        format!("{bot_prefix}{rest}")
+    } else {
+        declared.to_string()
+    }
+}
+
+fn first_token(line: &str) -> &str {
+    line.split_whitespace().next().unwrap_or("")
+}
+
+/// Exact first-token match, else longest declared prefix. Plugin order breaks ties.
+pub fn find_command_owner<'a, P: Plugin + ?Sized + 'a>(
+    plugins: impl IntoIterator<Item = &'a P>,
+    line: &str,
+    bot_prefix: &str,
+) -> Option<&'a str> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let token = first_token(line);
+    let mut prefix_best: Option<(&'a str, usize)> = None;
+    for p in plugins {
+        for cmd in p.commands() {
+            if token == expand_cmd(cmd, bot_prefix) {
+                return Some(p.name());
+            }
+        }
+        for pre in p.command_prefixes() {
+            let c = expand_cmd(pre, bot_prefix);
+            if !c.is_empty() && line.starts_with(&c) {
+                let keep = prefix_best.map(|(_, n)| c.len() > n).unwrap_or(true);
+                if keep {
+                    prefix_best = Some((p.name(), c.len()));
+                }
+            }
+        }
+    }
+    prefix_best.map(|(name, _)| name)
+}
+
+fn route_targets<'a, I>(plugins: I, ev: &Event, bot_prefix: &str) -> Vec<usize>
+where
+    I: IntoIterator<Item = &'a dyn Plugin>,
+{
+    let listed: Vec<&dyn Plugin> = plugins.into_iter().collect();
+    if let Some(msg) = ev.as_message() {
+        let line = msg.command_line();
+        let owner = find_command_owner(listed.iter().copied(), &line, bot_prefix);
+        let mut out = Vec::new();
+        if let Some(name) = owner {
+            if let Some(i) = listed.iter().position(|p| p.name() == name) {
+                out.push(i);
+            }
+        }
+        for (i, p) in listed.iter().enumerate() {
+            if owner == Some(p.name()) {
+                continue;
+            }
+            match p.interest() {
+                Interest::Commands => {}
+                Interest::Messages | Interest::All => out.push(i),
+            }
+        }
+        out
+    } else {
+        listed
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.interest() == Interest::All)
+            .map(|(i, _)| i)
+            .collect()
     }
 }
 
@@ -209,4 +290,116 @@ async fn persist_message(ctx: &BotContext, msg: &crate::event::MessageEvent) -> 
             segments_json,
         })
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scope::PluginScope;
+    use async_trait::async_trait;
+
+    struct Stub {
+        name: &'static str,
+        cmds: &'static [&'static str],
+        prefixes: &'static [&'static str],
+        interest: Interest,
+    }
+
+    #[async_trait]
+    impl Plugin for Stub {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn help(&self) -> &'static str {
+            ""
+        }
+        fn commands(&self) -> &'static [&'static str] {
+            self.cmds
+        }
+        fn command_prefixes(&self) -> &'static [&'static str] {
+            self.prefixes
+        }
+        fn interest(&self) -> Interest {
+            self.interest
+        }
+        async fn handle(
+            &self,
+            _ctx: &BotContext,
+            _ev: &Event,
+            _scope: &PluginScope,
+        ) -> anyhow::Result<Flow> {
+            Ok(Flow::Continue)
+        }
+    }
+
+    fn stubs() -> Vec<Stub> {
+        vec![
+            Stub {
+                name: "contest",
+                cmds: &[".cf", ".contest", ".remind"],
+                prefixes: &[".remind"],
+                interest: Interest::Commands,
+            },
+            Stub {
+                name: "echo",
+                cmds: &[".ping"],
+                prefixes: &[],
+                interest: Interest::Commands,
+            },
+            Stub {
+                name: "fun",
+                cmds: &[".learn", ".star", ".tag"],
+                prefixes: &[".添加", ".删除"],
+                interest: Interest::Messages,
+            },
+        ]
+    }
+
+    #[test]
+    fn exact_token_picks_owner() {
+        let p = stubs();
+        assert_eq!(find_command_owner(&p, ".cf", "."), Some("contest"));
+        assert_eq!(find_command_owner(&p, ".ping extra", "."), Some("echo"));
+        assert_eq!(find_command_owner(&p, ".learn add a b", "."), Some("fun"));
+    }
+
+    #[test]
+    fn prefix_matches_remind_and_image_cmds() {
+        let p = stubs();
+        assert_eq!(find_command_owner(&p, ".remind08:30", "."), Some("contest"));
+        assert_eq!(find_command_owner(&p, ".remindoff", "."), Some("contest"));
+        assert_eq!(find_command_owner(&p, ".添加猫", "."), Some("fun"));
+        assert_eq!(find_command_owner(&p, "来只猫", "."), None);
+        assert_eq!(find_command_owner(&p, "活着？", "."), None);
+    }
+
+    #[test]
+    fn respects_custom_bot_prefix() {
+        let p = stubs();
+        assert_eq!(find_command_owner(&p, "!ping", "!"), Some("echo"));
+        assert_eq!(find_command_owner(&p, ".ping", "!"), None);
+    }
+
+    #[test]
+    fn message_route_skips_command_only() {
+        use crate::event::{MessageEvent, Sender, Source};
+        let p = stubs();
+        let listed: Vec<&dyn Plugin> = p.iter().map(|s| s as &dyn Plugin).collect();
+        let ev = Event::Message(MessageEvent {
+            id: 1,
+            time: 0,
+            self_id: 1,
+            sender: Sender {
+                user_id: 2,
+                nickname: None,
+                card: None,
+            },
+            source: Source::Group { id: 3 },
+            segments: vec![],
+            raw_text: "来只猫".into(),
+        });
+        let idx = route_targets(listed, &ev, ".");
+        let names: Vec<_> = idx.into_iter().map(|i| p[i].name).collect();
+        assert_eq!(names, vec!["fun"]);
+    }
 }
