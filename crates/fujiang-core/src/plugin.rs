@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -48,11 +50,21 @@ pub struct BotContext {
     pub store: fujiang_store::Store,
     pub http: reqwest::Client,
     pub config: Arc<RwLock<BotConfig>>,
+    pub plugin_configs: Arc<RwLock<HashMap<String, Value>>>,
 }
 
 impl BotContext {
     pub async fn bot_config(&self) -> BotConfig {
         self.config.read().await.clone()
+    }
+
+    pub async fn plugin_config(&self, name: &str) -> Value {
+        self.plugin_configs
+            .read()
+            .await
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Default::default()))
     }
 
     pub async fn messenger(&self) -> Arc<dyn Messenger> {

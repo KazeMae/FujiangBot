@@ -348,14 +348,21 @@
         return;
       }
       box.innerHTML = dyn.map((d) =>
-        '<div class="plugin grid">' +
+        '<div class="plugin">' +
+          '<div class="grid">' +
           '<div><strong>' + d.name + '</strong> v' + d.version +
           (d.enabled ? ' · 运行中' : ' · 已加载未启用') +
           '<div class="hint">' + (d.description || '') + '<br>' + d.path + '</div></div>' +
           '<div class="actions">' +
             '<button class="ghost" type="button" data-reload="' + d.name + '">重载</button>' +
             '<button class="ghost" type="button" data-unload="' + d.name + '">卸载</button>' +
-          '</div></div>'
+          '</div></div>' +
+          '<label class="full">config（JSON）' +
+            '<textarea data-cfg="' + d.name + '">' +
+              escapeHtml(JSON.stringify(d.config || {}, null, 2)) +
+            '</textarea></label>' +
+          '<button class="ghost" type="button" data-savecfg="' + d.name + '">保存此插件配置</button>' +
+        '</div>'
       ).join("");
       box.querySelectorAll("[data-reload]").forEach((b) => {
         b.onclick = () => dynAct("/api/plugins/reload", { name: b.dataset.reload });
@@ -363,6 +370,28 @@
       box.querySelectorAll("[data-unload]").forEach((b) => {
         b.onclick = () => dynAct("/api/plugins/unload", { name: b.dataset.unload });
       });
+      box.querySelectorAll("[data-savecfg]").forEach((b) => {
+        b.onclick = () => savePluginConfig(b.dataset.savecfg, box);
+      });
+    }
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[c]));
+    }
+    async function savePluginConfig(name, root) {
+      const ta = (root || document).querySelector('[data-cfg="' + name + '"]');
+      try {
+        const config = JSON.parse(ta.value || "{}");
+        const r = await api("/api/plugins/" + encodeURIComponent(name) + "/config", {
+          method: "PUT",
+          body: JSON.stringify({ config }),
+        });
+        renderDyn(r.plugins);
+        banner("已更新 " + name + " 配置并重启该插件", "ok");
+      } catch (e) {
+        banner(e.message, "err");
+      }
     }
     async function refreshDyn() {
       const p = await api("/api/plugins");

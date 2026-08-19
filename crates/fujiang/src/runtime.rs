@@ -72,7 +72,10 @@ impl AppState {
     pub async fn apply(&self, incoming: AppConfig) -> anyhow::Result<ApplyReport> {
         let _guard = self.apply_lock.lock().await;
         let old = self.cfg.read().await.clone();
-        let next = AppConfig::merge_secrets(&old, incoming);
+        let mut next = AppConfig::merge_secrets(&old, incoming);
+        if next.plugins.configs.is_empty() {
+            next.plugins.configs = old.plugins.configs.clone();
+        }
         validate_config(&next)?;
 
         let mut report = ApplyReport::default();
@@ -96,6 +99,7 @@ impl AppState {
         }
 
         *self.ctx.config.write().await = next.to_bot_config();
+        *self.ctx.plugin_configs.write().await = plugins::all_configs(&next);
         report.applied.push("bot".into());
 
         self.ctx.store.set_archive_params(
@@ -122,6 +126,31 @@ impl AppState {
         *self.cfg.write().await = next;
         info!(applied = ?report.applied, restart = ?report.restart_required, "config applied");
         Ok(report)
+    }
+
+    pub async fn apply_plugin_config(
+        &self,
+        name: &str,
+        value: serde_json::Value,
+    ) -> anyhow::Result<ApplyReport> {
+        let _guard = self.apply_lock.lock().await;
+        let mut next = self.cfg.read().await.clone();
+        plugins::apply_config(&mut next, name, value)?;
+        validate_config(&next)?;
+
+        *self.ctx.config.write().await = next.to_bot_config();
+        *self.ctx.plugin_configs.write().await = plugins::all_configs(&next);
+
+        restart_one(&self.dispatcher, &self.hub, &self.ctx, &next, name).await?;
+
+        next.save(&self.config_path)
+            .with_context(|| format!("write {}", self.config_path.display()))?;
+        *self.cfg.write().await = next;
+        Ok(ApplyReport {
+            applied: vec![format!("plugins.{name}")],
+            restart_required: vec![],
+            plugins: self.dispatcher.names().await,
+        })
     }
 
     async fn restart_gateway(&self, adapter: Arc<AnyAdapter>) {
@@ -151,6 +180,32 @@ async fn sync_plugins(
             if let Some(p) = plugins::make(name) {
                 dispatcher.insert(p, ctx).await?;
             }
+        }
+    }
+    Ok(())
+}
+
+async fn restart_one(
+    dispatcher: &Dispatcher,
+    hub: &crate::dynload::PluginHub,
+    ctx: &BotContext,
+    cfg: &AppConfig,
+    name: &str,
+) -> anyhow::Result<()> {
+    if plugins::NAMES.contains(&name) {
+        dispatcher.remove(name).await?;
+        if plugins::enabled(cfg, name) {
+            if let Some(p) = plugins::make(name) {
+                dispatcher.insert(p, ctx).await?;
+            }
+        }
+        return Ok(());
+    }
+    let running = dispatcher.names().await.iter().any(|n| n == name);
+    if running {
+        dispatcher.remove(name).await?;
+        if let Some(p) = hub.plugin(name).await {
+            dispatcher.insert(p, ctx).await?;
         }
     }
     Ok(())

@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use figment::providers::{Env, Format, Serialized, Toml};
 use figment::Figment;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -129,6 +131,9 @@ pub struct PluginsSection {
     pub fun: FunToggle,
     #[serde(default)]
     pub luck: PluginToggle,
+    /// Per-plugin JSON for dynamic (and optional overlay) plugins.
+    #[serde(default)]
+    pub configs: HashMap<String, Value>,
 }
 
 impl Default for PluginsSection {
@@ -141,6 +146,7 @@ impl Default for PluginsSection {
             problem: PluginToggle::default(),
             fun: FunToggle::default(),
             luck: PluginToggle::default(),
+            configs: HashMap::new(),
         }
     }
 }

@@ -37,6 +37,7 @@ pub struct DynamicPluginView {
     pub commands: Vec<String>,
     pub path: String,
     pub enabled: bool,
+    pub config: serde_json::Value,
 }
 
 impl PluginHub {
@@ -47,7 +48,15 @@ impl PluginHub {
         }
     }
 
-    pub async fn list(&self, running: &[String]) -> Vec<DynamicPluginView> {
+    pub async fn plugin(&self, name: &str) -> Option<Arc<dyn Plugin>> {
+        self.loaded.lock().await.get(name).map(|s| s.plugin.clone())
+    }
+
+    pub async fn list(
+        &self,
+        running: &[String],
+        configs: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Vec<DynamicPluginView> {
         self.loaded
             .lock()
             .await
@@ -59,6 +68,10 @@ impl PluginHub {
                 commands: s.snapshot.commands.clone(),
                 path: s.path.display().to_string(),
                 enabled: running.iter().any(|n| n == &s.snapshot.name),
+                config: configs
+                    .get(&s.snapshot.name)
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({})),
             })
             .collect()
     }

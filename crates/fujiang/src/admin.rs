@@ -1,11 +1,12 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::extract::Path;
 use axum::extract::State;
 use axum::http::{Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -38,6 +39,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/api/plugins/load", post(load_plugin))
         .route("/api/plugins/unload", post(unload_plugin))
         .route("/api/plugins/reload", post(reload_plugin))
+        .route("/api/plugins/{name}/config", put(put_plugin_config))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
     Router::new()
         .route("/", get(index))
@@ -78,10 +80,17 @@ async fn get_status(State(state): State<Arc<AppState>>) -> Json<StatusView> {
 }
 
 #[derive(Serialize)]
+struct BuiltinView {
+    #[serde(flatten)]
+    snapshot: fujiang_core::PluginSnapshot,
+    config: serde_json::Value,
+}
+
+#[derive(Serialize)]
 struct PluginsView {
     dir: String,
     watch: bool,
-    builtin: Vec<fujiang_core::PluginSnapshot>,
+    builtin: Vec<BuiltinView>,
     dynamic: Vec<crate::dynload::DynamicPluginView>,
 }
 
@@ -189,6 +198,33 @@ async fn reload_plugin(State(state): State<Arc<AppState>>, Json(body): Json<Name
     }
 }
 
+async fn put_plugin_config(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(body): Json<ConfigBody>,
+) -> Response {
+    match state.apply_plugin_config(&name, body.config).await {
+        Ok(report) => Json(serde_json::json!({
+            "ok": true,
+            "report": report,
+            "plugins": plugins_view(&state).await,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: format!("{e:#}"),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ConfigBody {
+    config: serde_json::Value,
+}
+
 async fn plugins_view(state: &AppState) -> PluginsView {
     let cfg = state.cfg.read().await;
     let running = state.dispatcher.names().await;
@@ -196,12 +232,16 @@ async fn plugins_view(state: &AppState) -> PluginsView {
     let builtin = all
         .into_iter()
         .filter(|p| crate::plugins::NAMES.contains(&p.name.as_str()))
+        .map(|snapshot| {
+            let config = crate::plugins::config_view(&cfg, &snapshot.name);
+            BuiltinView { snapshot, config }
+        })
         .collect();
     PluginsView {
         dir: cfg.plugins.dir.clone(),
         watch: cfg.plugins.watch,
         builtin,
-        dynamic: state.hub.list(&running).await,
+        dynamic: state.hub.list(&running, &cfg.plugins.configs).await,
     }
 }
 

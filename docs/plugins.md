@@ -92,6 +92,15 @@ cfg.fun_allow_mutate / fun_admins / cfg.is_fun_admin(qq) / fun_delete_files
 
 热加载后这里读到的是新值。
 
+动态插件自己的 JSON 配置：
+
+```rust
+let v = ctx.plugin_config(self.name()).await;
+// 对应 config.toml 里 [plugins.configs.<name>]
+```
+
+管理页可以对每个动态插件改这份 JSON；保存后只重启这一个插件。内置插件仍用上面的 typed 字段。
+
 ### 协议（尽量走上面的封装）
 
 ```rust

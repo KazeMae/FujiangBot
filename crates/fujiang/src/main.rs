@@ -76,6 +76,7 @@ async fn run(path: PathBuf) -> anyhow::Result<()> {
             .user_agent("fujiang-bot/0.1")
             .build()?,
         config: Arc::new(RwLock::new(cfg.to_bot_config())),
+        plugin_configs: Arc::new(RwLock::new(plugins::all_configs(&cfg))),
     };
     dispatcher.start_all(&ctx).await?;
 

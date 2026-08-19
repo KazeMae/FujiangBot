@@ -54,6 +54,10 @@ delete_files_on_album_del = false
 [plugins.luck]
 enabled = true
 
+# 动态插件各自一份 JSON，例如：
+# [plugins.configs.echo]
+# prefix = "."
+
 # 内嵌配置页，不要和 adapter.event_listen 抢端口
 [admin]
 listen = "127.0.0.1:8787"
