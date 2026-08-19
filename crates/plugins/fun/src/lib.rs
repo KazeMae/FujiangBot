@@ -24,10 +24,15 @@ const HELP: &str = "学话、收藏夹、图库。改学习/图库默认要在 f
 回复一张图 + .删除<tag>      只摘这一个 tag\n\
 回复一张图 + .标签           列出这张图的全部 tag";
 
+#[derive(Default)]
 pub struct FunPlugin;
 
 #[async_trait]
 impl Plugin for FunPlugin {
+    fn meta(&self) -> fujiang_core::PluginMeta {
+        fujiang_core::PluginMeta::new("fun", "学话、收藏夹、图库", self.commands())
+    }
+
     fn name(&self) -> &'static str {
         "fun"
     }

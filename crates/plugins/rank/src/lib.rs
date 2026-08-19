@@ -36,6 +36,10 @@ pub struct RankPlugin {
 
 #[async_trait]
 impl Plugin for RankPlugin {
+    fn meta(&self) -> fujiang_core::PluginMeta {
+        fujiang_core::PluginMeta::new("rank", "Codeforces 排行与生涯", self.commands())
+    }
+
     fn name(&self) -> &'static str {
         "rank"
     }

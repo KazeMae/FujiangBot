@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::config::{AdapterBackend, AppConfig};
+use crate::dynload::PluginHub;
 use crate::plugins;
 
 pub struct AppState {
@@ -17,6 +18,7 @@ pub struct AppState {
     pub cfg: RwLock<AppConfig>,
     pub ctx: BotContext,
     pub dispatcher: Arc<Dispatcher>,
+    pub hub: Arc<PluginHub>,
     pub event_tx: mpsc::Sender<Event>,
     gateway: Mutex<Option<GatewaySlot>>,
     apply_lock: Mutex<()>,
@@ -40,6 +42,7 @@ impl AppState {
         cfg: AppConfig,
         ctx: BotContext,
         dispatcher: Arc<Dispatcher>,
+        hub: Arc<PluginHub>,
         event_tx: mpsc::Sender<Event>,
     ) -> Self {
         Self {
@@ -47,6 +50,7 @@ impl AppState {
             cfg: RwLock::new(cfg),
             ctx,
             dispatcher,
+            hub,
             event_tx,
             gateway: Mutex::new(None),
             apply_lock: Mutex::new(()),
@@ -83,6 +87,12 @@ impl AppState {
         }
         if old.admin.listen != next.admin.listen {
             report.restart_required.push("admin.listen".into());
+        }
+        if old.plugins.dir != next.plugins.dir {
+            report.restart_required.push("plugins.dir".into());
+        }
+        if old.plugins.watch != next.plugins.watch {
+            report.restart_required.push("plugins.watch".into());
         }
 
         *self.ctx.config.write().await = next.to_bot_config();

@@ -4,10 +4,15 @@ use fujiang_core::{BotContext, Event, Flow, Plugin};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
+#[derive(Default)]
 pub struct LuckPlugin;
 
 #[async_trait]
 impl Plugin for LuckPlugin {
+    fn meta(&self) -> fujiang_core::PluginMeta {
+        fujiang_core::PluginMeta::new("luck", "每日幸运数字", self.commands())
+    }
+
     fn name(&self) -> &'static str {
         "luck"
     }

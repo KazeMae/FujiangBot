@@ -11,6 +11,7 @@ members = [
     "crates/plugins/problem",
     "crates/plugins/fun",
     "crates/plugins/luck",
+    "crates/plugins/echo",
 ]
 
 [workspace.package]
@@ -44,3 +45,4 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 hex = "0.4"
+libloading = "0.8"

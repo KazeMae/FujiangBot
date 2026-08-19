@@ -4,7 +4,32 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use crate::event::Event;
-use crate::plugin::{BotContext, Flow, Plugin};
+use crate::plugin::{BotContext, Flow, Plugin, PluginMeta};
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PluginSnapshot {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub commands: Vec<String>,
+}
+
+impl PluginSnapshot {
+    pub fn from_plugin(p: &dyn Plugin) -> Self {
+        let PluginMeta {
+            name,
+            version,
+            description,
+            commands,
+        } = p.meta();
+        Self {
+            name: name.into(),
+            version: version.into(),
+            description: description.into(),
+            commands: commands.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+}
 
 pub struct Dispatcher {
     plugins: RwLock<Vec<Arc<dyn Plugin>>>,
@@ -26,12 +51,21 @@ impl Dispatcher {
             .collect()
     }
 
+    pub async fn info_list(&self) -> Vec<PluginSnapshot> {
+        self.plugins
+            .read()
+            .await
+            .iter()
+            .map(|p| PluginSnapshot::from_plugin(p.as_ref()))
+            .collect()
+    }
+
     pub async fn help_text(&self, prefix: &str) -> String {
         let mut s = format!("菜单（前缀 `{prefix}`，指令区分大小写）\n\n");
         for p in self.plugins.read().await.iter() {
             s.push_str(&format!("【{}】\n{}\n\n", p.name(), p.help().trim()));
         }
-        s.push_str("直接发 .contest / .rank / .problem / .learn / .luck 也能看对应说明。");
+        s.push_str("发各插件自己的入口命令（如 .contest、.ping）也能看对应说明。");
         s
     }
 

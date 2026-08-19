@@ -99,8 +99,58 @@ fn is_http_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
 
+/// Bump when `Plugin` / `BotContext` layout or the create symbol changes.
+pub const PLUGIN_ABI: u32 = 1;
+
+#[derive(Debug, Clone, Copy)]
+pub struct PluginMeta {
+    pub name: &'static str,
+    pub version: &'static str,
+    pub description: &'static str,
+    pub commands: &'static [&'static str],
+}
+
+impl PluginMeta {
+    pub fn new(
+        name: &'static str,
+        description: &'static str,
+        commands: &'static [&'static str],
+    ) -> Self {
+        Self {
+            name,
+            version: env!("CARGO_PKG_VERSION"),
+            description,
+            commands,
+        }
+    }
+}
+
+/// Export a type as a loadable cdylib.
+///
+/// The `.so` / `.dylib` must be built from this workspace (same rustc + fujiang-core).
+/// `create` returns a thin pointer to `Box<dyn Plugin>`.
+#[macro_export]
+macro_rules! declare_plugin {
+    ($ty:ty) => {
+        #[no_mangle]
+        pub extern "C" fn fujiang_plugin_abi() -> u32 {
+            $crate::PLUGIN_ABI
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C" fn fujiang_create_plugin() -> *mut Box<dyn $crate::Plugin> {
+            let plugin: Box<dyn $crate::Plugin> = Box::new(<$ty>::default());
+            Box::into_raw(Box::new(plugin))
+        }
+    };
+}
+
 #[async_trait]
 pub trait Plugin: Send + Sync {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta::new(self.name(), "", self.commands())
+    }
+
     fn name(&self) -> &'static str;
     fn help(&self) -> &'static str;
     fn commands(&self) -> &'static [&'static str] {

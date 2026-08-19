@@ -16,10 +16,15 @@ const BANDS: &[(&str, &str)] = &[
     ("1600-2000", "1600 2000 !*special new"),
 ];
 
+#[derive(Default)]
 pub struct ProblemPlugin;
 
 #[async_trait]
 impl Plugin for ProblemPlugin {
+    fn meta(&self) -> fujiang_core::PluginMeta {
+        fujiang_core::PluginMeta::new("problem", "CF 抽题与每日一题", self.commands())
+    }
+
     fn name(&self) -> &'static str {
         "problem"
     }

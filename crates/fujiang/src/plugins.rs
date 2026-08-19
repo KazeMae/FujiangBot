@@ -15,9 +15,9 @@ pub fn make(name: &str) -> Option<Arc<dyn Plugin>> {
     Some(match name {
         "contest" => Arc::new(ContestPlugin::default()),
         "rank" => Arc::new(RankPlugin::default()),
-        "problem" => Arc::new(ProblemPlugin),
-        "fun" => Arc::new(FunPlugin),
-        "luck" => Arc::new(LuckPlugin),
+        "problem" => Arc::new(ProblemPlugin::default()),
+        "fun" => Arc::new(FunPlugin::default()),
+        "luck" => Arc::new(LuckPlugin::default()),
         _ => return None,
     })
 }

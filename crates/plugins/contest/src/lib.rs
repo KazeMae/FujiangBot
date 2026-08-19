@@ -23,6 +23,10 @@ pub struct ContestPlugin {
 
 #[async_trait]
 impl Plugin for ContestPlugin {
+    fn meta(&self) -> fujiang_core::PluginMeta {
+        fujiang_core::PluginMeta::new("contest", "比赛日历与开赛提醒", self.commands())
+    }
+
     fn name(&self) -> &'static str {
         "contest"
     }

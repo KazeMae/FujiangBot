@@ -111,8 +111,14 @@ impl Default for AdminSection {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginsSection {
+    /// 动态 .so / .dylib 目录；放入即可热加载
+    #[serde(default = "default_plugin_dir")]
+    pub dir: String,
+    /// 监视目录，文件增删改会自动加载/卸载
+    #[serde(default = "default_true")]
+    pub watch: bool,
     #[serde(default)]
     pub contest: PluginToggle,
     #[serde(default)]
@@ -123,6 +129,20 @@ pub struct PluginsSection {
     pub fun: FunToggle,
     #[serde(default)]
     pub luck: PluginToggle,
+}
+
+impl Default for PluginsSection {
+    fn default() -> Self {
+        Self {
+            dir: default_plugin_dir(),
+            watch: true,
+            contest: PluginToggle::default(),
+            rank: PluginToggle::default(),
+            problem: PluginToggle::default(),
+            fun: FunToggle::default(),
+            luck: PluginToggle::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,6 +220,9 @@ fn default_event_listen() -> String {
 }
 fn default_admin_listen() -> String {
     "127.0.0.1:8787".into()
+}
+fn default_plugin_dir() -> String {
+    "plugins".into()
 }
 
 pub const SECRET_MASK: &str = "********";

@@ -29,6 +29,10 @@ username = ""
 api_key = ""
 limit = 10
 
+[plugins]
+dir = "plugins"
+watch = true
+
 [plugins.contest]
 enabled = true
 update_minutes = 60

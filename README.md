@@ -5,8 +5,8 @@
 ## 架构
 
 ```
-插件 (contest / rank / problem / fun / luck)
-        │  统一 Event / Segment / BotContext
+插件 (内置 + plugins/*.so 热插)
+        │  统一 Event / Segment / BotContext / PluginMeta
         ▼
 fujiang-core          分发、ACL、调度、帮助
         │
@@ -65,6 +65,15 @@ cargo run -p fujiang -- migrate --from ./FujiangBot --config config.toml
 ## 插件
 
 群里发 `.help` 会拼出当前已启用插件的说明。前缀默认 `.`，区分大小写。
+
+内置插件按 `PluginMeta` 登记（名字、版本、简介、命令）。额外插件编译成 `.so` / `.dylib` 放到 `plugins/`（`[plugins].dir`），进程会扫描并在 `watch = true` 时热加载。写法见 [插件约定](docs/plugins.md)。示例：
+
+```bash
+cargo build -p fujiang-plugin-echo
+cp target/debug/libfujiang_plugin_echo.dylib plugins/   # Linux 用 .so
+```
+
+群里 `.ping` 应回复 `pong`。管理页可以手动加载 / 卸载 / 重载。`.so` 必须用本仓库同一套 rustc 编，不能跨版本拷贝。
 
 ### contest
 
@@ -141,6 +150,7 @@ Codeforces 排行。`.rank` 和 `.rk` 相同。`{year*}` 可写多个年级，�
 
 ## 文档
 
+- [插件约定与动态加载](docs/plugins.md)
 - [本期不做](docs/out-of-scope.md)
 - [以后再说](docs/later.md)
 - [napcat-sdk API 缺口](crates/napcat-sdk/API_GAP.md)

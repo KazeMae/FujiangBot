@@ -5,7 +5,7 @@ use axum::extract::State;
 use axum::http::{Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -33,6 +33,11 @@ fn router(state: Arc<AppState>) -> Router {
     let api = Router::new()
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/status", get(get_status))
+        .route("/api/plugins", get(get_plugins))
+        .route("/api/plugins/scan", post(scan_plugins))
+        .route("/api/plugins/load", post(load_plugin))
+        .route("/api/plugins/unload", post(unload_plugin))
+        .route("/api/plugins/reload", post(reload_plugin))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
     Router::new()
         .route("/", get(index))
@@ -70,6 +75,134 @@ async fn get_config(State(state): State<Arc<AppState>>) -> Json<ConfigView> {
 
 async fn get_status(State(state): State<Arc<AppState>>) -> Json<StatusView> {
     Json(status_view(&state).await)
+}
+
+#[derive(Serialize)]
+struct PluginsView {
+    dir: String,
+    watch: bool,
+    builtin: Vec<fujiang_core::PluginSnapshot>,
+    dynamic: Vec<crate::dynload::DynamicPluginView>,
+}
+
+#[derive(serde::Deserialize)]
+struct PathBody {
+    path: String,
+}
+
+#[derive(serde::Deserialize)]
+struct NameBody {
+    name: String,
+}
+
+async fn get_plugins(State(state): State<Arc<AppState>>) -> Json<PluginsView> {
+    Json(plugins_view(&state).await)
+}
+
+async fn scan_plugins(State(state): State<Arc<AppState>>) -> Response {
+    match state.hub.scan(&state.dispatcher, &state.ctx).await {
+        Ok(changed) => Json(serde_json::json!({
+            "ok": true,
+            "changed": changed,
+            "plugins": plugins_view(&state).await,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: format!("{e:#}"),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn load_plugin(State(state): State<Arc<AppState>>, Json(body): Json<PathBody>) -> Response {
+    match state
+        .hub
+        .load(
+            std::path::Path::new(&body.path),
+            &state.dispatcher,
+            &state.ctx,
+        )
+        .await
+    {
+        Ok(name) => Json(serde_json::json!({
+            "ok": true,
+            "name": name,
+            "plugins": plugins_view(&state).await,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: format!("{e:#}"),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn unload_plugin(State(state): State<Arc<AppState>>, Json(body): Json<NameBody>) -> Response {
+    match state.hub.unload(&body.name, &state.dispatcher).await {
+        Ok(true) => Json(serde_json::json!({
+            "ok": true,
+            "plugins": plugins_view(&state).await,
+        }))
+        .into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: format!("未加载「{}」", body.name),
+            }),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: format!("{e:#}"),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn reload_plugin(State(state): State<Arc<AppState>>, Json(body): Json<NameBody>) -> Response {
+    match state
+        .hub
+        .reload(&body.name, &state.dispatcher, &state.ctx)
+        .await
+    {
+        Ok(name) => Json(serde_json::json!({
+            "ok": true,
+            "name": name,
+            "plugins": plugins_view(&state).await,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: format!("{e:#}"),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn plugins_view(state: &AppState) -> PluginsView {
+    let cfg = state.cfg.read().await;
+    let running = state.dispatcher.names().await;
+    let all = state.dispatcher.info_list().await;
+    let builtin = all
+        .into_iter()
+        .filter(|p| crate::plugins::NAMES.contains(&p.name.as_str()))
+        .collect();
+    PluginsView {
+        dir: cfg.plugins.dir.clone(),
+        watch: cfg.plugins.watch,
+        builtin,
+        dynamic: state.hub.list(&running).await,
+    }
 }
 
 async fn put_config(State(state): State<Arc<AppState>>, Json(body): Json<AppConfig>) -> Response {
@@ -110,6 +243,8 @@ async fn view(state: &AppState) -> ConfigView {
             "store.image_root",
             "store.archive_dir",
             "admin.listen",
+            "plugins.dir",
+            "plugins.watch",
         ],
     }
 }

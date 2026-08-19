@@ -15,3 +15,9 @@ config.toml
 # old Python project (nested git + secrets + image dump)
 /FujiangBot/
 /legacy/
+
+/plugins/*.so
+/plugins/*.dylib
+/plugins/*.dll
+/plugins/*.dll.lib
+/plugins/*.exp
