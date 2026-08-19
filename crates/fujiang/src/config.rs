@@ -34,6 +34,13 @@ pub struct BotSection {
 pub struct StoreSection {
     pub db: String,
     pub image_root: String,
+    #[serde(default = "default_archive_dir")]
+    pub archive_dir: String,
+    /// 早于这么多天的消息搬进 archive_dir；0 表示不归档
+    #[serde(default = "default_archive_days")]
+    pub archive_after_days: u64,
+    #[serde(default = "default_archive_hours")]
+    pub archive_every_hours: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +125,15 @@ fn default_60() -> u64 {
 fn default_4() -> u32 {
     4
 }
+fn default_archive_dir() -> String {
+    "data/archive".into()
+}
+fn default_archive_days() -> u64 {
+    30
+}
+fn default_archive_hours() -> u64 {
+    24
+}
 
 impl AppConfig {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
@@ -152,6 +168,9 @@ impl AppConfig {
             store: StoreSection {
                 db: "data/fujiang.db".into(),
                 image_root: "data/images".into(),
+                archive_dir: default_archive_dir(),
+                archive_after_days: default_archive_days(),
+                archive_every_hours: default_archive_hours(),
             },
             clist: ClistSection {
                 username: String::new(),

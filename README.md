@@ -39,6 +39,8 @@ cargo run -p fujiang -- migrate --from ./FujiangBot --config config.toml
 
 关掉某个插件：在 `config.toml` 里设 `[plugins.<name>].enabled = false`。
 
+消息按群分表（`msg_g<群号>`，私聊 `msg_pm`）。超过 `archive_after_days` 的记录按月落到 `archive_dir`（如 `data/archive/msg_g741798363_202608.sqlite`）。`archive_after_days = 0` 关闭归档。
+
 ## 插件
 
 | 插件 | 命令 |
@@ -46,7 +48,7 @@ cargo run -p fujiang -- migrate --from ./FujiangBot --config config.toml
 | contest | `.contest` `.cf` `.lg` `.nc` `.atc` `.scpc` `*all` `.day` `.bot` `.remindHH:MM` `.remindoff` |
 | rank | `.rank` / `.rk` |
 | problem | `.problem` `.tag` `.每日一题` |
-| fun | `.learn` `.star` `.album` `来只xx` 回图添加/删除 |
+| fun | `.learn`（按群隔离） `.star` `.idea` `来只xx` 回图挂/摘 idea |
 | luck | `.luck N` |
 
 ## 文档

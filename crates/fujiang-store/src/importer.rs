@@ -6,7 +6,7 @@ use serde_json::Value;
 use tracing::{info, warn};
 use walkdir::WalkDir;
 
-use crate::{md5_hex, AlbumAddResult, CfUser, StandingRow, Store};
+use crate::{AttachResult, CfUser, StandingRow, Store};
 
 /// Import useful JSON / images from the old Python tree. Secrets are skipped.
 pub async fn migrate_from_python(store: &Store, from: &Path) -> anyhow::Result<String> {
@@ -122,6 +122,7 @@ async fn import_learn(store: &Store, path: &Path) -> anyhow::Result<Option<(usiz
                 _ => vec![],
             };
             for r in replies {
+                // 旧 JSON 没有群号，记入私聊空间，不会串到群。
                 store.learn_add(k, &r, 0, None).await?;
                 learn_n += 1;
             }
@@ -200,10 +201,10 @@ async fn import_gallery(store: &Store, from: &Path) -> anyhow::Result<Option<usi
 
     for (folder, names) in folder_to_names {
         let primary = names.first().cloned().unwrap_or_else(|| folder.clone());
-        let album = store.album_add(&primary).await?;
+        store.idea_ensure(&primary).await?;
         for alias in &names {
             if alias != &primary {
-                store.album_alias(&primary, alias).await.ok();
+                store.idea_alias(&primary, alias).await.ok();
             }
         }
         let dir = src.join(&folder);
@@ -230,12 +231,12 @@ async fn import_gallery(store: &Store, from: &Path) -> anyhow::Result<Option<usi
                     continue;
                 }
             };
-            match store.album_add_image(&album.name, &bytes, &ext, 0).await? {
-                AlbumAddResult::Added => n += 1,
-                AlbumAddResult::Duplicate => {}
+            let img = store.image_upsert(&bytes, &ext, 0).await?;
+            match store.image_attach(&img.md5, &primary, 0).await? {
+                AttachResult::Attached => n += 1,
+                AttachResult::Already => {}
             }
         }
-        let _ = md5_hex; // keep import used if empty
     }
     info!(n, "imported gallery images");
     Ok(Some(n))

@@ -10,6 +10,9 @@ allow_private = true
 [store]
 db = "data/fujiang.db"
 image_root = "data/images"
+archive_dir = "data/archive"
+archive_after_days = 30
+archive_every_hours = 24
 
 [clist]
 username = ""

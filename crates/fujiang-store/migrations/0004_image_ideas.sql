@@ -1,0 +1,27 @@
+CREATE TABLE IF NOT EXISTS images (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    md5 TEXT NOT NULL UNIQUE,
+    rel_path TEXT NOT NULL,
+    added_by INTEGER NOT NULL DEFAULT 0,
+    added_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ideas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS idea_aliases (
+    alias TEXT PRIMARY KEY,
+    idea_id INTEGER NOT NULL REFERENCES ideas(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS image_ideas (
+    image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+    idea_id INTEGER NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,
+    added_by INTEGER NOT NULL DEFAULT 0,
+    added_at INTEGER NOT NULL,
+    PRIMARY KEY (image_id, idea_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_image_ideas_idea ON image_ideas(idea_id);

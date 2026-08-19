@@ -91,18 +91,64 @@ pub struct Star {
 }
 
 #[derive(Debug, Clone, FromRow)]
-pub struct Album {
+pub struct Idea {
     pub id: i64,
     pub name: String,
-    pub dir: String,
 }
 
 #[derive(Debug, Clone, FromRow)]
-pub struct AlbumImage {
+pub struct ImageRow {
     pub id: i64,
-    pub album_id: i64,
-    pub rel_path: String,
     pub md5: String,
+    pub rel_path: String,
     pub added_by: i64,
     pub added_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct IdeaListItem {
+    pub idea: Idea,
+    pub image_count: i64,
+    pub aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachResult {
+    Attached,
+    Already,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetachResult {
+    Detached,
+    NoSuchIdea,
+    UnknownImage,
+}
+
+#[derive(Debug, Clone)]
+pub struct MessageLog {
+    pub message_id: i64,
+    pub time: i64,
+    pub self_id: i64,
+    pub user_id: i64,
+    pub group_id: Option<i64>,
+    pub nickname: Option<String>,
+    pub card: Option<String>,
+    pub raw_text: String,
+    pub segments_json: String,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct StoredMessage {
+    pub id: i64,
+    pub message_id: i64,
+    pub time: i64,
+    pub self_id: i64,
+    pub user_id: i64,
+    pub group_id: Option<i64>,
+    pub nickname: Option<String>,
+    pub card: Option<String>,
+    pub raw_text: String,
+    pub segments_json: String,
+    pub inserted_at: i64,
 }

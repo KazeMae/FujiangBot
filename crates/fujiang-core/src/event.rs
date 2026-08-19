@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Source {
     Group { id: i64 },
     Friend { id: i64 },
@@ -16,15 +17,22 @@ impl Source {
     pub fn is_group(self) -> bool {
         matches!(self, Self::Group { .. })
     }
+
+    pub fn group_id(self) -> Option<i64> {
+        match self {
+            Self::Group { id } => Some(id),
+            Self::Friend { .. } => None,
+        }
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AtTarget {
     User(i64),
     All,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Media {
     Url(String),
     Path(String),
@@ -47,7 +55,7 @@ impl Media {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Segment {
     Text { text: String },
     At { target: AtTarget },

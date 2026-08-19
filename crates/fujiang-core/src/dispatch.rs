@@ -36,6 +36,9 @@ impl Dispatcher {
             if !ctx.config.allowed(msg.source) {
                 return;
             }
+            if let Err(e) = persist_message(ctx, msg).await {
+                error!(error = %e, message_id = msg.id, "persist message");
+            }
             let line = msg.command_line();
             if line == format!("{}help", ctx.config.command_prefix) {
                 if let Err(e) = ctx
@@ -62,4 +65,21 @@ impl Dispatcher {
             }
         }
     }
+}
+
+async fn persist_message(ctx: &BotContext, msg: &crate::event::MessageEvent) -> anyhow::Result<()> {
+    let segments_json = serde_json::to_string(&msg.segments).unwrap_or_else(|_| "[]".into());
+    ctx.store
+        .insert_message(&fujiang_store::MessageLog {
+            message_id: msg.id,
+            time: msg.time,
+            self_id: msg.self_id,
+            user_id: msg.user_id(),
+            group_id: msg.source.group_id(),
+            nickname: msg.sender.nickname.clone(),
+            card: msg.sender.card.clone(),
+            raw_text: msg.raw_text.clone(),
+            segments_json,
+        })
+        .await
 }

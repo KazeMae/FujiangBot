@@ -1,15 +1,17 @@
 use async_trait::async_trait;
 use fujiang_core::{BotContext, Event, Flow, Media, Plugin};
-use fujiang_store::AlbumAddResult;
+use fujiang_store::{AttachResult, DetachResult};
 use tracing::warn;
 
-const HELP: &str = ".learn add <触发词> <回复>\n\
+const HELP: &str = ".learn add <触发词> <回复>   （仅当前群/私聊）\n\
 .learn list [触发词]\n\
 .learn del <触发词> [n]\n\
 .star / .star add|set|del\n\
-.album list|add|alias|merge|del\n\
-来只<名>  随机图\n\
-回复图片 + .添加<名> / .删除<名>";
+.idea list | alias | merge | retire\n\
+来只<idea>  随机一张挂了该 idea 的图\n\
+回复图 + .添加<idea>  给这张图挂 idea（可多个）\n\
+回复图 + .删除<idea>  只摘掉这一个 idea，不删文件\n\
+回复图 + .想法        列出这张图的全部 idea";
 
 pub struct FunPlugin;
 
@@ -24,7 +26,9 @@ impl Plugin for FunPlugin {
     }
 
     fn commands(&self) -> &'static [&'static str] {
-        &[".learn", ".star", ".album", ".添加", ".删除"]
+        &[
+            ".learn", ".star", ".idea", ".album", ".添加", ".删除", ".想法",
+        ]
     }
 
     async fn handle(&self, ctx: &BotContext, ev: &Event) -> anyhow::Result<Flow> {
@@ -45,8 +49,13 @@ impl Plugin for FunPlugin {
             handle_star(ctx, msg, &parts).await?;
             return Ok(Flow::Stop);
         }
-        if parts[0] == ".album" {
-            handle_album(ctx, msg, &parts).await?;
+        if parts[0] == ".idea" || parts[0] == ".album" {
+            handle_idea(ctx, msg, &parts).await?;
+            return Ok(Flow::Stop);
+        }
+
+        if line == ".想法" {
+            handle_show_ideas(ctx, msg).await?;
             return Ok(Flow::Stop);
         }
 
@@ -57,7 +66,7 @@ impl Plugin for FunPlugin {
 
         if let Some(name) = line.strip_prefix("来只") {
             if !name.is_empty() {
-                match ctx.store.album_random_image(name).await? {
+                match ctx.store.random_by_idea(name).await? {
                     Some(path) if path.exists() => {
                         ctx.send_image(msg.source, path.to_string_lossy()).await?;
                     }
@@ -67,7 +76,7 @@ impl Plugin for FunPlugin {
             }
         }
 
-        if let Some(reply) = ctx.store.learn_random(&line).await? {
+        if let Some(reply) = ctx.store.learn_random(msg.source.group_id(), &line).await? {
             ctx.reply_text(msg, reply).await?;
             return Ok(Flow::Continue);
         }
@@ -103,13 +112,13 @@ async fn handle_learn(
                 return Ok(());
             }
             ctx.store
-                .learn_add(rest[2], rest[3], msg.user_id(), None)
+                .learn_add(rest[2], rest[3], msg.user_id(), msg.source.group_id())
                 .await?;
             ctx.reply_text(msg, "learned").await?;
         }
         "list" => {
             let trigger = parts.get(2).copied();
-            let rows = ctx.store.learn_list(trigger).await?;
+            let rows = ctx.store.learn_list(msg.source.group_id(), trigger).await?;
             if rows.is_empty() {
                 ctx.reply_text(msg, "空").await?;
                 return Ok(());
@@ -130,7 +139,10 @@ async fn handle_learn(
                 return Ok(());
             }
             let n = parts.get(3).and_then(|x| x.parse().ok());
-            let c = ctx.store.learn_del(parts[2], n).await?;
+            let c = ctx
+                .store
+                .learn_del(msg.source.group_id(), parts[2], n)
+                .await?;
             ctx.reply_text(msg, format!("已删除 {c} 条")).await?;
         }
         _ => {
@@ -201,20 +213,23 @@ async fn handle_star(
     Ok(())
 }
 
-async fn handle_album(
+async fn handle_idea(
     ctx: &BotContext,
     msg: &fujiang_core::MessageEvent,
     parts: &[&str],
 ) -> anyhow::Result<()> {
     if parts.len() < 2 || parts[1] == "list" {
-        let list = ctx.store.album_list().await?;
+        let list = ctx.store.idea_list().await?;
         if list.is_empty() {
-            ctx.reply_text(msg, "还没有图集").await?;
+            ctx.reply_text(msg, "还没有 idea").await?;
             return Ok(());
         }
-        let mut s = String::from("图集：");
-        for (a, aliases) in list {
-            s.push_str(&format!("\n{}  别名:{aliases:?}", a.name));
+        let mut s = String::from("idea：");
+        for item in list {
+            s.push_str(&format!(
+                "\n{}  {}张  别名:{:?}",
+                item.idea.name, item.image_count, item.aliases
+            ));
         }
         ctx.reply_text(msg, s).await?;
         return Ok(());
@@ -225,27 +240,31 @@ async fn handle_album(
     }
     match parts[1] {
         "add" if parts.len() == 3 => {
-            ctx.store.album_add(parts[2]).await?;
+            ctx.store.idea_ensure(parts[2]).await?;
             ctx.reply_text(msg, "ok").await?;
         }
         "alias" if parts.len() == 4 => {
-            let t = ctx.store.album_alias(parts[2], parts[3]).await?;
+            let t = ctx.store.idea_alias(parts[2], parts[3]).await?;
             ctx.reply_text(msg, t).await?;
         }
         "merge" if parts.len() == 4 => {
-            let t = ctx.store.album_merge(parts[2], parts[3]).await?;
+            let t = ctx.store.idea_merge(parts[2], parts[3]).await?;
             ctx.reply_text(msg, t).await?;
         }
-        "del" if parts.len() == 3 => {
-            let ok = ctx
-                .store
-                .album_del(parts[2], ctx.config.fun_delete_files)
-                .await?;
-            ctx.reply_text(msg, if ok { "已删除映射" } else { "不存在" })
-                .await?;
+        "retire" | "del" if parts.len() == 3 => {
+            let ok = ctx.store.idea_retire(parts[2]).await?;
+            ctx.reply_text(
+                msg,
+                if ok {
+                    "已去掉这个 idea（图片文件还在）"
+                } else {
+                    "不存在"
+                },
+            )
+            .await?;
         }
         _ => {
-            ctx.reply_text(msg, "格式：.album list|add|alias|merge|del")
+            ctx.reply_text(msg, "格式：.idea list|add|alias|merge|retire")
                 .await?;
         }
     }
@@ -289,31 +308,70 @@ async fn handle_image_cmd(
         }
     };
     let bytes = tokio::fs::read(&path).await?;
-    let md5 = fujiang_store::md5_hex(&bytes);
     if add {
+        let img = ctx.store.image_upsert(&bytes, "jpg", msg.user_id()).await?;
         let text = match ctx
             .store
-            .album_add_image(&name, &bytes, "jpg", msg.user_id())
+            .image_attach(&img.md5, &name, msg.user_id())
             .await?
         {
-            AlbumAddResult::Added => "添加成功🤫",
-            AlbumAddResult::Duplicate => "图片已存在😪",
+            AttachResult::Attached => format!("已挂上 idea「{name}」🤫"),
+            AttachResult::Already => format!("这张图已有 idea「{name}」"),
         };
         ctx.reply_text(msg, text).await?;
     } else {
-        let ok = ctx
-            .store
-            .album_del_image_by_md5(&name, &md5, ctx.config.fun_delete_files)
-            .await?;
-        ctx.reply_text(
-            msg,
-            if ok {
-                "图片已删除🤪"
-            } else {
-                "图片不存在😵‍💫"
-            },
-        )
-        .await?;
+        let md5 = fujiang_store::md5_hex(&bytes);
+        let text = match ctx.store.image_detach(&md5, &name).await? {
+            DetachResult::Detached => format!("已从这张图去掉 idea「{name}」"),
+            DetachResult::NoSuchIdea => format!("这张图没有 idea「{name}」"),
+            DetachResult::UnknownImage => "图库里没有这张图".into(),
+        };
+        ctx.reply_text(msg, text).await?;
     }
     Ok(())
+}
+
+async fn handle_show_ideas(
+    ctx: &BotContext,
+    msg: &fujiang_core::MessageEvent,
+) -> anyhow::Result<()> {
+    let Some(md5) = reply_image_md5(ctx, msg).await? else {
+        return Ok(());
+    };
+    let ideas = ctx.store.image_ideas(&md5).await?;
+    if ideas.is_empty() {
+        ctx.reply_text(msg, "这张图还没有 idea").await?;
+    } else {
+        ctx.reply_text(msg, format!("这张图的 idea：{}", ideas.join("、")))
+            .await?;
+    }
+    Ok(())
+}
+
+async fn reply_image_md5(
+    ctx: &BotContext,
+    msg: &fujiang_core::MessageEvent,
+) -> anyhow::Result<Option<String>> {
+    let Some(rid) = msg.reply_id() else {
+        ctx.reply_text(msg, "请先回复一张图片").await?;
+        return Ok(None);
+    };
+    let quoted = ctx.messenger.get_message(rid).await?;
+    let Some(media) = quoted.first_image() else {
+        ctx.reply_text(msg, "回复的不是图片").await?;
+        return Ok(None);
+    };
+    let file = match media {
+        Media::Url(u) | Media::Path(u) | Media::FileId(u) | Media::Base64(u) => u.clone(),
+    };
+    let path = match ctx.messenger.get_image(&file).await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(error = %e, "get_image");
+            ctx.reply_text(msg, "ERROR😪").await?;
+            return Ok(None);
+        }
+    };
+    let bytes = tokio::fs::read(&path).await?;
+    Ok(Some(fujiang_store::md5_hex(&bytes)))
 }
