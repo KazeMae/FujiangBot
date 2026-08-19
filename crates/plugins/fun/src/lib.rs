@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use fujiang_core::{BotContext, Event, Flow, Plugin};
+use fujiang_core::{BotContext, Event, Flow, Plugin, PluginScope};
 use fujiang_store::{AttachResult, DetachResult};
 use tracing::warn;
 
@@ -47,7 +47,12 @@ impl Plugin for FunPlugin {
         ]
     }
 
-    async fn handle(&self, ctx: &BotContext, ev: &Event) -> anyhow::Result<Flow> {
+    async fn handle(
+        &self,
+        ctx: &BotContext,
+        ev: &Event,
+        _scope: &PluginScope,
+    ) -> anyhow::Result<Flow> {
         let Some(msg) = ev.as_message() else {
             return Ok(Flow::Continue);
         };

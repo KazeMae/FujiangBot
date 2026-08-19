@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::event::{Event, MessageEvent, Segment, Source};
+use crate::scope::PluginScope;
 use crate::BotConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,7 +101,7 @@ fn is_http_url(s: &str) -> bool {
 }
 
 /// Bump when `Plugin` / `BotContext` layout or the create symbol changes.
-pub const PLUGIN_ABI: u32 = 1;
+pub const PLUGIN_ABI: u32 = 2;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PluginMeta {
@@ -157,7 +158,7 @@ pub trait Plugin: Send + Sync {
         &[]
     }
 
-    async fn on_start(&self, _ctx: &BotContext) -> anyhow::Result<()> {
+    async fn on_start(&self, _ctx: &BotContext, _scope: &PluginScope) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -165,5 +166,10 @@ pub trait Plugin: Send + Sync {
         Ok(())
     }
 
-    async fn handle(&self, ctx: &BotContext, ev: &Event) -> anyhow::Result<Flow>;
+    async fn handle(
+        &self,
+        ctx: &BotContext,
+        ev: &Event,
+        scope: &PluginScope,
+    ) -> anyhow::Result<Flow>;
 }

@@ -5,6 +5,7 @@ use tracing::{error, info};
 
 use crate::event::Event;
 use crate::plugin::{BotContext, Flow, Plugin, PluginMeta};
+use crate::scope::PluginScope;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PluginSnapshot {
@@ -31,14 +32,27 @@ impl PluginSnapshot {
     }
 }
 
+struct PluginSlot {
+    plugin: Arc<dyn Plugin>,
+    scope: Arc<PluginScope>,
+}
+
 pub struct Dispatcher {
-    plugins: RwLock<Vec<Arc<dyn Plugin>>>,
+    plugins: RwLock<Vec<PluginSlot>>,
 }
 
 impl Dispatcher {
     pub fn new(plugins: Vec<Arc<dyn Plugin>>) -> Self {
         Self {
-            plugins: RwLock::new(plugins),
+            plugins: RwLock::new(
+                plugins
+                    .into_iter()
+                    .map(|plugin| PluginSlot {
+                        plugin,
+                        scope: Arc::new(PluginScope::new()),
+                    })
+                    .collect(),
+            ),
         }
     }
 
@@ -47,7 +61,7 @@ impl Dispatcher {
             .read()
             .await
             .iter()
-            .map(|p| p.name().to_string())
+            .map(|s| s.plugin.name().to_string())
             .collect()
     }
 
@@ -56,33 +70,41 @@ impl Dispatcher {
             .read()
             .await
             .iter()
-            .map(|p| PluginSnapshot::from_plugin(p.as_ref()))
+            .map(|s| PluginSnapshot::from_plugin(s.plugin.as_ref()))
             .collect()
     }
 
     pub async fn help_text(&self, prefix: &str) -> String {
         let mut s = format!("菜单（前缀 `{prefix}`，指令区分大小写）\n\n");
-        for p in self.plugins.read().await.iter() {
-            s.push_str(&format!("【{}】\n{}\n\n", p.name(), p.help().trim()));
+        for slot in self.plugins.read().await.iter() {
+            s.push_str(&format!(
+                "【{}】\n{}\n\n",
+                slot.plugin.name(),
+                slot.plugin.help().trim()
+            ));
         }
         s.push_str("发各插件自己的入口命令（如 .contest、.ping）也能看对应说明。");
         s
     }
 
     pub async fn start_all(&self, ctx: &BotContext) -> anyhow::Result<()> {
-        for p in self.plugins.read().await.iter() {
-            info!(plugin = p.name(), "starting plugin");
-            p.on_start(ctx).await?;
+        for slot in self.plugins.read().await.iter() {
+            info!(plugin = slot.plugin.name(), "starting plugin");
+            if let Err(e) = slot.plugin.on_start(ctx, &slot.scope).await {
+                slot.scope.dispose().await;
+                return Err(e);
+            }
         }
         Ok(())
     }
 
     pub async fn stop_all(&self) {
-        let plugins = self.plugins.read().await.clone();
-        for p in plugins {
-            if let Err(e) = p.on_stop().await {
-                error!(plugin = p.name(), error = %e, "plugin stop");
+        let slots: Vec<_> = self.plugins.write().await.drain(..).collect();
+        for slot in slots {
+            if let Err(e) = slot.plugin.on_stop().await {
+                error!(plugin = slot.plugin.name(), error = %e, "plugin stop");
             }
+            slot.scope.dispose().await;
         }
     }
 
@@ -90,29 +112,39 @@ impl Dispatcher {
         let name = plugin.name();
         {
             let guard = self.plugins.read().await;
-            if guard.iter().any(|p| p.name() == name) {
+            if guard.iter().any(|s| s.plugin.name() == name) {
                 return Ok(());
             }
         }
         info!(plugin = name, "hot-enable plugin");
-        plugin.on_start(ctx).await?;
+        let scope = Arc::new(PluginScope::new());
+        if let Err(e) = plugin.on_start(ctx, &scope).await {
+            scope.dispose().await;
+            return Err(e);
+        }
         let mut guard = self.plugins.write().await;
-        if guard.iter().any(|p| p.name() == name) {
+        if guard.iter().any(|s| s.plugin.name() == name) {
             drop(guard);
-            plugin.on_stop().await?;
+            if let Err(e) = plugin.on_stop().await {
+                error!(plugin = name, error = %e, "plugin stop");
+            }
+            scope.dispose().await;
             return Ok(());
         }
-        guard.push(plugin);
+        guard.push(PluginSlot { plugin, scope });
         Ok(())
     }
 
     pub async fn remove(&self, name: &str) -> anyhow::Result<bool> {
         let mut guard = self.plugins.write().await;
-        if let Some(i) = guard.iter().position(|p| p.name() == name) {
-            let p = guard.remove(i);
+        if let Some(i) = guard.iter().position(|s| s.plugin.name() == name) {
+            let slot = guard.remove(i);
             drop(guard);
             info!(plugin = name, "hot-disable plugin");
-            p.on_stop().await?;
+            if let Err(e) = slot.plugin.on_stop().await {
+                error!(plugin = name, error = %e, "plugin stop");
+            }
+            slot.scope.dispose().await;
             return Ok(true);
         }
         Ok(false)
@@ -143,9 +175,15 @@ impl Dispatcher {
             }
         }
 
-        let plugins = self.plugins.read().await.clone();
-        for p in plugins {
-            match p.handle(ctx, ev).await {
+        let slots: Vec<_> = self
+            .plugins
+            .read()
+            .await
+            .iter()
+            .map(|s| (s.plugin.clone(), s.scope.clone()))
+            .collect();
+        for (p, scope) in slots {
+            match p.handle(ctx, ev, &scope).await {
                 Ok(Flow::Stop) => return,
                 Ok(Flow::Continue) => {}
                 Err(e) => {

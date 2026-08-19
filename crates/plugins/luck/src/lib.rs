@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::Local;
-use fujiang_core::{BotContext, Event, Flow, Plugin};
+use fujiang_core::{BotContext, Event, Flow, Plugin, PluginScope};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -27,7 +27,12 @@ impl Plugin for LuckPlugin {
         &[".luck"]
     }
 
-    async fn handle(&self, ctx: &BotContext, ev: &Event) -> anyhow::Result<Flow> {
+    async fn handle(
+        &self,
+        ctx: &BotContext,
+        ev: &Event,
+        _scope: &PluginScope,
+    ) -> anyhow::Result<Flow> {
         let Some(msg) = ev.as_message() else {
             return Ok(Flow::Continue);
         };

@@ -12,18 +12,18 @@
 |---|---|---|
 | `name()` | 是 | 唯一短名，如 `"echo"`。内置名不能用 so 覆盖 |
 | `help()` | 是 | `.help` 和插件入口命令展示的说明 |
-| `handle(ctx, ev)` | 是 | 处理事件。`Flow::Stop` 截胡后面的插件；`Continue` 继续 |
+| `handle(ctx, ev, scope)` | 是 | 处理事件。`Flow::Stop` 截胡后面的插件；`Continue` 继续 |
 | `meta()` | 否 | 名字、版本、简介、命令列表。默认用 `name()` + 空简介 |
 | `commands()` | 否 | 命令清单，给管理页 / 元数据用，**不会**自动路由 |
-| `on_start(ctx)` | 否 | 启动或热加载时。适合 `tokio::spawn` 后台循环 |
-| `on_stop()` | 否 | 卸载 / 关掉时。有后台循环就在这里 `cancel` |
+| `on_start(ctx, scope)` | 否 | 启动或热加载时。后台循环用 `scope.spawn` / `scope.sleep` |
+| `on_stop()` | 否 | 卸载前额外清理。scope 会在这之后 `dispose`，不必自己 cancel |
 
-宿主调用顺序：`on_start` → 多条 `handle` → `on_stop`。群白名单和 `.help` 在分发层先处理，插件里不必再做 ACL。
+宿主调用顺序：`on_start` → 多条 `handle` → `on_stop` → `scope.dispose()`。群白名单和 `.help` 在分发层先处理，插件里不必再做 ACL。后台任务必须 `scope.spawn`，卸载时才会被 cancel/abort。
 
 `handle` 里自己解析 `msg.command_line()`（已 `trim`）。前缀默认 `.`，以实际配置为准：`ctx.bot_config().await.command_prefix`。
 
 ```rust
-use fujiang_core::{declare_plugin, BotContext, Event, Flow, Plugin, PluginMeta};
+use fujiang_core::{declare_plugin, BotContext, Event, Flow, Plugin, PluginMeta, PluginScope};
 
 #[derive(Default)]
 pub struct EchoPlugin;
@@ -44,7 +44,7 @@ impl Plugin for EchoPlugin {
     fn commands(&self) -> &'static [&'static str] {
         &[".ping"]
     }
-    async fn handle(&self, ctx: &BotContext, ev: &Event) -> anyhow::Result<Flow> {
+    async fn handle(&self, ctx: &BotContext, ev: &Event, _scope: &PluginScope) -> anyhow::Result<Flow> {
         let Some(msg) = ev.as_message() else {
             return Ok(Flow::Continue);
         };
@@ -151,15 +151,15 @@ msg.sender.nickname / card
 
 | 时机 | 调用 |
 |---|---|
-| 进程启动或热启用 | `on_start` |
-| 消息 | `handle` |
-| 热禁用 / 卸载 / 进程退出 | `on_stop` |
+| 进程启动或热启用 | `on_start(ctx, scope)` |
+| 消息 | `handle(ctx, ev, scope)`（同一把 scope） |
+| 热禁用 / 卸载 / 进程退出 | `on_stop`，然后 `scope.dispose()` |
 
-卸载时会先 `on_stop`，再等 in-flight `handle` 结束才 `dlclose`。
+卸载时会先 `on_stop`，再 cancel/abort scope 里的任务，再等 in-flight `handle` 结束才 `dlclose`。
 
 ## 动态 .so
 
-ABI 号 `fujiang_plugin_abi() == 1`（`PLUGIN_ABI`）。`.so` **必须用本仓库、同一套 rustc 编译**，不能跨版本乱拷。内置插件名不能用 so 覆盖。
+ABI 号 `fujiang_plugin_abi() == 2`（`PLUGIN_ABI`）。`.so` **必须用本仓库、同一套 rustc 编译**，不能跨版本乱拷。内置插件名不能用 so 覆盖。
 
 ```bash
 cargo build -p fujiang-plugin-echo
