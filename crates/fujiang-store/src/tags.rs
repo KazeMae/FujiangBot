@@ -3,44 +3,44 @@ use std::path::Path;
 use sqlx::Row;
 use tracing::info;
 
-use crate::{md5_hex, AttachResult, DetachResult, Idea, IdeaListItem, ImageRow, Store};
+use crate::{md5_hex, AttachResult, DetachResult, ImageRow, Store, Tag, TagListItem};
 
 impl Store {
-    pub async fn idea_ensure(&self, name: &str) -> anyhow::Result<Idea> {
+    pub async fn tag_ensure(&self, name: &str) -> anyhow::Result<Tag> {
         let name = name.trim();
-        anyhow::ensure!(!name.is_empty(), "idea 名为空");
-        if let Some(i) = self.idea_by_alias(name).await? {
-            return Ok(i);
+        anyhow::ensure!(!name.is_empty(), "tag 名为空");
+        if let Some(t) = self.tag_by_alias(name).await? {
+            return Ok(t);
         }
-        sqlx::query("INSERT OR IGNORE INTO ideas(name) VALUES(?)")
+        sqlx::query("INSERT OR IGNORE INTO tags(name) VALUES(?)")
             .bind(name)
             .execute(&self.pool)
             .await?;
-        let idea = self
-            .idea_by_name(name)
+        let tag = self
+            .tag_by_name(name)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("failed to create idea"))?;
-        sqlx::query("INSERT OR IGNORE INTO idea_aliases(alias, idea_id) VALUES(?, ?)")
+            .ok_or_else(|| anyhow::anyhow!("failed to create tag"))?;
+        sqlx::query("INSERT OR IGNORE INTO tag_aliases(alias, tag_id) VALUES(?, ?)")
             .bind(name)
-            .bind(idea.id)
+            .bind(tag.id)
             .execute(&self.pool)
             .await?;
-        Ok(idea)
+        Ok(tag)
     }
 
-    pub async fn idea_by_name(&self, name: &str) -> anyhow::Result<Option<Idea>> {
+    pub async fn tag_by_name(&self, name: &str) -> anyhow::Result<Option<Tag>> {
         Ok(
-            sqlx::query_as::<_, Idea>("SELECT id, name FROM ideas WHERE name = ?")
+            sqlx::query_as::<_, Tag>("SELECT id, name FROM tags WHERE name = ?")
                 .bind(name)
                 .fetch_optional(&self.pool)
                 .await?,
         )
     }
 
-    pub async fn idea_by_alias(&self, alias: &str) -> anyhow::Result<Option<Idea>> {
-        Ok(sqlx::query_as::<_, Idea>(
-            "SELECT i.id, i.name FROM ideas i
-             JOIN idea_aliases a ON a.idea_id = i.id
+    pub async fn tag_by_alias(&self, alias: &str) -> anyhow::Result<Option<Tag>> {
+        Ok(sqlx::query_as::<_, Tag>(
+            "SELECT t.id, t.name FROM tags t
+             JOIN tag_aliases a ON a.tag_id = t.id
              WHERE a.alias = ?",
         )
         .bind(alias)
@@ -48,27 +48,27 @@ impl Store {
         .await?)
     }
 
-    pub async fn idea_list(&self) -> anyhow::Result<Vec<IdeaListItem>> {
-        let ideas = sqlx::query_as::<_, Idea>("SELECT id, name FROM ideas ORDER BY name")
+    pub async fn tag_list(&self) -> anyhow::Result<Vec<TagListItem>> {
+        let tags = sqlx::query_as::<_, Tag>("SELECT id, name FROM tags ORDER BY name")
             .fetch_all(&self.pool)
             .await?;
         let mut out = Vec::new();
-        for idea in ideas {
+        for tag in tags {
             let image_count: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM image_ideas WHERE idea_id = ?")
-                    .bind(idea.id)
+                sqlx::query_scalar("SELECT COUNT(*) FROM image_tags WHERE tag_id = ?")
+                    .bind(tag.id)
                     .fetch_one(&self.pool)
                     .await?;
             let aliases: Vec<String> =
-                sqlx::query("SELECT alias FROM idea_aliases WHERE idea_id = ?")
-                    .bind(idea.id)
+                sqlx::query("SELECT alias FROM tag_aliases WHERE tag_id = ?")
+                    .bind(tag.id)
                     .fetch_all(&self.pool)
                     .await?
                     .into_iter()
                     .map(|r| r.get::<String, _>(0))
                     .collect();
-            out.push(IdeaListItem {
-                idea,
+            out.push(TagListItem {
+                tag,
                 image_count,
                 aliases,
             });
@@ -76,34 +76,34 @@ impl Store {
         Ok(out)
     }
 
-    pub async fn idea_alias(&self, name: &str, alias: &str) -> anyhow::Result<String> {
-        let idea = self.idea_ensure(name).await?;
+    pub async fn tag_alias(&self, name: &str, alias: &str) -> anyhow::Result<String> {
+        let tag = self.tag_ensure(name).await?;
         let alias = alias.trim();
         anyhow::ensure!(!alias.is_empty(), "别名为空");
         sqlx::query(
-            "INSERT INTO idea_aliases(alias, idea_id) VALUES(?, ?)
-             ON CONFLICT(alias) DO UPDATE SET idea_id = excluded.idea_id",
+            "INSERT INTO tag_aliases(alias, tag_id) VALUES(?, ?)
+             ON CONFLICT(alias) DO UPDATE SET tag_id = excluded.tag_id",
         )
         .bind(alias)
-        .bind(idea.id)
+        .bind(tag.id)
         .execute(&self.pool)
         .await?;
-        Ok(format!("{alias} -> {}", idea.name))
+        Ok(format!("{alias} -> {}", tag.name))
     }
 
-    pub async fn idea_merge(&self, from: &str, to: &str) -> anyhow::Result<String> {
+    pub async fn tag_merge(&self, from: &str, to: &str) -> anyhow::Result<String> {
         let src = self
-            .idea_by_alias(from)
+            .tag_by_alias(from)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("idea「{from}」不存在"))?;
-        let dst = self.idea_ensure(to).await?;
+            .ok_or_else(|| anyhow::anyhow!("tag「{from}」不存在"))?;
+        let dst = self.tag_ensure(to).await?;
         if src.id == dst.id {
-            return Ok("已经是同一个 idea".into());
+            return Ok("已经是同一个 tag".into());
         }
         let now = chrono::Utc::now().timestamp();
         let r = sqlx::query(
-            "INSERT OR IGNORE INTO image_ideas(image_id, idea_id, added_by, added_at)
-             SELECT image_id, ?, 0, ? FROM image_ideas WHERE idea_id = ?",
+            "INSERT OR IGNORE INTO image_tags(image_id, tag_id, added_by, added_at)
+             SELECT image_id, ?, 0, ? FROM image_tags WHERE tag_id = ?",
         )
         .bind(dst.id)
         .bind(now)
@@ -119,12 +119,12 @@ impl Store {
         ))
     }
 
-    pub async fn idea_retire(&self, name: &str) -> anyhow::Result<bool> {
-        let Some(idea) = self.idea_by_alias(name).await? else {
+    pub async fn tag_retire(&self, name: &str) -> anyhow::Result<bool> {
+        let Some(tag) = self.tag_by_alias(name).await? else {
             return Ok(false);
         };
-        sqlx::query("DELETE FROM ideas WHERE id = ?")
-            .bind(idea.id)
+        sqlx::query("DELETE FROM tags WHERE id = ?")
+            .bind(tag.id)
             .execute(&self.pool)
             .await?;
         Ok(true)
@@ -175,20 +175,20 @@ impl Store {
     pub async fn image_attach(
         &self,
         md5: &str,
-        idea_name: &str,
+        tag_name: &str,
         added_by: i64,
     ) -> anyhow::Result<AttachResult> {
         let Some(img) = self.image_by_md5(md5).await? else {
             anyhow::bail!("unknown image");
         };
-        let idea = self.idea_ensure(idea_name).await?;
+        let tag = self.tag_ensure(tag_name).await?;
         let now = chrono::Utc::now().timestamp();
         let r = sqlx::query(
-            "INSERT OR IGNORE INTO image_ideas(image_id, idea_id, added_by, added_at)
+            "INSERT OR IGNORE INTO image_tags(image_id, tag_id, added_by, added_at)
              VALUES(?, ?, ?, ?)",
         )
         .bind(img.id)
-        .bind(idea.id)
+        .bind(tag.id)
         .bind(added_by)
         .bind(now)
         .execute(&self.pool)
@@ -200,33 +200,33 @@ impl Store {
         })
     }
 
-    pub async fn image_detach(&self, md5: &str, idea_name: &str) -> anyhow::Result<DetachResult> {
+    pub async fn image_detach(&self, md5: &str, tag_name: &str) -> anyhow::Result<DetachResult> {
         let Some(img) = self.image_by_md5(md5).await? else {
             return Ok(DetachResult::UnknownImage);
         };
-        let Some(idea) = self.idea_by_alias(idea_name).await? else {
-            return Ok(DetachResult::NoSuchIdea);
+        let Some(tag) = self.tag_by_alias(tag_name).await? else {
+            return Ok(DetachResult::NoSuchTag);
         };
-        let r = sqlx::query("DELETE FROM image_ideas WHERE image_id = ? AND idea_id = ?")
+        let r = sqlx::query("DELETE FROM image_tags WHERE image_id = ? AND tag_id = ?")
             .bind(img.id)
-            .bind(idea.id)
+            .bind(tag.id)
             .execute(&self.pool)
             .await?;
         Ok(if r.rows_affected() == 0 {
-            DetachResult::NoSuchIdea
+            DetachResult::NoSuchTag
         } else {
             DetachResult::Detached
         })
     }
 
-    pub async fn image_ideas(&self, md5: &str) -> anyhow::Result<Vec<String>> {
+    pub async fn image_tags(&self, md5: &str) -> anyhow::Result<Vec<String>> {
         let Some(img) = self.image_by_md5(md5).await? else {
             return Ok(vec![]);
         };
         let rows = sqlx::query(
-            "SELECT i.name FROM ideas i
-             JOIN image_ideas x ON x.idea_id = i.id
-             WHERE x.image_id = ? ORDER BY i.name",
+            "SELECT t.name FROM tags t
+             JOIN image_tags x ON x.tag_id = t.id
+             WHERE x.image_id = ? ORDER BY t.name",
         )
         .bind(img.id)
         .fetch_all(&self.pool)
@@ -234,16 +234,16 @@ impl Store {
         Ok(rows.into_iter().map(|r| r.get::<String, _>(0)).collect())
     }
 
-    pub async fn random_by_idea(&self, alias: &str) -> anyhow::Result<Option<std::path::PathBuf>> {
-        let Some(idea) = self.idea_by_alias(alias).await? else {
+    pub async fn random_by_tag(&self, alias: &str) -> anyhow::Result<Option<std::path::PathBuf>> {
+        let Some(tag) = self.tag_by_alias(alias).await? else {
             return Ok(None);
         };
         let row = sqlx::query(
             "SELECT img.rel_path FROM images img
-             JOIN image_ideas x ON x.image_id = img.id
-             WHERE x.idea_id = ? ORDER BY RANDOM() LIMIT 1",
+             JOIN image_tags x ON x.image_id = img.id
+             WHERE x.tag_id = ? ORDER BY RANDOM() LIMIT 1",
         )
-        .bind(idea.id)
+        .bind(tag.id)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|r| self.image_root.join(r.get::<String, _>(0))))
@@ -266,7 +266,7 @@ impl Store {
         for album in &albums {
             let aid: i64 = album.get(0);
             let name: String = album.get(1);
-            let idea = self.idea_ensure(&name).await?;
+            let tag = self.tag_ensure(&name).await?;
             let aliases = sqlx::query("SELECT alias FROM album_aliases WHERE album_id = ?")
                 .bind(aid)
                 .fetch_all(&self.pool)
@@ -274,7 +274,7 @@ impl Store {
             for a in aliases {
                 let alias: String = a.get(0);
                 if alias != name {
-                    self.idea_alias(&name, &alias).await.ok();
+                    self.tag_alias(&name, &alias).await.ok();
                 }
             }
             let imgs = sqlx::query(
@@ -298,9 +298,7 @@ impl Store {
                 if src.exists() && !dst.exists() {
                     let _ = tokio::fs::copy(&src, &dst).await;
                 }
-                if let Some(img_row) = self.image_by_md5(&md5).await? {
-                    let _ = img_row;
-                } else if dst.exists() || src.exists() {
+                if self.image_by_md5(&md5).await?.is_none() && (dst.exists() || src.exists()) {
                     sqlx::query(
                         "INSERT OR IGNORE INTO images(md5, rel_path, added_by, added_at)
                          VALUES(?, ?, ?, ?)",
@@ -313,7 +311,7 @@ impl Store {
                     .await?;
                 }
                 if self.image_by_md5(&md5).await?.is_some() {
-                    self.image_attach(&md5, &idea.name, added_by).await?;
+                    self.image_attach(&md5, &tag.name, added_by).await?;
                     n += 1;
                 }
             }
@@ -323,7 +321,7 @@ impl Store {
         rename_if_exists(&self.pool, "album_aliases", "album_aliases_legacy").await?;
         rename_if_exists(&self.pool, "albums", "albums_legacy").await?;
         if n > 0 {
-            info!(n, "migrated legacy albums to image ideas");
+            info!(n, "migrated legacy albums to image tags");
         }
         Ok(n)
     }

@@ -7,11 +7,11 @@ const HELP: &str = ".learn add <触发词> <回复>   （仅当前群/私聊）\
 .learn list [触发词]\n\
 .learn del <触发词> [n]\n\
 .star / .star add|set|del\n\
-.idea list | alias | merge | retire\n\
-来只<idea>  随机一张挂了该 idea 的图\n\
-回复图 + .添加<idea>  给这张图挂 idea（可多个）\n\
-回复图 + .删除<idea>  只摘掉这一个 idea，不删文件\n\
-回复图 + .想法        列出这张图的全部 idea";
+.tag list | alias | merge | retire\n\
+来只<tag>  随机一张挂了该 tag 的图\n\
+回复图 + .添加<tag>  给这张图挂 tag（可多个）\n\
+回复图 + .删除<tag>  只摘掉这一个 tag，不删文件\n\
+回复图 + .标签        列出这张图的全部 tag";
 
 pub struct FunPlugin;
 
@@ -27,7 +27,7 @@ impl Plugin for FunPlugin {
 
     fn commands(&self) -> &'static [&'static str] {
         &[
-            ".learn", ".star", ".idea", ".album", ".添加", ".删除", ".想法",
+            ".learn", ".star", ".tag", ".idea", ".album", ".添加", ".删除", ".标签", ".想法",
         ]
     }
 
@@ -49,13 +49,13 @@ impl Plugin for FunPlugin {
             handle_star(ctx, msg, &parts).await?;
             return Ok(Flow::Stop);
         }
-        if parts[0] == ".idea" || parts[0] == ".album" {
-            handle_idea(ctx, msg, &parts).await?;
+        if parts[0] == ".tag" || parts[0] == ".idea" || parts[0] == ".album" {
+            handle_tag(ctx, msg, &parts).await?;
             return Ok(Flow::Stop);
         }
 
-        if line == ".想法" {
-            handle_show_ideas(ctx, msg).await?;
+        if line == ".标签" || line == ".想法" {
+            handle_show_tags(ctx, msg).await?;
             return Ok(Flow::Stop);
         }
 
@@ -66,7 +66,7 @@ impl Plugin for FunPlugin {
 
         if let Some(name) = line.strip_prefix("来只") {
             if !name.is_empty() {
-                match ctx.store.random_by_idea(name).await? {
+                match ctx.store.random_by_tag(name).await? {
                     Some(path) if path.exists() => {
                         ctx.send_image(msg.source, path.to_string_lossy()).await?;
                     }
@@ -213,22 +213,22 @@ async fn handle_star(
     Ok(())
 }
 
-async fn handle_idea(
+async fn handle_tag(
     ctx: &BotContext,
     msg: &fujiang_core::MessageEvent,
     parts: &[&str],
 ) -> anyhow::Result<()> {
     if parts.len() < 2 || parts[1] == "list" {
-        let list = ctx.store.idea_list().await?;
+        let list = ctx.store.tag_list().await?;
         if list.is_empty() {
-            ctx.reply_text(msg, "还没有 idea").await?;
+            ctx.reply_text(msg, "还没有 tag").await?;
             return Ok(());
         }
-        let mut s = String::from("idea：");
+        let mut s = String::from("tag：");
         for item in list {
             s.push_str(&format!(
                 "\n{}  {}张  别名:{:?}",
-                item.idea.name, item.image_count, item.aliases
+                item.tag.name, item.image_count, item.aliases
             ));
         }
         ctx.reply_text(msg, s).await?;
@@ -240,23 +240,23 @@ async fn handle_idea(
     }
     match parts[1] {
         "add" if parts.len() == 3 => {
-            ctx.store.idea_ensure(parts[2]).await?;
+            ctx.store.tag_ensure(parts[2]).await?;
             ctx.reply_text(msg, "ok").await?;
         }
         "alias" if parts.len() == 4 => {
-            let t = ctx.store.idea_alias(parts[2], parts[3]).await?;
+            let t = ctx.store.tag_alias(parts[2], parts[3]).await?;
             ctx.reply_text(msg, t).await?;
         }
         "merge" if parts.len() == 4 => {
-            let t = ctx.store.idea_merge(parts[2], parts[3]).await?;
+            let t = ctx.store.tag_merge(parts[2], parts[3]).await?;
             ctx.reply_text(msg, t).await?;
         }
         "retire" | "del" if parts.len() == 3 => {
-            let ok = ctx.store.idea_retire(parts[2]).await?;
+            let ok = ctx.store.tag_retire(parts[2]).await?;
             ctx.reply_text(
                 msg,
                 if ok {
-                    "已去掉这个 idea（图片文件还在）"
+                    "已去掉这个 tag（图片文件还在）"
                 } else {
                     "不存在"
                 },
@@ -264,7 +264,7 @@ async fn handle_idea(
             .await?;
         }
         _ => {
-            ctx.reply_text(msg, "格式：.idea list|add|alias|merge|retire")
+            ctx.reply_text(msg, "格式：.tag list|add|alias|merge|retire")
                 .await?;
         }
     }
@@ -315,15 +315,15 @@ async fn handle_image_cmd(
             .image_attach(&img.md5, &name, msg.user_id())
             .await?
         {
-            AttachResult::Attached => format!("已挂上 idea「{name}」🤫"),
-            AttachResult::Already => format!("这张图已有 idea「{name}」"),
+            AttachResult::Attached => format!("已挂上 tag「{name}」🤫"),
+            AttachResult::Already => format!("这张图已有 tag「{name}」"),
         };
         ctx.reply_text(msg, text).await?;
     } else {
         let md5 = fujiang_store::md5_hex(&bytes);
         let text = match ctx.store.image_detach(&md5, &name).await? {
-            DetachResult::Detached => format!("已从这张图去掉 idea「{name}」"),
-            DetachResult::NoSuchIdea => format!("这张图没有 idea「{name}」"),
+            DetachResult::Detached => format!("已从这张图去掉 tag「{name}」"),
+            DetachResult::NoSuchTag => format!("这张图没有 tag「{name}」"),
             DetachResult::UnknownImage => "图库里没有这张图".into(),
         };
         ctx.reply_text(msg, text).await?;
@@ -331,18 +331,18 @@ async fn handle_image_cmd(
     Ok(())
 }
 
-async fn handle_show_ideas(
+async fn handle_show_tags(
     ctx: &BotContext,
     msg: &fujiang_core::MessageEvent,
 ) -> anyhow::Result<()> {
     let Some(md5) = reply_image_md5(ctx, msg).await? else {
         return Ok(());
     };
-    let ideas = ctx.store.image_ideas(&md5).await?;
-    if ideas.is_empty() {
-        ctx.reply_text(msg, "这张图还没有 idea").await?;
+    let tags = ctx.store.image_tags(&md5).await?;
+    if tags.is_empty() {
+        ctx.reply_text(msg, "这张图还没有 tag").await?;
     } else {
-        ctx.reply_text(msg, format!("这张图的 idea：{}", ideas.join("、")))
+        ctx.reply_text(msg, format!("这张图的 tag：{}", tags.join("、")))
             .await?;
     }
     Ok(())

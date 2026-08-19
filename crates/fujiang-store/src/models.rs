@@ -91,7 +91,7 @@ pub struct Star {
 }
 
 #[derive(Debug, Clone, FromRow)]
-pub struct Idea {
+pub struct Tag {
     pub id: i64,
     pub name: String,
 }
@@ -106,8 +106,8 @@ pub struct ImageRow {
 }
 
 #[derive(Debug, Clone)]
-pub struct IdeaListItem {
-    pub idea: Idea,
+pub struct TagListItem {
+    pub tag: Tag,
     pub image_count: i64,
     pub aliases: Vec<String>,
 }
@@ -121,7 +121,7 @@ pub enum AttachResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetachResult {
     Detached,
-    NoSuchIdea,
+    NoSuchTag,
     UnknownImage,
 }
 

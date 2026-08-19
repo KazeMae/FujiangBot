@@ -1,7 +1,7 @@
-mod ideas;
 mod importer;
 mod messages;
 mod models;
+mod tags;
 
 pub use importer::migrate_from_python;
 pub use messages::{default_archive_dir, shard_table, ArchiveReport};
@@ -549,7 +549,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn image_multi_idea() {
+    async fn image_multi_tag() {
         let (store, dir) = open_tmp().await;
         let bytes = b"fake-jpeg-bytes";
         let img = store.image_upsert(bytes, "jpg", 1).await.unwrap();
@@ -566,27 +566,27 @@ mod tests {
             AttachResult::Already
         );
         assert_eq!(
-            store.image_ideas(&img.md5).await.unwrap(),
+            store.image_tags(&img.md5).await.unwrap(),
             vec!["合照", "福哥"]
         );
-        assert!(store.random_by_idea("福哥").await.unwrap().is_some());
-        assert!(store.random_by_idea("合照").await.unwrap().is_some());
+        assert!(store.random_by_tag("福哥").await.unwrap().is_some());
+        assert!(store.random_by_tag("合照").await.unwrap().is_some());
 
         assert_eq!(
             store.image_detach(&img.md5, "福哥").await.unwrap(),
             DetachResult::Detached
         );
-        assert!(store.random_by_idea("福哥").await.unwrap().is_none());
-        assert!(store.random_by_idea("合照").await.unwrap().is_some());
+        assert!(store.random_by_tag("福哥").await.unwrap().is_none());
+        assert!(store.random_by_tag("合照").await.unwrap().is_some());
         assert!(store.image_root.join(&img.rel_path).exists());
 
-        store.idea_merge("合照", "团建").await.unwrap();
-        assert!(store.random_by_idea("合照").await.unwrap().is_some());
-        assert!(store.random_by_idea("团建").await.unwrap().is_some());
+        store.tag_merge("合照", "团建").await.unwrap();
+        assert!(store.random_by_tag("合照").await.unwrap().is_some());
+        assert!(store.random_by_tag("团建").await.unwrap().is_some());
 
-        store.idea_retire("合照").await.unwrap();
-        assert!(store.random_by_idea("合照").await.unwrap().is_none());
-        assert!(store.random_by_idea("团建").await.unwrap().is_some());
+        store.tag_retire("合照").await.unwrap();
+        assert!(store.random_by_tag("合照").await.unwrap().is_none());
+        assert!(store.random_by_tag("团建").await.unwrap().is_some());
         assert!(store.image_root.join(&img.rel_path).exists());
         let _ = std::fs::remove_dir_all(dir);
     }

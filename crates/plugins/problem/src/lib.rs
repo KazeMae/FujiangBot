@@ -25,11 +25,11 @@ impl Plugin for ProblemPlugin {
     }
 
     fn help(&self) -> &'static str {
-        ".problem <L> <R> [tags...] [-rt]  按 rating/tag 抽 CF 题\n.tag  tag 列表\n.每日一题  当天五档题目"
+        ".problem <L> <R> [tags...] [-rt]  按 rating/tag 抽 CF 题\n.cftag  CF tag 列表\n.每日一题  当天五档题目"
     }
 
     fn commands(&self) -> &'static [&'static str] {
-        &[".problem", ".tag", ".每日一题"]
+        &[".problem", ".cftag", ".每日一题"]
     }
 
     async fn handle(&self, ctx: &BotContext, ev: &Event) -> anyhow::Result<Flow> {
@@ -37,7 +37,7 @@ impl Plugin for ProblemPlugin {
             return Ok(Flow::Continue);
         };
         let line = msg.command_line();
-        if line == ".tag" {
+        if line == ".cftag" {
             ctx.reply_text(msg, TAGS).await?;
             return Ok(Flow::Stop);
         }

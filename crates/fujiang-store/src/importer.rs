@@ -201,10 +201,10 @@ async fn import_gallery(store: &Store, from: &Path) -> anyhow::Result<Option<usi
 
     for (folder, names) in folder_to_names {
         let primary = names.first().cloned().unwrap_or_else(|| folder.clone());
-        store.idea_ensure(&primary).await?;
+        store.tag_ensure(&primary).await?;
         for alias in &names {
             if alias != &primary {
-                store.idea_alias(&primary, alias).await.ok();
+                store.tag_alias(&primary, alias).await.ok();
             }
         }
         let dir = src.join(&folder);
