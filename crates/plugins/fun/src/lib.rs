@@ -1,17 +1,28 @@
 use async_trait::async_trait;
-use fujiang_core::{BotContext, Event, Flow, Media, Plugin};
+use fujiang_core::{BotContext, Event, Flow, Plugin};
 use fujiang_store::{AttachResult, DetachResult};
 use tracing::warn;
 
-const HELP: &str = ".learn add <触发词> <回复>   （写入当前群/私聊；无本群条目时用全局词库）\n\
-.learn list [触发词]\n\
-.learn del <触发词> [n]\n\
-.star / .star add|set|del\n\
-.tag list | alias | merge | retire\n\
-来只<tag>  随机一张挂了该 tag 的图\n\
-回复图 + .添加<tag>  给这张图挂 tag（可多个）\n\
-回复图 + .删除<tag>  只摘掉这一个 tag，不删文件\n\
-回复图 + .标签        列出这张图的全部 tag";
+const HELP: &str = "学话、收藏夹、图库。改学习/图库默认要在 fun.admins 里（名单空=谁都能改）。\n\
+【学话】原话触发。本群有条目只用本群的，没有则用导入/私聊里的全局词库。\n\
+.learn add <触发词> <回复>   写入当前群或私聊\n\
+.learn list [触发词]         列出本群/私聊里的句子\n\
+.learn del <触发词> [n]      删全部；带序号只删第 n 条\n\
+【收藏】\n\
+.star                        列出名称和链接\n\
+.star add <名> <url>         新增（重名拒绝）\n\
+.star set <名> <url>         新增或覆盖\n\
+.star del <名>\n\
+【图库】一张图可挂多个 tag；摘掉最后一个 tag 也不删文件。\n\
+.tag list                    所有 tag、张数、别名\n\
+.tag add <tag>               只建空 tag\n\
+.tag alias <tag> <别名>      来只别名 也算这个 tag\n\
+.tag merge <from> <to>       把 from 上的图也挂到 to，from 还在\n\
+.tag retire <tag>            去掉这个 tag（图还在）\n\
+来只<tag>                    随机一张带该 tag 的图\n\
+回复一张图 + .添加<tag>      给这张图挂 tag\n\
+回复一张图 + .删除<tag>      只摘这一个 tag\n\
+回复一张图 + .标签           列出这张图的全部 tag";
 
 pub struct FunPlugin;
 
@@ -304,27 +315,9 @@ async fn handle_image_cmd(
             .await?;
         return Ok(());
     }
-    let Some(rid) = msg.reply_id() else {
-        ctx.reply_text(msg, "请先回复一张图片").await?;
+    let Some(bytes) = reply_image_bytes(ctx, msg).await? else {
         return Ok(());
     };
-    let quoted = ctx.messenger().await.get_message(rid).await?;
-    let Some(media) = quoted.first_image() else {
-        ctx.reply_text(msg, "回复的不是图片").await?;
-        return Ok(());
-    };
-    let file = match media {
-        Media::Url(u) | Media::Path(u) | Media::FileId(u) | Media::Base64(u) => u.clone(),
-    };
-    let path = match ctx.messenger().await.get_image(&file).await {
-        Ok(p) => p,
-        Err(e) => {
-            warn!(error = %e, "get_image");
-            ctx.reply_text(msg, "ERROR😪").await?;
-            return Ok(());
-        }
-    };
-    let bytes = tokio::fs::read(&path).await?;
     if add {
         let img = ctx.store.image_upsert(&bytes, "jpg", msg.user_id()).await?;
         let text = match ctx
@@ -369,6 +362,15 @@ async fn reply_image_md5(
     ctx: &BotContext,
     msg: &fujiang_core::MessageEvent,
 ) -> anyhow::Result<Option<String>> {
+    Ok(reply_image_bytes(ctx, msg)
+        .await?
+        .map(|b| fujiang_store::md5_hex(&b)))
+}
+
+async fn reply_image_bytes(
+    ctx: &BotContext,
+    msg: &fujiang_core::MessageEvent,
+) -> anyhow::Result<Option<Vec<u8>>> {
     let Some(rid) = msg.reply_id() else {
         ctx.reply_text(msg, "请先回复一张图片").await?;
         return Ok(None);
@@ -378,17 +380,12 @@ async fn reply_image_md5(
         ctx.reply_text(msg, "回复的不是图片").await?;
         return Ok(None);
     };
-    let file = match media {
-        Media::Url(u) | Media::Path(u) | Media::FileId(u) | Media::Base64(u) => u.clone(),
-    };
-    let path = match ctx.messenger().await.get_image(&file).await {
-        Ok(p) => p,
+    match ctx.fetch_media_bytes(media).await {
+        Ok(b) => Ok(Some(b)),
         Err(e) => {
-            warn!(error = %e, "get_image");
+            warn!(error = %e, "fetch image");
             ctx.reply_text(msg, "ERROR😪").await?;
-            return Ok(None);
+            Ok(None)
         }
-    };
-    let bytes = tokio::fs::read(&path).await?;
-    Ok(Some(fujiang_store::md5_hex(&bytes)))
+    }
 }

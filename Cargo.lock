@@ -673,6 +673,7 @@ dependencies = [
  "sqlx",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
  "walkdir",
 ]
@@ -1282,6 +1283,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
  "tracing",
  "url",
  "uuid",

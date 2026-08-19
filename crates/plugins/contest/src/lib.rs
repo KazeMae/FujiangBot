@@ -28,7 +28,16 @@ impl Plugin for ContestPlugin {
     }
 
     fn help(&self) -> &'static str {
-        ".contest  指令列表\n.cf / .lg / .nc / .atc / .scpc  最近一场\n  后加 all 看全部（如 .cfall）\n.day  今天的比赛\n.bot  数据更新时间\n.remindHH:MM  设置每日提醒\n.remindoff  取消提醒"
+        "比赛日历。后台定时拉 Codeforces / 洛谷 / 牛客 / AtCoder / SCPC，开赛前约 1 小时会在已设提醒的群里预告。\n\
+.contest          本说明\n\
+.cf / .lg / .nc / .atc / .scpc\n\
+                  对应 OJ 最近一场（未开始优先）\n\
+.cfall / .lgall / .ncall / .atcall / .scpcall\n\
+                  该 OJ 当前缓存的全部场次\n\
+.day              今天还有哪些比赛\n\
+.bot              比赛数据上次刷新时间\n\
+.remindHH:MM      仅群聊。每天在这个点推送各 OJ 最近一场，如 .remind08:30\n\
+.remindoff        仅群聊。关掉本群每日提醒"
     }
 
     fn commands(&self) -> &'static [&'static str] {
@@ -49,7 +58,7 @@ impl Plugin for ContestPlugin {
                 if let Err(e) = refresh(&refresh_ctx).await {
                     warn!(error = %e, "contest refresh failed");
                 }
-                if let Err(e) = pre_remind(&refresh_ctx).await {
+                if let Err(e) = pre_remind(&refresh_ctx, &stop).await {
                     warn!(error = %e, "pre-remind failed");
                 }
                 let minutes = refresh_ctx.bot_config().await.contest_update_minutes.max(5);
@@ -382,7 +391,7 @@ fn fmt_ts(ts: i64) -> String {
         .unwrap_or_else(|| ts.to_string())
 }
 
-async fn pre_remind(ctx: &BotContext) -> anyhow::Result<()> {
+async fn pre_remind(ctx: &BotContext, stop: &CancellationToken) -> anyhow::Result<()> {
     let now = chrono::Utc::now().timestamp();
     let groups = ctx.store.remind_groups().await?;
     if groups.is_empty() {
@@ -406,8 +415,12 @@ async fn pre_remind(ctx: &BotContext) -> anyhow::Result<()> {
             let wait = (delta - 3600).max(0) as u64;
             let spawn_ctx = ctx.clone();
             let groups = groups.clone();
+            let stop = stop.clone();
             tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(wait)).await;
+                tokio::select! {
+                    _ = stop.cancelled() => return,
+                    _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
+                }
                 for g in groups {
                     let _ = spawn_ctx
                         .send_text(Source::Group { id: g.group_id }, msg.clone())

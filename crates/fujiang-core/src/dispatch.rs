@@ -27,11 +27,11 @@ impl Dispatcher {
     }
 
     pub async fn help_text(&self, prefix: &str) -> String {
-        let mut s = String::from("菜单：\n");
+        let mut s = format!("菜单（前缀 `{prefix}`，指令区分大小写）\n\n");
         for p in self.plugins.read().await.iter() {
             s.push_str(&format!("【{}】\n{}\n\n", p.name(), p.help().trim()));
         }
-        s.push_str(&format!("前缀 `{prefix}` ，指令区分大小写。"));
+        s.push_str("直接发 .contest / .rank / .problem / .learn / .luck 也能看对应说明。");
         s
     }
 
@@ -41,6 +41,15 @@ impl Dispatcher {
             p.on_start(ctx).await?;
         }
         Ok(())
+    }
+
+    pub async fn stop_all(&self) {
+        let plugins = self.plugins.read().await.clone();
+        for p in plugins {
+            if let Err(e) = p.on_stop().await {
+                error!(plugin = p.name(), error = %e, "plugin stop");
+            }
+        }
     }
 
     pub async fn insert(&self, plugin: Arc<dyn Plugin>, ctx: &BotContext) -> anyhow::Result<()> {

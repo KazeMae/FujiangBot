@@ -9,21 +9,25 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-const HELP: &str = ".rank(.rk) 指令：\n\
---help(-h) 帮助\n\
---add(-a) [year] [name] {cf_id} 添加用户\n\
---remove(-r) {cf_id} 删除用户\n\
---list(-l) {year*} 列出账号\n\
---show(-s) {year*} 当前分\n\
---max(-m) {year*} 最高分\n\
---validRating(-vr) {year*} 有效分\n\
---count(-c) {year*} 过题数\n\
---lastCount(-lc) {year*} 30 天过题\n\
---totalLife(-t) [year] [name] 生涯总结\n\
---contestStandings(-cs) [contest_id] 比赛分数变化\n\
---updateRank(-urk) 刷新比赛 rank\n\
---updateRating(-urt) 刷新 rating\n\
---updateTime(-u) 上次刷新时间";
+const HELP: &str = "Codeforces 排行。`.rank` 和 `.rk` 一样。`{year*}` 可写多个年级，不写则看全部。后台会定时刷 rating 和近期比赛排名。\n\
+.rank / .rk\n\
+.rank -h / --help                 本说明\n\
+.rank -a / --add <年级> <姓名> <handle...>\n\
+                                  添加一人或多人（handle 是 CF 用户名）\n\
+.rank -r / --remove <handle...>   按 handle 删除\n\
+.rank -l / --list [年级...]       列出账号\n\
+.rank -s / --show [年级...]       当前 rating\n\
+.rank -m / --max [年级...]        历史最高分\n\
+.rank -vr / --validRating [年级...]  有效分\n\
+.rank -c / --count [年级...]      过题数\n\
+.rank -lc / --lastCount [年级...] 近 30 天过题\n\
+.rank -t / --totalLife <年级> <姓名>\n\
+                                  该同学生涯摘要\n\
+.rank -cs / --contestStandings <contest_id>\n\
+                                  这场比赛里已登记同学的分数变化\n\
+.rank -urk / --updateRank         立刻后台刷新比赛排名\n\
+.rank -urt / --updateRating       立刻后台刷新 rating\n\
+.rank -u / --updateTime           上次刷新时间";
 
 #[derive(Default)]
 pub struct RankPlugin {

@@ -239,17 +239,23 @@ impl Store {
         Ok(ids.len() as u64)
     }
 
-    pub fn spawn_archiver(&self) {
+    pub fn spawn_archiver(&self, stop: tokio_util::sync::CancellationToken) {
         let store = self.clone();
         tokio::spawn(async move {
             loop {
+                if stop.is_cancelled() {
+                    break;
+                }
                 if store.archive_after_days.load(Ordering::Relaxed) != 0 {
                     if let Err(e) = store.archive_due().await {
                         warn!(error = %e, "message archive failed");
                     }
                 }
                 let every = store.archive_every_secs.load(Ordering::Relaxed).max(60);
-                tokio::time::sleep(Duration::from_secs(every)).await;
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(every)) => {}
+                }
             }
         });
     }

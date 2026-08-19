@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -85,19 +86,21 @@ impl NapcatClient {
         Ok(url)
     }
 
-    /// Connect and serve until disconnect is requested or reconnects are exhausted.
-    pub async fn run(&self, mut shutdown: oneshot::Receiver<()>) -> Result<()> {
+    /// Connect and serve until `stop` is cancelled or reconnects are exhausted.
+    pub async fn run(&self, stop: CancellationToken) -> Result<()> {
         let mut attempt = 0u32;
         loop {
-            match self.session().await {
-                Ok(()) => {
-                    attempt = 0;
-                }
-                Err(e) => {
-                    warn!(error = %e, "napcat session ended");
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => return Ok(()),
+                session_res = self.session() => {
+                    match session_res {
+                        Ok(()) => attempt = 0,
+                        Err(e) => warn!(error = %e, "napcat session ended"),
+                    }
                 }
             }
-            if shutdown.try_recv().is_ok() {
+            if stop.is_cancelled() {
                 return Ok(());
             }
             if !self.config.reconnect {
@@ -109,8 +112,8 @@ impl NapcatClient {
             }
             info!(attempt, "reconnecting to napcat");
             tokio::select! {
+                _ = stop.cancelled() => return Ok(()),
                 _ = tokio::time::sleep(self.config.reconnect_delay) => {}
-                _ = &mut shutdown => return Ok(()),
             }
         }
     }
@@ -295,9 +298,10 @@ mod tests {
             ..ClientConfig::default()
         });
         let c = client.clone();
-        let (sd_tx, sd_rx) = oneshot::channel();
+        let stop = CancellationToken::new();
+        let stop2 = stop.clone();
         tokio::spawn(async move {
-            let _ = c.run(sd_rx).await;
+            let _ = c.run(stop2).await;
         });
         tokio::time::sleep(Duration::from_millis(80)).await;
         let v: Value = client
@@ -305,6 +309,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(v["pong"], true);
-        let _ = sd_tx.send(());
+        stop.cancel();
     }
 }

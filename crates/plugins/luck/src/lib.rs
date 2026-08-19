@@ -13,7 +13,9 @@ impl Plugin for LuckPlugin {
     }
 
     fn help(&self) -> &'static str {
-        ".luck N  — 今天的幸运数字（1..=N，同一天同一人固定）"
+        "按日期和 QQ 号生成今天的幸运数字，同一天同一人同一 N 结果不变，换天会变。\n\
+.luck N     在 1～N 里抽一个整数，N 必须 ≥ 1\n\
+例：.luck 100"
     }
 
     fn commands(&self) -> &'static [&'static str] {
@@ -30,7 +32,7 @@ impl Plugin for LuckPlugin {
             return Ok(Flow::Continue);
         }
         let Some(lim) = parts.next().and_then(|s| s.parse::<i64>().ok()) else {
-            ctx.reply_text(msg, "格式：.luck N").await?;
+            ctx.reply_text(msg, self.help()).await?;
             return Ok(Flow::Stop);
         };
         if lim < 1 {

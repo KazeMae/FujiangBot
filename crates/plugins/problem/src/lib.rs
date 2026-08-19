@@ -25,7 +25,16 @@ impl Plugin for ProblemPlugin {
     }
 
     fn help(&self) -> &'static str {
-        ".problem <L> <R> [tags...] [-rt]  按 rating/tag 抽 CF 题\n.cftag  CF tag 列表\n.每日一题  当天五档题目"
+        "从 Codeforces 题库抽题。\n\
+.problem <L> <R> [tags...] [-rt]\n\
+        L、R 是 rating 区间，必须是 800～3500 的整百，如 1200 1600\n\
+        tags 可写多个，空格用下划线代替（binary_search）\n\
+        前加 ! 表示不要这个 tag，如 !dp\n\
+        new / !new 限制新/旧场次（contest_id ≥1000）\n\
+        默认抽一道；末尾加 -rt 会换一种抽法（可重复试）\n\
+.cftag  可用 tag 列表\n\
+.每日一题  当天五档：800-1000 / 1000-1200 / 1200-1400 / 1400-1600 / 1600-2000\n\
+        过了设定的重置小时（默认 4 点）才换新的一天"
     }
 
     fn commands(&self) -> &'static [&'static str] {
@@ -47,7 +56,12 @@ impl Plugin for ProblemPlugin {
             return Ok(Flow::Stop);
         }
         if let Some(rest) = line.strip_prefix(".problem") {
-            let text = pick_problem(ctx, rest.trim(), true).await?;
+            let rest = rest.trim();
+            if rest.is_empty() {
+                ctx.reply_text(msg, self.help()).await?;
+                return Ok(Flow::Stop);
+            }
+            let text = pick_problem(ctx, rest, true).await?;
             ctx.reply_text(msg, text).await?;
             return Ok(Flow::Stop);
         }

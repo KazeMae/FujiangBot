@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use fujiang_core::{Event, Gateway, MessageEvent, Messenger, Segment, Source};
 use napcat_sdk::{ClientConfig, Event as NcEvent, NapcatClient, SendGroupMsg, SendPrivateMsg};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -36,8 +36,8 @@ impl Gateway for WsAdapter {
     ) -> anyhow::Result<()> {
         let mut rx = self.client.subscribe();
         let client = self.client.clone();
-        let (sd_tx, sd_rx) = oneshot::channel();
-        let runner = tokio::spawn(async move { client.run(sd_rx).await });
+        let client_stop = stop.clone();
+        let mut runner = tokio::spawn(async move { client.run(client_stop).await });
 
         loop {
             tokio::select! {
@@ -62,8 +62,14 @@ impl Gateway for WsAdapter {
                 }
             }
         }
-        let _ = sd_tx.send(());
-        let _ = runner.await;
+        tokio::select! {
+            _ = &mut runner => {}
+            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                warn!("ws client did not stop in time, abort");
+                runner.abort();
+                let _ = runner.await;
+            }
+        }
         Ok(())
     }
 }

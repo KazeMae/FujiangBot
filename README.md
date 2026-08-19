@@ -64,13 +64,80 @@ cargo run -p fujiang -- migrate --from ./FujiangBot --config config.toml
 
 ## 插件
 
-| 插件 | 命令 |
+群里发 `.help` 会拼出当前已启用插件的说明。前缀默认 `.`，区分大小写。
+
+### contest
+
+比赛日历。后台定时拉 Codeforces / 洛谷 / 牛客 / AtCoder / SCPC；开赛前约 1 小时会在已设提醒的群里预告。
+
+| 命令 | 作用 |
 |---|---|
-| contest | `.contest` `.cf` `.lg` `.nc` `.atc` `.scpc` `*all` `.day` `.bot` `.remindHH:MM` `.remindoff` |
-| rank | `.rank` / `.rk` |
-| problem | `.problem` `.cftag` `.每日一题` |
-| fun | `.learn`（本群优先，否则用导入/全局词库） `.star` `.tag` `来只xx` 回图挂/摘 tag |
-| luck | `.luck N` |
+| `.contest` | 说明 |
+| `.cf` `.lg` `.nc` `.atc` `.scpc` | 对应 OJ 最近一场（未开始优先） |
+| `.cfall` `.lgall` `.ncall` `.atcall` `.scpcall` | 该 OJ 缓存里的全部场次 |
+| `.day` | 今天的比赛 |
+| `.bot` | 数据上次刷新时间 |
+| `.remindHH:MM` | 仅群聊。每天这个点推送各 OJ 最近一场，如 `.remind08:30` |
+| `.remindoff` | 仅群聊。关掉本群每日提醒 |
+
+### rank
+
+Codeforces 排行。`.rank` 和 `.rk` 相同。`{year*}` 可写多个年级，省略则看全部。后台会定时刷 rating 和近期比赛排名。
+
+| 命令 | 作用 |
+|---|---|
+| `.rank -h` | 说明 |
+| `.rank -a <年级> <姓名> <handle...>` | 添加一人或多人 |
+| `.rank -r <handle...>` | 删除 |
+| `.rank -l [年级...]` | 列出账号 |
+| `.rank -s / -m / -vr / -c / -lc [年级...]` | 当前分 / 最高分 / 有效分 / 过题数 / 近 30 天过题 |
+| `.rank -t <年级> <姓名>` | 生涯摘要 |
+| `.rank -cs <contest_id>` | 这场比赛里已登记同学的分数变化 |
+| `.rank -urk` / `-urt` | 立刻后台刷新比赛排名 / rating |
+| `.rank -u` | 上次刷新时间 |
+
+长选项：`--add` `--remove` `--list` `--show` `--max` `--validRating` `--count` `--lastCount` `--totalLife` `--contestStandings` `--updateRank` `--updateRating` `--updateTime`。
+
+### problem
+
+从 Codeforces 题库抽题。`.problem` 不带参数会打出说明。
+
+| 命令 | 作用 |
+|---|---|
+| `.problem <L> <R> [tags...] [-rt]` | `L` `R` 为 800～3500 的整百 rating。tag 空格写成下划线；`!tag` 排除；`new` / `!new` 限新/旧场。默认抽一道，`-rt` 换抽法 |
+| `.cftag` | 可用 tag 列表 |
+| `.每日一题` | 当天五档（800–1000 … 1600–2000）。过了 `plugins.problem.daily_reset_hour`（默认 4 点）才换新的一天 |
+
+### fun
+
+学话、收藏夹、图库。改学习/图库默认要在 `plugins.fun.admins` 里（名单空=谁都能改）。
+
+**学话** 是原话触发：本群有条目只用本群的，没有则用导入/私聊里的全局词库。
+
+| 命令 | 作用 |
+|---|---|
+| `.learn add <触发词> <回复>` | 写入当前群或私聊 |
+| `.learn list [触发词]` | 列出本群/私聊里的句子 |
+| `.learn del <触发词> [n]` | 删全部；带序号只删第 n 条 |
+| `.star` | 列出收藏 |
+| `.star add\|set\|del <名> [url]` | 新增（重名拒绝）/ 覆盖 / 删除 |
+| `.tag list` | 所有 tag、张数、别名 |
+| `.tag add <tag>` | 只建空 tag |
+| `.tag alias <tag> <别名>` | `来只别名` 也算这个 tag |
+| `.tag merge <from> <to>` | 把 from 上的图也挂到 to，from 还在 |
+| `.tag retire <tag>` | 去掉这个 tag（图还在） |
+| `来只<tag>` | 随机一张带该 tag 的图 |
+| 回复图 + `.添加<tag>` / `.删除<tag>` / `.标签` | 挂 tag / 只摘这一个 / 列出这张图的 tag |
+
+一张图可挂多个 tag；摘掉最后一个 tag 也不删文件。
+
+### luck
+
+按日期和 QQ 号生成今天的幸运数字：同一天同一人同一 `N` 结果不变，换天会变。
+
+| 命令 | 作用 |
+|---|---|
+| `.luck N` | 在 1～N 里抽一个整数，`N ≥ 1` |
 
 ## 文档
 

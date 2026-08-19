@@ -100,8 +100,9 @@ fn from_recv(s: RecvSegment) -> Segment {
             file, url, summary, ..
         } => {
             let src = url
+                .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
                 .map(Media::Url)
-                .or_else(|| file.clone().map(Media::FileId))
+                .or_else(|| file.filter(|s| !s.is_empty()).map(Media::FileId))
                 .unwrap_or(Media::FileId(String::new()));
             Segment::Image { src, summary }
         }
@@ -213,6 +214,22 @@ mod tests {
             local_path_to_file_uri("https://example.com/a.jpg"),
             "https://example.com/a.jpg"
         );
+    }
+
+    #[test]
+    fn recv_http_image_stays_url() {
+        let seg = from_recv(RecvSegment::Image {
+            file: Some("{abc}.image".into()),
+            url: Some("https://example.com/a.jpg".into()),
+            summary: None,
+            sub_type: None,
+        });
+        match seg {
+            Segment::Image {
+                src: Media::Url(u), ..
+            } => assert_eq!(u, "https://example.com/a.jpg"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

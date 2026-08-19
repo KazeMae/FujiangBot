@@ -73,6 +73,30 @@ impl BotContext {
         )
         .await
     }
+
+    /// Load image bytes. HTTP(S) URLs are downloaded; cache ids go through get_image.
+    pub async fn fetch_media_bytes(&self, media: &crate::event::Media) -> anyhow::Result<Vec<u8>> {
+        use crate::event::Media;
+        match media {
+            Media::Url(u) if is_http_url(u) => {
+                let resp = self.http.get(u).send().await?.error_for_status()?;
+                Ok(resp.bytes().await?.to_vec())
+            }
+            Media::Path(p) => Ok(tokio::fs::read(p).await?),
+            Media::Base64(s) => {
+                let raw = s.strip_prefix("base64://").unwrap_or(s);
+                anyhow::bail!("base64 image not supported here ({} bytes)", raw.len())
+            }
+            Media::Url(u) | Media::FileId(u) => {
+                let path = self.messenger().await.get_image(u).await?;
+                Ok(tokio::fs::read(&path).await?)
+            }
+        }
+    }
+}
+
+fn is_http_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
 }
 
 #[async_trait]

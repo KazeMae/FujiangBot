@@ -61,7 +61,9 @@ async fn run(path: PathBuf) -> anyhow::Result<()> {
         archive_every_hours: cfg.store.archive_every_hours,
     })
     .await?;
-    store.spawn_archiver();
+
+    let process_stop = CancellationToken::new();
+    store.spawn_archiver(process_stop.clone());
 
     let adapter = Arc::new(runtime::build_adapter(&cfg)?);
     let dispatcher = Arc::new(Dispatcher::new(plugins::initial(&cfg)));
@@ -76,7 +78,6 @@ async fn run(path: PathBuf) -> anyhow::Result<()> {
     dispatcher.start_all(&ctx).await?;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-    let process_stop = CancellationToken::new();
     {
         let stop = process_stop.clone();
         tokio::spawn(async move {
@@ -121,6 +122,7 @@ async fn run(path: PathBuf) -> anyhow::Result<()> {
             }
         }
     }
+    state.dispatcher.stop_all().await;
     state.stop_gateway().await;
     Ok(())
 }
