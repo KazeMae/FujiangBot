@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tracing::{info, warn};
@@ -173,18 +173,22 @@ async fn import_gallery(store: &Store, from: &Path) -> anyhow::Result<Option<usi
         if let Some(obj) = v.as_object() {
             for (k, val) in obj {
                 if let Some(rel) = val.as_str() {
-                    alias_to_rel.insert(k.trim_start_matches("来只").to_string(), rel.to_string());
+                    let alias = strip_lai_zhi(k);
+                    if alias.is_empty() {
+                        warn!(key = %k, folder = %rel, "skip empty gallery tag");
+                        continue;
+                    }
+                    alias_to_rel.insert(alias, rel.to_string());
                 }
             }
         }
     }
 
     let mut n = 0usize;
-    // Group aliases that share the same relative folder.
     let mut folder_to_names: HashMap<String, Vec<String>> = HashMap::new();
     for (alias, rel) in &alias_to_rel {
         folder_to_names
-            .entry(rel.trim_end_matches('/').to_string())
+            .entry(rel.to_string())
             .or_default()
             .push(alias.clone());
     }
@@ -200,46 +204,84 @@ async fn import_gallery(store: &Store, from: &Path) -> anyhow::Result<Option<usi
     }
 
     for (folder, names) in folder_to_names {
-        let primary = names.first().cloned().unwrap_or_else(|| folder.clone());
-        store.tag_ensure(&primary).await?;
-        for alias in &names {
-            if alias != &primary {
-                store.tag_alias(&primary, alias).await.ok();
+        let Some(dir) = resolve_gallery_dir(&src, &folder) else {
+            warn!(folder, "skip missing gallery folder");
+            continue;
+        };
+        let names: Vec<String> = names.into_iter().filter(|s| !s.is_empty()).collect();
+        let tag = names.first().cloned();
+        if let Some(primary) = tag.as_deref() {
+            store.tag_ensure(primary).await?;
+            for alias in &names {
+                if alias != primary {
+                    store.tag_alias(primary, alias).await.ok();
+                }
             }
         }
-        let dir = src.join(&folder);
-        if !dir.is_dir() {
+        n += import_dir_images(store, &dir, tag.as_deref()).await?;
+    }
+
+    if src.is_dir() {
+        n += import_dir_images(store, &src, None).await?;
+    }
+
+    info!(n, "imported gallery images");
+    Ok(Some(n))
+}
+
+/// Old keys are `来只xxx`. Only strip the prefix once — `来只来只` is a real tag.
+fn strip_lai_zhi(key: &str) -> String {
+    key.trim()
+        .strip_prefix("来只")
+        .unwrap_or(key.trim())
+        .trim()
+        .to_string()
+}
+
+fn resolve_gallery_dir(src: &Path, rel: &str) -> Option<PathBuf> {
+    let trimmed = rel.trim().trim_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return Some(src.to_path_buf());
+    }
+    let p = Path::new(trimmed);
+    if p.is_absolute() {
+        return None;
+    }
+    let dir = src.join(trimmed);
+    dir.is_dir().then_some(dir)
+}
+
+async fn import_dir_images(store: &Store, dir: &Path, tag: Option<&str>) -> anyhow::Result<usize> {
+    let mut n = 0usize;
+    for file in WalkDir::new(dir).max_depth(1).into_iter().flatten() {
+        if !file.file_type().is_file() {
             continue;
         }
-        for file in WalkDir::new(&dir).max_depth(1).into_iter().flatten() {
-            if !file.file_type().is_file() {
+        let ext = file
+            .path()
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("jpg")
+            .to_lowercase();
+        if !matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp") {
+            continue;
+        }
+        let bytes = match fs::read(file.path()) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(error = %e, path = %file.path().display(), "skip image");
                 continue;
             }
-            let ext = file
-                .path()
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("jpg")
-                .to_lowercase();
-            if !matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp") {
-                continue;
-            }
-            let bytes = match fs::read(file.path()) {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!(error = %e, path = %file.path().display(), "skip image");
-                    continue;
-                }
-            };
-            let img = store.image_upsert(&bytes, &ext, 0).await?;
-            match store.image_attach(&img.md5, &primary, 0).await? {
+        };
+        let img = store.image_upsert(&bytes, &ext, 0).await?;
+        if let Some(tag) = tag {
+            match store.image_attach(&img.md5, tag, 0).await? {
                 AttachResult::Attached => n += 1,
                 AttachResult::Already => {}
             }
         }
     }
-    info!(n, "imported gallery images");
-    Ok(Some(n))
+    Ok(n)
 }
 
 fn read_json(path: &Path) -> anyhow::Result<Option<Value>> {
@@ -266,4 +308,59 @@ fn as_str(v: &Value) -> String {
         .map(|s| s.to_string())
         .or_else(|| v.as_i64().map(|n| n.to_string()))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Store;
+
+    #[test]
+    fn strip_lai_zhi_once() {
+        assert_eq!(strip_lai_zhi("来只福哥"), "福哥");
+        assert_eq!(strip_lai_zhi("来只来只"), "来只");
+        assert_eq!(strip_lai_zhi("来只"), "");
+        assert_eq!(strip_lai_zhi(" 来只 合照 "), "合照");
+        assert_eq!(strip_lai_zhi("福哥"), "福哥");
+    }
+
+    #[test]
+    fn resolve_root_and_reject_abs() {
+        let src = Path::new("/tmp/fujiang-src");
+        assert_eq!(resolve_gallery_dir(src, "/").as_deref(), Some(src));
+        assert_eq!(resolve_gallery_dir(src, "").as_deref(), Some(src));
+        assert_eq!(resolve_gallery_dir(src, "   ").as_deref(), Some(src));
+        assert!(resolve_gallery_dir(src, "/etc").is_none());
+    }
+
+    #[tokio::test]
+    async fn migrate_skips_empty_lai_zhi() {
+        let dir = std::env::temp_dir().join(format!(
+            "fujiang-import-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let from = dir.join("old");
+        let src = from.join("src");
+        let album = src.join("福哥");
+        std::fs::create_dir_all(&album).unwrap();
+        std::fs::write(src.join("root.jpg"), b"root-img").unwrap();
+        std::fs::write(album.join("a.jpg"), b"album-img").unwrap();
+        std::fs::write(
+            from.join("path.json"),
+            r#"{"来只":"/","来只来只":"来只/","来只福哥":"福哥/"}"#,
+        )
+        .unwrap();
+
+        let store = Store::open(dir.join("t.db").to_str().unwrap(), dir.join("img"))
+            .await
+            .unwrap();
+        let report = migrate_from_python(&store, &from).await.unwrap();
+        assert!(report.contains("album images"), "{report}");
+        assert!(store.random_by_tag("福哥").await.unwrap().is_some());
+        assert!(store.tag_by_alias("").await.unwrap().is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
