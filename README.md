@@ -2,6 +2,21 @@
 
 西南科技大学 ACM 群机器人「福酱」的 Rust 重写。协议层对齐 [NapCat 4.18.19](https://napneko.github.io/api/4.18.19)，形态参考 [node-napcat-ts](https://github.com/HkTeamX/node-napcat-ts)。业务只依赖中间层，收发器可替换。
 
+- **Language:** Rust 2021, MIT
+- **Protocol:** OneBot 11 via NapCat / LLOneBot adapters
+- **Runtime:** SQLite store, in-process plugin loader (`.so` / `.dylib`), admin page at `[admin].listen`
+
+## Requirements
+
+- A Rust toolchain that can build edition 2021 workspaces
+- [NapCat](https://napneko.github.io/) or [LLOneBot](https://llonebot.github.io/) as the OneBot implementation
+- Copy `config.example.toml` → `config.toml` and fill adapter, groups, and secrets before the first run
+
+```bash
+cp config.example.toml config.toml
+cargo run -p fujiang -- run --config config.toml
+```
+
 ## 架构
 
 ```
