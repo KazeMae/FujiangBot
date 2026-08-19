@@ -81,6 +81,7 @@ async fn run(path: PathBuf) -> anyhow::Result<()> {
     dispatcher.start_all(&ctx).await?;
 
     let hub = Arc::new(PluginHub::new(&cfg.plugins.dir));
+    hub.set_disabled(cfg.plugins.disabled.clone()).await;
     if let Err(e) = hub.scan(&dispatcher, &ctx).await {
         tracing::warn!(error = %e, "initial plugin scan");
     }

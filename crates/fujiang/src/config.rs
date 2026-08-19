@@ -134,6 +134,9 @@ pub struct PluginsSection {
     /// Per-plugin JSON for dynamic (and optional overlay) plugins.
     #[serde(default)]
     pub configs: HashMap<String, Value>,
+    /// Dynamic plugin names that stay loaded on disk but are not running.
+    #[serde(default)]
+    pub disabled: Vec<String>,
 }
 
 impl Default for PluginsSection {
@@ -147,6 +150,7 @@ impl Default for PluginsSection {
             fun: FunToggle::default(),
             luck: PluginToggle::default(),
             configs: HashMap::new(),
+            disabled: Vec::new(),
         }
     }
 }

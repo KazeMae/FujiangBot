@@ -196,12 +196,13 @@
         <label>动态插件目录<input id="plugins.dir" /></label>
         <label class="check">监视目录热加载<input id="plugins.watch" type="checkbox" /></label>
       </div>
-      <p class="hint">目录里的 .so / .dylib / .dll 会按 ABI 加载。内置插件不能用 so 覆盖。改目录需保存配置后才会写进 toml；监视开关下次启动生效。</p>
+      <p class="hint">停用只 dispose 运行实例，不删磁盘上的 .so。内置插件写回 enabled；动态插件记入 plugins.disabled。</p>
       <div class="row" style="margin-bottom:12px">
         <input id="dyn-path" placeholder="plugins/libfujiang_plugin_echo.dylib" />
         <button class="ghost" type="button" id="dyn-load">加载</button>
         <button class="ghost" type="button" id="dyn-scan">扫描目录</button>
       </div>
+      <div id="entry-list"></div>
       <div id="dyn-list"></div>
     </section>
     <section>
@@ -340,35 +341,48 @@
     }
 
     function renderDyn(p) {
-      const box = el("dyn-list");
+      const box = el("entry-list") || el("dyn-list");
       if (!box) return;
-      const dyn = (p && p.dynamic) || [];
-      if (!dyn.length) {
-        box.innerHTML = '<p class="hint">还没有动态插件。</p>';
+      const entries = (p && p.entries) || [];
+      if (!entries.length) {
+        box.innerHTML = '<p class="hint">没有插件条目。</p>';
         return;
       }
-      box.innerHTML = dyn.map((d) =>
-        '<div class="plugin">' +
+      box.innerHTML = entries.map((d) => {
+        const dynBtns = d.kind === "dynamic"
+          ? '<button class="ghost" type="button" data-reload="' + d.name + '">重载</button>' +
+            '<button class="ghost" type="button" data-unload="' + d.name + '">卸载</button>'
+          : "";
+        const toggle = d.enabled
+          ? '<button class="ghost" type="button" data-disable="' + d.name + '">停用</button>'
+          : '<button class="primary" type="button" data-enable="' + d.name + '">启用</button>';
+        const cfgBox = d.kind === "dynamic"
+          ? '<label class="full">config（JSON）<textarea data-cfg="' + d.name + '">' +
+            escapeHtml(JSON.stringify(d.config || {}, null, 2)) +
+            '</textarea></label>' +
+            '<button class="ghost" type="button" data-savecfg="' + d.name + '">保存此插件配置</button>'
+          : "";
+        return '<div class="plugin">' +
           '<div class="grid">' +
           '<div><strong>' + d.name + '</strong> v' + d.version +
-          (d.enabled ? ' · 运行中' : ' · 已加载未启用') +
-          '<div class="hint">' + (d.description || '') + '<br>' + d.path + '</div></div>' +
-          '<div class="actions">' +
-            '<button class="ghost" type="button" data-reload="' + d.name + '">重载</button>' +
-            '<button class="ghost" type="button" data-unload="' + d.name + '">卸载</button>' +
-          '</div></div>' +
-          '<label class="full">config（JSON）' +
-            '<textarea data-cfg="' + d.name + '">' +
-              escapeHtml(JSON.stringify(d.config || {}, null, 2)) +
-            '</textarea></label>' +
-          '<button class="ghost" type="button" data-savecfg="' + d.name + '">保存此插件配置</button>' +
-        '</div>'
-      ).join("");
+          ' · ' + d.kind + ' · ' + d.state +
+          '<div class="hint">' + (d.description || '') +
+          (d.path ? '<br>' + d.path : '') + '</div></div>' +
+          '<div class="actions">' + toggle + dynBtns + '</div></div>' +
+          cfgBox +
+        '</div>';
+      }).join("");
       box.querySelectorAll("[data-reload]").forEach((b) => {
         b.onclick = () => dynAct("/api/plugins/reload", { name: b.dataset.reload });
       });
       box.querySelectorAll("[data-unload]").forEach((b) => {
         b.onclick = () => dynAct("/api/plugins/unload", { name: b.dataset.unload });
+      });
+      box.querySelectorAll("[data-enable]").forEach((b) => {
+        b.onclick = () => dynAct("/api/plugins/" + encodeURIComponent(b.dataset.enable) + "/enable", {});
+      });
+      box.querySelectorAll("[data-disable]").forEach((b) => {
+        b.onclick = () => dynAct("/api/plugins/" + encodeURIComponent(b.dataset.disable) + "/disable", {});
       });
       box.querySelectorAll("[data-savecfg]").forEach((b) => {
         b.onclick = () => savePluginConfig(b.dataset.savecfg, box);

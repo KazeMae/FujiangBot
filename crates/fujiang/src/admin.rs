@@ -40,6 +40,8 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/api/plugins/unload", post(unload_plugin))
         .route("/api/plugins/reload", post(reload_plugin))
         .route("/api/plugins/{name}/config", put(put_plugin_config))
+        .route("/api/plugins/{name}/enable", post(enable_plugin))
+        .route("/api/plugins/{name}/disable", post(disable_plugin))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
     Router::new()
         .route("/", get(index))
@@ -87,9 +89,24 @@ struct BuiltinView {
 }
 
 #[derive(Serialize)]
+struct PluginEntryView {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub commands: Vec<String>,
+    pub kind: &'static str,
+    pub path: Option<String>,
+    pub enabled: bool,
+    pub state: &'static str,
+    pub config: serde_json::Value,
+}
+
+#[derive(Serialize)]
 struct PluginsView {
     dir: String,
     watch: bool,
+    disabled: Vec<String>,
+    entries: Vec<PluginEntryView>,
     builtin: Vec<BuiltinView>,
     dynamic: Vec<crate::dynload::DynamicPluginView>,
 }
@@ -225,23 +242,85 @@ struct ConfigBody {
     config: serde_json::Value,
 }
 
+async fn enable_plugin(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+    plugin_enable_resp(state, name, true).await
+}
+
+async fn disable_plugin(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+    plugin_enable_resp(state, name, false).await
+}
+
+async fn plugin_enable_resp(state: Arc<AppState>, name: String, enabled: bool) -> Response {
+    match state.set_plugin_enabled(&name, enabled).await {
+        Ok(report) => Json(serde_json::json!({
+            "ok": true,
+            "report": report,
+            "plugins": plugins_view(&state).await,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: format!("{e:#}"),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 async fn plugins_view(state: &AppState) -> PluginsView {
     let cfg = state.cfg.read().await;
     let running = state.dispatcher.names().await;
     let all = state.dispatcher.info_list().await;
-    let builtin = all
-        .into_iter()
-        .filter(|p| crate::plugins::NAMES.contains(&p.name.as_str()))
-        .map(|snapshot| {
-            let config = crate::plugins::config_view(&cfg, &snapshot.name);
-            BuiltinView { snapshot, config }
+    let builtin: Vec<BuiltinView> = crate::plugins::NAMES
+        .iter()
+        .filter_map(|name| {
+            let snapshot = all.iter().find(|p| p.name == *name).cloned().or_else(|| {
+                crate::plugins::make(name)
+                    .map(|p| fujiang_core::PluginSnapshot::from_plugin(p.as_ref()))
+            })?;
+            let config = crate::plugins::config_view(&cfg, name);
+            Some(BuiltinView { snapshot, config })
         })
         .collect();
+    let dynamic = state.hub.list(&running, &cfg.plugins.configs).await;
+    let mut entries: Vec<PluginEntryView> = builtin
+        .iter()
+        .map(|b| {
+            let enabled = running.iter().any(|n| n == &b.snapshot.name);
+            PluginEntryView {
+                name: b.snapshot.name.clone(),
+                version: b.snapshot.version.clone(),
+                description: b.snapshot.description.clone(),
+                commands: b.snapshot.commands.clone(),
+                kind: "builtin",
+                path: None,
+                enabled,
+                state: if enabled { "active" } else { "disabled" },
+                config: b.config.clone(),
+            }
+        })
+        .collect();
+    for d in &dynamic {
+        entries.push(PluginEntryView {
+            name: d.name.clone(),
+            version: d.version.clone(),
+            description: d.description.clone(),
+            commands: d.commands.clone(),
+            kind: "dynamic",
+            path: Some(d.path.clone()),
+            enabled: d.enabled,
+            state: if d.enabled { "active" } else { "loaded" },
+            config: d.config.clone(),
+        });
+    }
     PluginsView {
         dir: cfg.plugins.dir.clone(),
         watch: cfg.plugins.watch,
+        disabled: cfg.plugins.disabled.clone(),
+        entries,
         builtin,
-        dynamic: state.hub.list(&running, &cfg.plugins.configs).await,
+        dynamic,
     }
 }
 

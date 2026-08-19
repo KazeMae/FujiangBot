@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -27,6 +27,7 @@ pub struct LoadedSo {
 pub struct PluginHub {
     dir: PathBuf,
     loaded: Mutex<HashMap<String, LoadedSo>>,
+    disabled: Mutex<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -45,7 +46,16 @@ impl PluginHub {
         Self {
             dir: dir.into(),
             loaded: Mutex::new(HashMap::new()),
+            disabled: Mutex::new(HashSet::new()),
         }
+    }
+
+    pub async fn set_disabled(&self, names: impl IntoIterator<Item = String>) {
+        *self.disabled.lock().await = names.into_iter().collect();
+    }
+
+    pub async fn is_disabled(&self, name: &str) -> bool {
+        self.disabled.lock().await.contains(name)
     }
 
     pub async fn plugin(&self, name: &str) -> Option<Arc<dyn Plugin>> {
@@ -95,7 +105,9 @@ impl PluginHub {
             }
         }
         let snapshot = PluginSnapshot::from_plugin(plugin.as_ref());
-        dispatcher.insert(plugin.clone(), ctx).await?;
+        if !self.is_disabled(&name).await {
+            dispatcher.insert(plugin.clone(), ctx).await?;
+        }
         let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         self.loaded.lock().await.insert(
             name.clone(),
@@ -181,6 +193,33 @@ impl PluginHub {
                     }
                 }
                 _ => {}
+            }
+        }
+        changed.extend(self.reconcile(dispatcher, ctx).await?);
+        Ok(changed)
+    }
+
+    /// Start / stop dynamic plugins to match the disabled set. Libraries stay loaded.
+    pub async fn reconcile(
+        &self,
+        dispatcher: &Dispatcher,
+        ctx: &BotContext,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut changed = Vec::new();
+        let disabled = self.disabled.lock().await.clone();
+        let running = dispatcher.names().await;
+        let names: Vec<String> = self.loaded.lock().await.keys().cloned().collect();
+        for name in names {
+            let want = !disabled.contains(&name);
+            let is_on = running.iter().any(|n| n == &name);
+            if is_on && !want {
+                dispatcher.remove(&name).await?;
+                changed.push(format!("disable {name}"));
+            } else if want && !is_on {
+                if let Some(p) = self.plugin(&name).await {
+                    dispatcher.insert(p, ctx).await?;
+                    changed.push(format!("enable {name}"));
+                }
             }
         }
         Ok(changed)

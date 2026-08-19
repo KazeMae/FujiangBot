@@ -185,6 +185,8 @@ cp target/debug/libfujiang_plugin_echo.dylib plugins/
 
 进程启动会扫描 `plugins.dir`（默认 `plugins/`）。`plugins.watch = true` 时每 2 秒看一次增删改。管理页也可以手动加载 / 卸载 / 重载。
 
+`plugins.disabled = ["echo"]` 表示动态插件库留在内存、不进分发器。停用 ≠ 从磁盘删 `.so`。内置插件仍用 `plugins.<name>.enabled`。
+
 导出符号（`declare_plugin!` 已生成）：
 
 - `fujiang_plugin_abi() -> u32`

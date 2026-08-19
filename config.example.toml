@@ -32,6 +32,7 @@ limit = 10
 [plugins]
 dir = "plugins"
 watch = true
+disabled = []
 
 [plugins.contest]
 enabled = true

@@ -76,6 +76,9 @@ impl AppState {
         if next.plugins.configs.is_empty() {
             next.plugins.configs = old.plugins.configs.clone();
         }
+        if next.plugins.disabled.is_empty() {
+            next.plugins.disabled = old.plugins.disabled.clone();
+        }
         validate_config(&next)?;
 
         let mut report = ApplyReport::default();
@@ -109,6 +112,8 @@ impl AppState {
         report.applied.push("store.archive".into());
 
         sync_plugins(&self.dispatcher, &self.ctx, &old, &next).await?;
+        self.hub.set_disabled(next.plugins.disabled.clone()).await;
+        self.hub.reconcile(&self.dispatcher, &self.ctx).await?;
         report.applied.push("plugins".into());
 
         if adapter_changed(&old, &next) {
@@ -126,6 +131,58 @@ impl AppState {
         *self.cfg.write().await = next;
         info!(applied = ?report.applied, restart = ?report.restart_required, "config applied");
         Ok(report)
+    }
+
+    pub async fn set_plugin_enabled(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> anyhow::Result<ApplyReport> {
+        let _guard = self.apply_lock.lock().await;
+        let mut next = self.cfg.read().await.clone();
+        if plugins::NAMES.contains(&name) {
+            plugins::apply_config(&mut next, name, serde_json::json!({ "enabled": enabled }))?;
+        } else {
+            next.plugins.disabled.retain(|n| n != name);
+            if !enabled {
+                next.plugins.disabled.push(name.to_string());
+                next.plugins.disabled.sort();
+                next.plugins.disabled.dedup();
+            }
+        }
+        self.hub.set_disabled(next.plugins.disabled.clone()).await;
+        *self.ctx.config.write().await = next.to_bot_config();
+        *self.ctx.plugin_configs.write().await = plugins::all_configs(&next);
+
+        if enabled {
+            if plugins::NAMES.contains(&name) {
+                if !self.dispatcher.names().await.iter().any(|n| n == name) {
+                    if let Some(p) = plugins::make(name) {
+                        self.dispatcher.insert(p, &self.ctx).await?;
+                    }
+                }
+            } else {
+                self.dispatcher.remove(name).await?;
+                let Some(p) = self.hub.plugin(name).await else {
+                    anyhow::bail!("动态插件「{name}」未加载，先放到 plugins/ 或点加载");
+                };
+                self.dispatcher.insert(p, &self.ctx).await?;
+            }
+        } else {
+            self.dispatcher.remove(name).await?;
+        }
+
+        next.save(&self.config_path)
+            .with_context(|| format!("write {}", self.config_path.display()))?;
+        *self.cfg.write().await = next;
+        Ok(ApplyReport {
+            applied: vec![format!(
+                "plugins.{name}.{}",
+                if enabled { "enable" } else { "disable" }
+            )],
+            restart_required: vec![],
+            plugins: self.dispatcher.names().await,
+        })
     }
 
     pub async fn apply_plugin_config(
