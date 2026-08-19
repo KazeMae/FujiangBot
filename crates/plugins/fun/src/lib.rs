@@ -84,8 +84,9 @@ impl Plugin for FunPlugin {
     }
 }
 
-fn can_mutate(ctx: &BotContext, qq: i64) -> bool {
-    ctx.config.fun_allow_mutate && ctx.config.is_fun_admin(qq)
+async fn can_mutate(ctx: &BotContext, qq: i64) -> bool {
+    let cfg = ctx.bot_config().await;
+    cfg.fun_allow_mutate && cfg.is_fun_admin(qq)
 }
 
 async fn handle_learn(
@@ -100,7 +101,7 @@ async fn handle_learn(
     }
     match parts[1] {
         "add" => {
-            if !can_mutate(ctx, msg.user_id()) {
+            if !can_mutate(ctx, msg.user_id()).await {
                 ctx.reply_text(msg, "没有权限").await?;
                 return Ok(());
             }
@@ -130,7 +131,7 @@ async fn handle_learn(
             ctx.reply_text(msg, s.trim_end()).await?;
         }
         "del" => {
-            if !can_mutate(ctx, msg.user_id()) {
+            if !can_mutate(ctx, msg.user_id()).await {
                 ctx.reply_text(msg, "没有权限").await?;
                 return Ok(());
             }
@@ -168,7 +169,7 @@ async fn handle_star(
     }
     match parts[1] {
         "add" if parts.len() == 4 => {
-            if !can_mutate(ctx, msg.user_id()) {
+            if !can_mutate(ctx, msg.user_id()).await {
                 ctx.reply_text(msg, "没有权限").await?;
                 return Ok(());
             }
@@ -184,7 +185,7 @@ async fn handle_star(
             }
         }
         "set" if parts.len() == 4 => {
-            if !can_mutate(ctx, msg.user_id()) {
+            if !can_mutate(ctx, msg.user_id()).await {
                 ctx.reply_text(msg, "没有权限").await?;
                 return Ok(());
             }
@@ -194,7 +195,7 @@ async fn handle_star(
             ctx.reply_text(msg, "stared").await?;
         }
         "del" if parts.len() == 3 => {
-            if !can_mutate(ctx, msg.user_id()) {
+            if !can_mutate(ctx, msg.user_id()).await {
                 ctx.reply_text(msg, "没有权限").await?;
                 return Ok(());
             }
@@ -234,7 +235,7 @@ async fn handle_tag(
         ctx.reply_text(msg, s).await?;
         return Ok(());
     }
-    if !can_mutate(ctx, msg.user_id()) {
+    if !can_mutate(ctx, msg.user_id()).await {
         ctx.reply_text(msg, "没有权限").await?;
         return Ok(());
     }
@@ -276,7 +277,7 @@ async fn handle_image_cmd(
     msg: &fujiang_core::MessageEvent,
     line: &str,
 ) -> anyhow::Result<()> {
-    if !can_mutate(ctx, msg.user_id()) {
+    if !can_mutate(ctx, msg.user_id()).await {
         ctx.reply_text(msg, "没有权限").await?;
         return Ok(());
     }
@@ -291,7 +292,7 @@ async fn handle_image_cmd(
         ctx.reply_text(msg, "请先回复一张图片").await?;
         return Ok(());
     };
-    let quoted = ctx.messenger.get_message(rid).await?;
+    let quoted = ctx.messenger().await.get_message(rid).await?;
     let Some(media) = quoted.first_image() else {
         ctx.reply_text(msg, "回复的不是图片").await?;
         return Ok(());
@@ -299,7 +300,7 @@ async fn handle_image_cmd(
     let file = match media {
         Media::Url(u) | Media::Path(u) | Media::FileId(u) | Media::Base64(u) => u.clone(),
     };
-    let path = match ctx.messenger.get_image(&file).await {
+    let path = match ctx.messenger().await.get_image(&file).await {
         Ok(p) => p,
         Err(e) => {
             warn!(error = %e, "get_image");
@@ -356,7 +357,7 @@ async fn reply_image_md5(
         ctx.reply_text(msg, "请先回复一张图片").await?;
         return Ok(None);
     };
-    let quoted = ctx.messenger.get_message(rid).await?;
+    let quoted = ctx.messenger().await.get_message(rid).await?;
     let Some(media) = quoted.first_image() else {
         ctx.reply_text(msg, "回复的不是图片").await?;
         return Ok(None);
@@ -364,7 +365,7 @@ async fn reply_image_md5(
     let file = match media {
         Media::Url(u) | Media::Path(u) | Media::FileId(u) | Media::Base64(u) => u.clone(),
     };
-    let path = match ctx.messenger.get_image(&file).await {
+    let path = match ctx.messenger().await.get_image(&file).await {
         Ok(p) => p,
         Err(e) => {
             warn!(error = %e, "get_image");

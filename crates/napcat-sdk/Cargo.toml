@@ -7,6 +7,7 @@ description = "NapCat 4.18.19 OneBot client (forward WebSocket)"
 
 [dependencies]
 futures-util.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

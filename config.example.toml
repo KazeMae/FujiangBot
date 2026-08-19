@@ -1,3 +1,13 @@
+[adapter]
+# napcat_ws | llonebot_ws | llonebot_http
+backend = "napcat_ws"
+access_token = ""
+ws_url = "ws://127.0.0.1:3001"
+# llonebot_http 时使用：
+http_api = "http://127.0.0.1:3000"
+event_listen = "127.0.0.1:5700"
+
+# 兼容旧配置；未写 [adapter].ws_url / access_token 时回退到这里
 [napcat]
 ws_url = "ws://127.0.0.1:3001"
 access_token = ""
@@ -39,3 +49,9 @@ delete_files_on_album_del = false
 
 [plugins.luck]
 enabled = true
+
+# 内嵌配置页，不要和 adapter.event_listen 抢端口
+[admin]
+listen = "127.0.0.1:8787"
+# 非空则改配置要带请求头 X-Admin-Token；页面会提示输入
+token = ""

@@ -8,12 +8,14 @@ pub mod client;
 pub mod cq;
 pub mod error;
 pub mod events;
+pub mod http;
 pub mod structs;
 pub mod types;
 
 pub use client::{ClientConfig, NapcatClient};
 pub use error::{Error, Result};
 pub use events::{Event, EventKind, Sender};
+pub use http::HttpApi;
 pub use structs::{RecvSegment, SendSegment, Structs};
 pub use types::{
     FileResult, LoginInfo, SendGroupMsg, SendPrivateMsg, SendResult, SetFriendAddRequest,

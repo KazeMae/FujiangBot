@@ -20,6 +20,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 anyhow = "1"
+axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1"] }
 async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde", "clock"] }
@@ -34,6 +35,7 @@ serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "fs", "io-util", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 tokio-tungstenite = { version = "0.26", features = ["connect", "rustls-tls-webpki-roots"] }
 toml = "0.8"
 tracing = "0.1"

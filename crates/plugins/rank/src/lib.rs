@@ -6,6 +6,7 @@ use chrono::{TimeZone, Utc};
 use fujiang_core::{BotContext, Event, Flow, Plugin};
 use fujiang_store::CfUser;
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 const HELP: &str = ".rank(.rk) 指令：\n\
@@ -24,7 +25,10 @@ const HELP: &str = ".rank(.rk) 指令：\n\
 --updateRating(-urt) 刷新 rating\n\
 --updateTime(-u) 上次刷新时间";
 
-pub struct RankPlugin;
+#[derive(Default)]
+pub struct RankPlugin {
+    stop: CancellationToken,
+}
 
 #[async_trait]
 impl Plugin for RankPlugin {
@@ -42,19 +46,37 @@ impl Plugin for RankPlugin {
 
     async fn on_start(&self, ctx: &BotContext) -> anyhow::Result<()> {
         let ctx = ctx.clone();
-        let minutes = ctx.config.rank_update_minutes.max(10);
+        let stop = self.stop.clone();
         tokio::spawn(async move {
             loop {
+                if stop.is_cancelled() {
+                    break;
+                }
                 if let Err(e) = refresh_ratings(&ctx).await {
                     warn!(error = %e, "rating refresh");
                 }
-                tokio::time::sleep(Duration::from_secs(300)).await;
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(300)) => {}
+                }
+                if stop.is_cancelled() {
+                    break;
+                }
                 if let Err(e) = refresh_ranks(&ctx).await {
                     warn!(error = %e, "rank refresh");
                 }
-                tokio::time::sleep(Duration::from_secs(minutes * 60)).await;
+                let minutes = ctx.bot_config().await.rank_update_minutes.max(10);
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(minutes * 60)) => {}
+                }
             }
         });
+        Ok(())
+    }
+
+    async fn on_stop(&self) -> anyhow::Result<()> {
+        self.stop.cancel();
         Ok(())
     }
 

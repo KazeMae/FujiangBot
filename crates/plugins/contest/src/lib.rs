@@ -5,6 +5,7 @@ use chrono::{Local, TimeZone, Timelike};
 use fujiang_core::{BotContext, Event, Flow, Plugin, Source};
 use fujiang_store::ContestRow;
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 const OJS: &[(&str, &str)] = &[
@@ -15,7 +16,10 @@ const OJS: &[(&str, &str)] = &[
     (".scpc", "SCPC"),
 ];
 
-pub struct ContestPlugin;
+#[derive(Default)]
+pub struct ContestPlugin {
+    stop: CancellationToken,
+}
 
 #[async_trait]
 impl Plugin for ContestPlugin {
@@ -35,23 +39,36 @@ impl Plugin for ContestPlugin {
     }
 
     async fn on_start(&self, ctx: &BotContext) -> anyhow::Result<()> {
-        let minutes = ctx.config.contest_update_minutes.max(5);
+        let stop = self.stop.clone();
         let refresh_ctx = ctx.clone();
         tokio::spawn(async move {
             loop {
+                if stop.is_cancelled() {
+                    break;
+                }
                 if let Err(e) = refresh(&refresh_ctx).await {
                     warn!(error = %e, "contest refresh failed");
                 }
                 if let Err(e) = pre_remind(&refresh_ctx).await {
                     warn!(error = %e, "pre-remind failed");
                 }
-                tokio::time::sleep(Duration::from_secs(minutes * 60)).await;
+                let minutes = refresh_ctx.bot_config().await.contest_update_minutes.max(5);
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(minutes * 60)) => {}
+                }
             }
         });
         let remind_ctx = ctx.clone();
+        let stop2 = self.stop.clone();
         tokio::spawn(async move {
-            daily_remind_loop(remind_ctx).await;
+            daily_remind_loop(remind_ctx, stop2).await;
         });
+        Ok(())
+    }
+
+    async fn on_stop(&self) -> anyhow::Result<()> {
+        self.stop.cancel();
         Ok(())
     }
 
@@ -156,7 +173,8 @@ async fn refresh(ctx: &BotContext) -> anyhow::Result<()> {
 }
 
 async fn fetch_clist(ctx: &BotContext) -> anyhow::Result<Vec<ContestRow>> {
-    if ctx.config.clist_username.is_empty() || ctx.config.clist_api_key.is_empty() {
+    let cfg = ctx.bot_config().await;
+    if cfg.clist_username.is_empty() || cfg.clist_api_key.is_empty() {
         return Ok(vec![]);
     }
     let mut out = Vec::new();
@@ -164,11 +182,11 @@ async fn fetch_clist(ctx: &BotContext) -> anyhow::Result<Vec<ContestRow>> {
         let today = Local::now().format("%Y-%m-%d").to_string();
         let url = format!(
             "https://clist.by/api/v3/contest/?username={}&api_key={}&host={}&start__gt={}T00:00:00&order_by=start&limit={}&format=json",
-            ctx.config.clist_username,
-            ctx.config.clist_api_key,
+            cfg.clist_username,
+            cfg.clist_api_key,
             host,
             today,
-            ctx.config.clist_limit
+            cfg.clist_limit
         );
         let body: ClistResp = ctx.http.get(url).send().await?.json().await?;
         for o in body.objects {
@@ -402,8 +420,11 @@ async fn pre_remind(ctx: &BotContext) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn daily_remind_loop(ctx: BotContext) {
+async fn daily_remind_loop(ctx: BotContext, stop: CancellationToken) {
     loop {
+        if stop.is_cancelled() {
+            break;
+        }
         let groups = ctx.store.remind_groups().await.unwrap_or_default();
         let now = Local::now();
         for g in groups {
@@ -420,7 +441,10 @@ async fn daily_remind_loop(ctx: BotContext) {
                 }
             }
         }
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::select! {
+            _ = stop.cancelled() => break,
+            _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+        }
     }
 }
 

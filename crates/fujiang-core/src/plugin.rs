@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
+use tokio_util::sync::CancellationToken;
 
 use crate::event::{Event, MessageEvent, Segment, Source};
 use crate::BotConfig;
@@ -22,20 +23,32 @@ pub trait Messenger: Send + Sync {
 
 #[async_trait]
 pub trait Gateway: Send + Sync {
-    async fn run(self: Arc<Self>, tx: mpsc::Sender<Event>) -> anyhow::Result<()>;
+    async fn run(
+        self: Arc<Self>,
+        tx: mpsc::Sender<Event>,
+        stop: CancellationToken,
+    ) -> anyhow::Result<()>;
 }
 
 #[derive(Clone)]
 pub struct BotContext {
-    pub messenger: Arc<dyn Messenger>,
+    pub messenger: Arc<RwLock<Arc<dyn Messenger>>>,
     pub store: fujiang_store::Store,
     pub http: reqwest::Client,
-    pub config: Arc<BotConfig>,
+    pub config: Arc<RwLock<BotConfig>>,
 }
 
 impl BotContext {
+    pub async fn bot_config(&self) -> BotConfig {
+        self.config.read().await.clone()
+    }
+
+    pub async fn messenger(&self) -> Arc<dyn Messenger> {
+        self.messenger.read().await.clone()
+    }
+
     pub async fn send_segments(&self, target: Source, segs: Vec<Segment>) -> anyhow::Result<i64> {
-        self.messenger.send(target, &segs).await
+        self.messenger().await.send(target, &segs).await
     }
 
     pub async fn send_text(&self, target: Source, text: impl Into<String>) -> anyhow::Result<i64> {
@@ -71,6 +84,10 @@ pub trait Plugin: Send + Sync {
     }
 
     async fn on_start(&self, _ctx: &BotContext) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn on_stop(&self) -> anyhow::Result<()> {
         Ok(())
     }
 

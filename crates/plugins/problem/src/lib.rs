@@ -58,7 +58,7 @@ impl Plugin for ProblemPlugin {
 async fn daily(ctx: &BotContext) -> anyhow::Result<String> {
     let now = Local::now();
     let date = now.date_naive().format("%Y-%m-%d").to_string();
-    let reset = ctx.config.daily_reset_hour;
+    let reset = ctx.bot_config().await.daily_reset_hour;
     let use_date = if now.hour() < reset {
         (now.date_naive() - chrono::Duration::days(1))
             .format("%Y-%m-%d")

@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>福酱 · 配置</title>
+  <style>
+    :root {
+      --bg: #f4efe6;
+      --paper: #fffdf8;
+      --ink: #2a2118;
+      --muted: #7a6b5a;
+      --line: #e4d8c6;
+      --accent: #b5442d;
+      --accent-ink: #fff8f4;
+      --ok: #2f6b4f;
+      --warn: #9a6b12;
+      --chip: #efe4d2;
+      --shadow: 0 10px 30px rgba(60, 40, 20, 0.08);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 "Source Han Sans SC", "Noto Sans SC", "PingFang SC", sans-serif; }
+    header {
+      position: sticky; top: 0; z-index: 5;
+      display: flex; gap: 12px; align-items: center; justify-content: space-between;
+      padding: 14px 20px; background: rgba(244, 239, 230, 0.92);
+      backdrop-filter: blur(8px); border-bottom: 1px solid var(--line);
+    }
+    h1 { margin: 0; font-size: 18px; letter-spacing: 0.04em; }
+    h1 span { color: var(--accent); }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    button, .ghost {
+      border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; font: inherit;
+    }
+    button.primary { background: var(--accent); color: var(--accent-ink); }
+    button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+    main { max-width: 980px; margin: 0 auto; padding: 20px 16px 64px; display: grid; gap: 16px; }
+    section {
+      background: var(--paper); border: 1px solid var(--line); border-radius: 14px;
+      padding: 16px 18px 8px; box-shadow: var(--shadow);
+    }
+    section h2 { margin: 0 0 12px; font-size: 15px; }
+    .hint { color: var(--muted); font-size: 13px; margin: -6px 0 12px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 14px; }
+    label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); margin-bottom: 12px; }
+    label .cap { display: flex; align-items: center; gap: 6px; }
+    label.full { grid-column: 1 / -1; }
+    input, select, textarea {
+      font: inherit; color: var(--ink); background: #fff; border: 1px solid var(--line);
+      border-radius: 8px; padding: 8px 10px;
+    }
+    textarea { min-height: 64px; resize: vertical; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .row input { flex: 1; }
+    .check { flex-direction: row; align-items: center; gap: 8px; color: var(--ink); }
+    .check input { width: auto; }
+    .restart { font-size: 11px; color: var(--warn); margin-left: 6px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip { background: var(--chip); border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+    #banner { min-height: 1.4em; font-size: 13px; }
+    #banner.ok { color: var(--ok); }
+    #banner.err { color: var(--accent); }
+    #login {
+      display: none; position: fixed; inset: 0; background: rgba(42, 33, 24, 0.45);
+      align-items: center; justify-content: center; z-index: 10;
+    }
+    #login .card { background: var(--paper); padding: 22px; border-radius: 14px; width: min(360px, 92vw); }
+    .plugin { border-top: 1px dashed var(--line); padding-top: 10px; margin-top: 4px; }
+    @media (max-width: 640px) {
+      header { flex-direction: column; align-items: stretch; }
+      .actions { justify-content: stretch; }
+      .actions button { flex: 1; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>福酱 <span>配置</span></h1>
+      <div class="chips" id="status"></div>
+    </div>
+    <div class="actions">
+      <button class="ghost" type="button" id="reload">重新加载</button>
+      <button class="primary" type="button" id="save">保存并热加载</button>
+    </div>
+  </header>
+  <main>
+    <div id="banner"></div>
+    <section>
+      <h2>连接</h2>
+      <p class="hint">改 backend / 地址 / token 会立刻重连适配器，无需重启进程。</p>
+      <div class="grid">
+        <label>backend
+          <select id="adapter.backend">
+            <option value="napcat_ws">napcat_ws</option>
+            <option value="llonebot_ws">llonebot_ws</option>
+            <option value="llonebot_http">llonebot_http</option>
+          </select>
+        </label>
+        <label>access_token
+          <span class="row">
+            <input id="adapter.access_token" type="password" autocomplete="off" placeholder="留空不改" />
+            <button class="ghost" type="button" data-clear="adapter.access_token">清空</button>
+          </span>
+        </label>
+        <label>ws_url
+          <input id="adapter.ws_url" placeholder="ws://127.0.0.1:3001" />
+        </label>
+        <label>http_api
+          <input id="adapter.http_api" placeholder="http://127.0.0.1:3000" />
+        </label>
+        <label>event_listen
+          <input id="adapter.event_listen" placeholder="127.0.0.1:5700" />
+        </label>
+      </div>
+    </section>
+    <section>
+      <h2>机器人</h2>
+      <div class="grid">
+        <label>命令前缀
+          <input id="bot.command_prefix" />
+        </label>
+        <label class="check">允许私聊
+          <input id="bot.allow_private" type="checkbox" />
+        </label>
+        <label class="full">生效群号（逗号分隔，空=全部）
+          <textarea id="bot.groups" placeholder="741798363, 749764026"></textarea>
+        </label>
+      </div>
+    </section>
+    <section>
+      <h2>存储</h2>
+      <p class="hint">路径类字段只写入配置文件，下次启动才生效。归档天数/周期会立刻改。</p>
+      <div class="grid">
+        <label><span class="cap">db <span class="restart">需重启</span></span>
+          <input id="store.db" />
+        </label>
+        <label><span class="cap">image_root <span class="restart">需重启</span></span>
+          <input id="store.image_root" />
+        </label>
+        <label><span class="cap">archive_dir <span class="restart">需重启</span></span>
+          <input id="store.archive_dir" />
+        </label>
+        <label>archive_after_days（0=关）
+          <input id="store.archive_after_days" type="number" min="0" />
+        </label>
+        <label>archive_every_hours
+          <input id="store.archive_every_hours" type="number" min="1" />
+        </label>
+      </div>
+    </section>
+    <section>
+      <h2>Clist</h2>
+      <div class="grid">
+        <label>username
+          <input id="clist.username" />
+        </label>
+        <label>api_key
+          <span class="row">
+            <input id="clist.api_key" type="password" autocomplete="off" placeholder="留空不改" />
+            <button class="ghost" type="button" data-clear="clist.api_key">清空</button>
+          </span>
+        </label>
+        <label>limit
+          <input id="clist.limit" type="number" min="1" />
+        </label>
+      </div>
+    </section>
+    <section>
+      <h2>插件</h2>
+      <p class="hint">开关会热插拔。contest / rank 改刷新间隔会重启对应后台循环。</p>
+      <div class="plugin grid">
+        <label class="check">contest 启用<input id="plugins.contest.enabled" type="checkbox" /></label>
+        <label>contest update_minutes<input id="plugins.contest.update_minutes" type="number" min="5" /></label>
+      </div>
+      <div class="plugin grid">
+        <label class="check">rank 启用<input id="plugins.rank.enabled" type="checkbox" /></label>
+        <label>rank update_minutes<input id="plugins.rank.update_minutes" type="number" min="10" /></label>
+      </div>
+      <div class="plugin grid">
+        <label class="check">problem 启用<input id="plugins.problem.enabled" type="checkbox" /></label>
+        <label>每日一题重置小时<input id="plugins.problem.daily_reset_hour" type="number" min="0" max="23" /></label>
+      </div>
+      <div class="plugin grid">
+        <label class="check">fun 启用<input id="plugins.fun.enabled" type="checkbox" /></label>
+        <label class="check">允许改学习/图库<input id="plugins.fun.allow_mutate" type="checkbox" /></label>
+        <label class="check">删专辑时删文件<input id="plugins.fun.delete_files_on_album_del" type="checkbox" /></label>
+        <label class="full">fun 管理员 QQ（逗号，空=所有人）
+          <input id="plugins.fun.admins" />
+        </label>
+      </div>
+      <div class="plugin grid">
+        <label class="check">luck 启用<input id="plugins.luck.enabled" type="checkbox" /></label>
+      </div>
+    </section>
+    <section>
+      <h2>管理页</h2>
+      <div class="grid">
+        <label><span class="cap">listen <span class="restart">需重启</span></span>
+          <input id="admin.listen" />
+        </label>
+        <label>token
+          <span class="row">
+            <input id="admin.token" type="password" autocomplete="off" placeholder="留空不改" />
+            <button class="ghost" type="button" data-clear="admin.token">清空</button>
+          </span>
+        </label>
+      </div>
+    </section>
+  </main>
+  <div id="login">
+    <div class="card">
+      <h2>管理口令</h2>
+      <p class="hint">config 里设置了 admin.token，请先输入再改配置。</p>
+      <label>token
+        <input id="login-token" type="password" />
+      </label>
+      <button class="primary" type="button" id="login-go">进入</button>
+    </div>
+  </div>
+  <script>
+    const SECRET_CLEAR = "__clear__";
+    const PATHS = [
+      "adapter.backend", "adapter.access_token", "adapter.ws_url", "adapter.http_api", "adapter.event_listen",
+      "napcat.ws_url", "napcat.access_token",
+      "bot.command_prefix", "bot.allow_private", "bot.groups",
+      "store.db", "store.image_root", "store.archive_dir", "store.archive_after_days", "store.archive_every_hours",
+      "clist.username", "clist.api_key", "clist.limit",
+      "plugins.contest.enabled", "plugins.contest.update_minutes",
+      "plugins.rank.enabled", "plugins.rank.update_minutes",
+      "plugins.problem.enabled", "plugins.problem.daily_reset_hour",
+      "plugins.fun.enabled", "plugins.fun.allow_mutate", "plugins.fun.delete_files_on_album_del", "plugins.fun.admins",
+      "plugins.luck.enabled",
+      "admin.listen", "admin.token",
+    ];
+
+    function token() {
+      return sessionStorage.getItem("fujiang-admin-token") || "";
+    }
+    function setToken(v) {
+      if (v) sessionStorage.setItem("fujiang-admin-token", v);
+      else sessionStorage.removeItem("fujiang-admin-token");
+    }
+    function get(obj, path) {
+      return path.split(".").reduce((o, k) => (o == null ? o : o[k]), obj);
+    }
+    function set(obj, path, val) {
+      const keys = path.split(".");
+      let cur = obj;
+      for (let i = 0; i < keys.length - 1; i++) {
+        cur[keys[i]] = cur[keys[i]] || {};
+        cur = cur[keys[i]];
+      }
+      cur[keys[keys.length - 1]] = val;
+    }
+    function parseNums(s) {
+      return String(s || "").split(/[,\s]+/).map((x) => x.trim()).filter(Boolean).map((x) => {
+        const n = Number(x);
+        if (!Number.isInteger(n)) throw new Error("不是整数：" + x);
+        return n;
+      });
+    }
+    function el(id) { return document.getElementById(id); }
+    function banner(msg, cls) {
+      const b = el("banner");
+      b.textContent = msg || "";
+      b.className = cls || "";
+    }
+
+    async function api(path, opts = {}) {
+      const headers = Object.assign({ "content-type": "application/json" }, opts.headers || {});
+      const t = token();
+      if (t) headers["x-admin-token"] = t;
+      const r = await fetch(path, Object.assign({}, opts, { headers }));
+      const data = await r.json().catch(() => ({}));
+      if (r.status === 401) {
+        el("login").style.display = "flex";
+        throw new Error("需要管理口令");
+      }
+      if (!r.ok) throw new Error(data.error || r.statusText);
+      return data;
+    }
+
+    function fill(cfg) {
+      for (const path of PATHS) {
+        const node = el(path);
+        if (!node) continue;
+        const v = get(cfg, path);
+        if (node.type === "checkbox") node.checked = !!v;
+        else if (Array.isArray(v)) node.value = v.join(", ");
+        else node.value = v == null ? "" : v;
+      }
+    }
+
+    function collect() {
+      const cfg = {};
+      for (const path of PATHS) {
+        const node = el(path);
+        if (!node) continue;
+        let v;
+        if (node.type === "checkbox") v = node.checked;
+        else if (node.type === "number") v = Number(node.value);
+        else if (path.endsWith(".groups") || path.endsWith(".admins")) v = parseNums(node.value);
+        else v = node.value;
+        if (node.dataset.cleared === "1") v = SECRET_CLEAR;
+        set(cfg, path, v);
+      }
+      cfg.plugins = cfg.plugins || {};
+      ["contest", "rank", "problem", "luck"].forEach((n) => {
+        cfg.plugins[n] = Object.assign({ enabled: true, update_minutes: 60, daily_reset_hour: 4 }, cfg.plugins[n]);
+      });
+      cfg.napcat = {
+        ws_url: cfg.adapter.ws_url,
+        access_token: cfg.adapter.access_token,
+      };
+      return cfg;
+    }
+
+    function renderStatus(view) {
+      const s = view.status || {};
+      const box = el("status");
+      const chips = [
+        s.config_path ? "文件 " + s.config_path : "",
+        s.backend ? "backend " + s.backend : "",
+        (s.plugins && s.plugins.length) ? "插件 " + s.plugins.join(" / ") : "插件 无",
+      ].filter(Boolean);
+      box.innerHTML = chips.map((c) => '<span class="chip">' + c + "</span>").join("");
+    }
+
+    async function load() {
+      banner("加载中…");
+      const view = await api("/api/config");
+      fill(view.config);
+      renderStatus(view);
+      banner("已加载。密钥框里的 ******** 或空白表示不修改。", "ok");
+    }
+
+    async function save() {
+      banner("保存中…");
+      const view = await api("/api/config", { method: "PUT", body: JSON.stringify(collect()) });
+      fill(view.view.config);
+      renderStatus(view.view);
+      const extra = (view.restart_required && view.restart_required.length)
+        ? " 需重启后生效：" + view.restart_required.join(", ")
+        : "";
+      banner("已热加载：" + (view.applied || []).join(", ") + extra, extra ? "" : "ok");
+      document.querySelectorAll("[data-cleared]").forEach((n) => delete n.dataset.cleared);
+    }
+
+    el("reload").onclick = () => load().catch((e) => banner(e.message, "err"));
+    el("save").onclick = () => save().catch((e) => banner(e.message, "err"));
+    el("login-go").onclick = () => {
+      setToken(el("login-token").value.trim());
+      el("login").style.display = "none";
+      load().catch((e) => banner(e.message, "err"));
+    };
+    document.querySelectorAll("[data-clear]").forEach((btn) => {
+      btn.onclick = () => {
+        const node = el(btn.dataset.clear);
+        node.value = "";
+        node.dataset.cleared = "1";
+      };
+    });
+    load().catch((e) => banner(e.message, "err"));
+  </script>
+</body>
+</html>

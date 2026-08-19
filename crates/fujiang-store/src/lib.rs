@@ -8,6 +8,8 @@ pub use messages::{default_archive_dir, shard_table, ArchiveReport};
 pub use models::*;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -17,7 +19,8 @@ pub struct Store {
     pool: SqlitePool,
     pub image_root: PathBuf,
     archive_dir: PathBuf,
-    archive_after_days: u64,
+    archive_after_days: Arc<AtomicU64>,
+    archive_every_secs: Arc<AtomicU64>,
 }
 
 pub struct StoreOpts {
@@ -25,6 +28,7 @@ pub struct StoreOpts {
     pub image_root: PathBuf,
     pub archive_dir: PathBuf,
     pub archive_after_days: u64,
+    pub archive_every_hours: u64,
 }
 
 impl Store {
@@ -36,6 +40,7 @@ impl Store {
             image_root,
             archive_dir,
             archive_after_days: 30,
+            archive_every_hours: 24,
         })
         .await
     }
@@ -60,7 +65,8 @@ impl Store {
             pool,
             image_root: opts.image_root,
             archive_dir: opts.archive_dir,
-            archive_after_days: opts.archive_after_days,
+            archive_after_days: Arc::new(AtomicU64::new(opts.archive_after_days)),
+            archive_every_secs: Arc::new(AtomicU64::new(opts.archive_every_hours.max(1) * 3600)),
         };
         store.split_legacy_messages().await?;
         store.migrate_legacy_albums().await?;
@@ -637,6 +643,7 @@ mod tests {
             image_root: dir.join("img"),
             archive_dir: dir.join("archive"),
             archive_after_days: 1,
+            archive_every_hours: 24,
         })
         .await
         .unwrap();
@@ -673,6 +680,9 @@ mod tests {
         assert_eq!(store.count_in_shard("msg_g55").await.unwrap(), 1);
         assert!(!report.files.is_empty());
         assert!(std::path::Path::new(&report.files[0]).exists());
+        store.set_archive_params(0, 24);
+        let skipped = store.archive_due().await.unwrap();
+        assert_eq!(skipped.moved, 0);
         let _ = std::fs::remove_dir_all(dir);
     }
 

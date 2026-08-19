@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
 use sqlx::sqlite::SqliteConnectOptions;
@@ -159,12 +161,19 @@ impl Store {
             .await?)
     }
 
+    pub fn set_archive_params(&self, after_days: u64, every_hours: u64) {
+        self.archive_after_days.store(after_days, Ordering::Relaxed);
+        self.archive_every_secs
+            .store(every_hours.max(1).saturating_mul(3600), Ordering::Relaxed);
+    }
+
     /// Move messages older than `archive_after_days` into monthly sqlite files.
     pub async fn archive_due(&self) -> anyhow::Result<ArchiveReport> {
-        if self.archive_after_days == 0 {
+        let days = self.archive_after_days.load(Ordering::Relaxed);
+        if days == 0 {
             return Ok(ArchiveReport::default());
         }
-        let cutoff = Utc::now().timestamp() - (self.archive_after_days as i64) * 86400;
+        let cutoff = Utc::now().timestamp() - (days as i64) * 86400;
         tokio::fs::create_dir_all(&self.archive_dir).await.ok();
         let mut report = ArchiveReport::default();
         for (table, group_id) in self.shard_names().await? {
@@ -230,17 +239,17 @@ impl Store {
         Ok(ids.len() as u64)
     }
 
-    pub fn spawn_archiver(&self, every: std::time::Duration) {
-        if self.archive_after_days == 0 {
-            return;
-        }
+    pub fn spawn_archiver(&self) {
         let store = self.clone();
         tokio::spawn(async move {
             loop {
-                if let Err(e) = store.archive_due().await {
-                    warn!(error = %e, "message archive failed");
+                if store.archive_after_days.load(Ordering::Relaxed) != 0 {
+                    if let Err(e) = store.archive_due().await {
+                        warn!(error = %e, "message archive failed");
+                    }
                 }
-                tokio::time::sleep(every).await;
+                let every = store.archive_every_secs.load(Ordering::Relaxed).max(60);
+                tokio::time::sleep(Duration::from_secs(every)).await;
             }
         });
     }

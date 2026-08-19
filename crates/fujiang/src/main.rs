@@ -1,18 +1,18 @@
+mod admin;
 mod config;
+mod plugins;
+mod runtime;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use config::AppConfig;
-use fujiang_adapter::NapcatAdapter;
-use fujiang_core::{BotContext, Dispatcher, Gateway, Plugin};
-use fujiang_plugin_contest::ContestPlugin;
-use fujiang_plugin_fun::FunPlugin;
-use fujiang_plugin_luck::LuckPlugin;
-use fujiang_plugin_problem::ProblemPlugin;
-use fujiang_plugin_rank::RankPlugin;
+use fujiang_core::{BotContext, Dispatcher};
 use fujiang_store::{Store, StoreOpts};
+use runtime::AppState;
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -58,65 +58,71 @@ async fn run(path: PathBuf) -> anyhow::Result<()> {
         image_root: PathBuf::from(&cfg.store.image_root),
         archive_dir: PathBuf::from(&cfg.store.archive_dir),
         archive_after_days: cfg.store.archive_after_days,
+        archive_every_hours: cfg.store.archive_every_hours,
     })
     .await?;
-    let hours = cfg.store.archive_every_hours.max(1);
-    store.spawn_archiver(std::time::Duration::from_secs(hours * 3600));
-    let adapter = Arc::new(NapcatAdapter::new(
-        cfg.napcat.ws_url.clone(),
-        cfg.napcat.access_token.clone(),
-    ));
+    store.spawn_archiver();
 
-    let mut plugins: Vec<Arc<dyn Plugin>> = Vec::new();
-    if cfg.plugins.contest.enabled {
-        plugins.push(Arc::new(ContestPlugin));
-    }
-    if cfg.plugins.rank.enabled {
-        plugins.push(Arc::new(RankPlugin));
-    }
-    if cfg.plugins.problem.enabled {
-        plugins.push(Arc::new(ProblemPlugin));
-    }
-    if cfg.plugins.fun.enabled {
-        plugins.push(Arc::new(FunPlugin));
-    }
-    if cfg.plugins.luck.enabled {
-        plugins.push(Arc::new(LuckPlugin));
-    }
-
-    let dispatcher = Arc::new(Dispatcher::new(plugins));
+    let adapter = Arc::new(runtime::build_adapter(&cfg)?);
+    let dispatcher = Arc::new(Dispatcher::new(plugins::initial(&cfg)));
     let ctx = BotContext {
-        messenger: adapter.clone(),
+        messenger: Arc::new(RwLock::new(adapter.messenger())),
         store,
         http: reqwest::Client::builder()
             .user_agent("fujiang-bot/0.1")
             .build()?,
-        config: Arc::new(cfg.to_bot_config()),
+        config: Arc::new(RwLock::new(cfg.to_bot_config())),
     };
     dispatcher.start_all(&ctx).await?;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-    let gw = adapter.clone();
-    tokio::spawn(async move {
-        if let Err(e) = gw.run(tx).await {
-            tracing::error!(error = %e, "gateway stopped");
-        }
-    });
-
-    info!("fujiang running, {} plugins", dispatcher_len(&dispatcher));
-    while let Some(ev) = rx.recv().await {
-        let d = dispatcher.clone();
-        let ctx = ctx.clone();
+    let process_stop = CancellationToken::new();
+    {
+        let stop = process_stop.clone();
         tokio::spawn(async move {
-            d.handle(&ctx, &ev).await;
+            let _ = tokio::signal::ctrl_c().await;
+            stop.cancel();
         });
     }
-    Ok(())
-}
 
-fn dispatcher_len(d: &Dispatcher) -> &'static str {
-    let _ = d;
-    "enabled"
+    let admin_listen = cfg.admin.listen.clone();
+    let state = Arc::new(AppState::new(path, cfg, ctx, dispatcher, tx));
+    state.start_gateway(adapter).await;
+
+    let listener = tokio::net::TcpListener::bind(admin::parse_listen(&admin_listen)?).await?;
+    info!(
+        plugins = ?state.dispatcher.names().await,
+        admin = %admin_listen,
+        "fujiang running"
+    );
+    {
+        let admin_state = state.clone();
+        let admin_stop = process_stop.clone();
+        tokio::spawn(async move {
+            if let Err(e) = admin::serve(listener, admin_state, admin_stop).await {
+                tracing::error!(error = %e, "admin ui stopped");
+            }
+        });
+    }
+
+    loop {
+        tokio::select! {
+            ev = rx.recv() => {
+                let Some(ev) = ev else { break };
+                let d = state.dispatcher.clone();
+                let ctx = state.ctx.clone();
+                tokio::spawn(async move {
+                    d.handle(&ctx, &ev).await;
+                });
+            }
+            _ = process_stop.cancelled() => {
+                info!("shutting down");
+                break;
+            }
+        }
+    }
+    state.stop_gateway().await;
+    Ok(())
 }
 
 async fn migrate(from: PathBuf, path: PathBuf) -> anyhow::Result<()> {
@@ -126,6 +132,7 @@ async fn migrate(from: PathBuf, path: PathBuf) -> anyhow::Result<()> {
         image_root: PathBuf::from(&cfg.store.image_root),
         archive_dir: PathBuf::from(&cfg.store.archive_dir),
         archive_after_days: cfg.store.archive_after_days,
+        archive_every_hours: cfg.store.archive_every_hours,
     })
     .await?;
     let report = fujiang_store::migrate_from_python(&store, &from).await?;

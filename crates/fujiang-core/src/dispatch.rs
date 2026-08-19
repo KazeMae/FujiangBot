@@ -1,22 +1,34 @@
 use std::sync::Arc;
 
+use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use crate::event::Event;
 use crate::plugin::{BotContext, Flow, Plugin};
 
 pub struct Dispatcher {
-    plugins: Vec<Arc<dyn Plugin>>,
+    plugins: RwLock<Vec<Arc<dyn Plugin>>>,
 }
 
 impl Dispatcher {
     pub fn new(plugins: Vec<Arc<dyn Plugin>>) -> Self {
-        Self { plugins }
+        Self {
+            plugins: RwLock::new(plugins),
+        }
     }
 
-    pub fn help_text(&self, prefix: &str) -> String {
+    pub async fn names(&self) -> Vec<String> {
+        self.plugins
+            .read()
+            .await
+            .iter()
+            .map(|p| p.name().to_string())
+            .collect()
+    }
+
+    pub async fn help_text(&self, prefix: &str) -> String {
         let mut s = String::from("菜单：\n");
-        for p in &self.plugins {
+        for p in self.plugins.read().await.iter() {
             s.push_str(&format!("【{}】\n{}\n\n", p.name(), p.help().trim()));
         }
         s.push_str(&format!("前缀 `{prefix}` ，指令区分大小写。"));
@@ -24,25 +36,58 @@ impl Dispatcher {
     }
 
     pub async fn start_all(&self, ctx: &BotContext) -> anyhow::Result<()> {
-        for p in &self.plugins {
+        for p in self.plugins.read().await.iter() {
             info!(plugin = p.name(), "starting plugin");
             p.on_start(ctx).await?;
         }
         Ok(())
     }
 
+    pub async fn insert(&self, plugin: Arc<dyn Plugin>, ctx: &BotContext) -> anyhow::Result<()> {
+        let name = plugin.name();
+        {
+            let guard = self.plugins.read().await;
+            if guard.iter().any(|p| p.name() == name) {
+                return Ok(());
+            }
+        }
+        info!(plugin = name, "hot-enable plugin");
+        plugin.on_start(ctx).await?;
+        let mut guard = self.plugins.write().await;
+        if guard.iter().any(|p| p.name() == name) {
+            drop(guard);
+            plugin.on_stop().await?;
+            return Ok(());
+        }
+        guard.push(plugin);
+        Ok(())
+    }
+
+    pub async fn remove(&self, name: &str) -> anyhow::Result<bool> {
+        let mut guard = self.plugins.write().await;
+        if let Some(i) = guard.iter().position(|p| p.name() == name) {
+            let p = guard.remove(i);
+            drop(guard);
+            info!(plugin = name, "hot-disable plugin");
+            p.on_stop().await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     pub async fn handle(&self, ctx: &BotContext, ev: &Event) {
         if let Some(msg) = ev.as_message() {
-            if !ctx.config.allowed(msg.source) {
+            let cfg = ctx.bot_config().await;
+            if !cfg.allowed(msg.source) {
                 return;
             }
             if let Err(e) = persist_message(ctx, msg).await {
                 error!(error = %e, message_id = msg.id, "persist message");
             }
             let line = msg.command_line();
-            if line == format!("{}help", ctx.config.command_prefix) {
+            if line == format!("{}help", cfg.command_prefix) {
                 if let Err(e) = ctx
-                    .reply_text(msg, self.help_text(&ctx.config.command_prefix))
+                    .reply_text(msg, self.help_text(&cfg.command_prefix).await)
                     .await
                 {
                     error!(error = %e, "send help");
@@ -51,11 +96,12 @@ impl Dispatcher {
             }
         } else if let Event::Request(req) = ev {
             if req.kind == "friend" {
-                // auto-approve is left to adapter if desired; ignore here
+                // ignore
             }
         }
 
-        for p in &self.plugins {
+        let plugins = self.plugins.read().await.clone();
+        for p in plugins {
             match p.handle(ctx, ev).await {
                 Ok(Flow::Stop) => return,
                 Ok(Flow::Continue) => {}
