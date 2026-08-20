@@ -3,10 +3,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
-use fujiang_core::{BotContext, Event, Flow, Plugin};
+use fujiang_core::{BotContext, Event, Flow, Plugin, PluginScope};
 use fujiang_store::CfUser;
 use serde::Deserialize;
-use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 const HELP: &str = "Codeforces 排行。`.rank` 和 `.rk` 一样。`{year*}` 可写多个年级，不写则看全部。后台会定时刷 rating 和近期比赛排名。\n\
@@ -30,12 +29,14 @@ const HELP: &str = "Codeforces 排行。`.rank` 和 `.rk` 一样。`{year*}` 可
 .rank -u / --updateTime           上次刷新时间";
 
 #[derive(Default)]
-pub struct RankPlugin {
-    stop: CancellationToken,
-}
+pub struct RankPlugin;
 
 #[async_trait]
 impl Plugin for RankPlugin {
+    fn meta(&self) -> fujiang_core::PluginMeta {
+        fujiang_core::PluginMeta::new("rank", "Codeforces 排行与生涯", self.commands())
+    }
+
     fn name(&self) -> &'static str {
         "rank"
     }
@@ -48,10 +49,10 @@ impl Plugin for RankPlugin {
         &[".rank", ".rk"]
     }
 
-    async fn on_start(&self, ctx: &BotContext) -> anyhow::Result<()> {
+    async fn on_start(&self, ctx: &BotContext, scope: &PluginScope) -> anyhow::Result<()> {
         let ctx = ctx.clone();
-        let stop = self.stop.clone();
-        tokio::spawn(async move {
+        let stop = scope.stop_token();
+        scope.spawn(async move {
             loop {
                 if stop.is_cancelled() {
                     break;
@@ -79,12 +80,12 @@ impl Plugin for RankPlugin {
         Ok(())
     }
 
-    async fn on_stop(&self) -> anyhow::Result<()> {
-        self.stop.cancel();
-        Ok(())
-    }
-
-    async fn handle(&self, ctx: &BotContext, ev: &Event) -> anyhow::Result<Flow> {
+    async fn handle(
+        &self,
+        ctx: &BotContext,
+        ev: &Event,
+        scope: &PluginScope,
+    ) -> anyhow::Result<Flow> {
         let Some(msg) = ev.as_message() else {
             return Ok(Flow::Continue);
         };
@@ -116,14 +117,14 @@ impl Plugin for RankPlugin {
             "--updateRank" | "-urk" => {
                 ctx.reply_text(msg, "已放入后台查询").await?;
                 let bg = ctx.clone();
-                tokio::spawn(async move {
+                scope.spawn(async move {
                     let _ = refresh_ranks(&bg).await;
                 });
             }
             "--updateRating" | "-urt" => {
                 ctx.reply_text(msg, "已放入后台查询").await?;
                 let bg = ctx.clone();
-                tokio::spawn(async move {
+                scope.spawn(async move {
                     let _ = refresh_ratings(&bg).await;
                 });
             }

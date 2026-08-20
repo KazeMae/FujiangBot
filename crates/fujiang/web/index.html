@@ -192,6 +192,18 @@
       <div class="plugin grid">
         <label class="check">luck 启用<input id="plugins.luck.enabled" type="checkbox" /></label>
       </div>
+      <div class="plugin grid">
+        <label>动态插件目录<input id="plugins.dir" /></label>
+        <label class="check">监视目录热加载<input id="plugins.watch" type="checkbox" /></label>
+      </div>
+      <p class="hint">停用只 dispose 运行实例，不删磁盘上的 .so。内置插件写回 enabled；动态插件记入 plugins.disabled。</p>
+      <div class="row" style="margin-bottom:12px">
+        <input id="dyn-path" placeholder="plugins/libfujiang_plugin_echo.dylib" />
+        <button class="ghost" type="button" id="dyn-load">加载</button>
+        <button class="ghost" type="button" id="dyn-scan">扫描目录</button>
+      </div>
+      <div id="entry-list"></div>
+      <div id="dyn-list"></div>
     </section>
     <section>
       <h2>管理页</h2>
@@ -231,6 +243,7 @@
       "plugins.problem.enabled", "plugins.problem.daily_reset_hour",
       "plugins.fun.enabled", "plugins.fun.allow_mutate", "plugins.fun.delete_files_on_album_del", "plugins.fun.admins",
       "plugins.luck.enabled",
+      "plugins.dir", "plugins.watch",
       "admin.listen", "admin.token",
     ];
 
@@ -327,11 +340,95 @@
       box.innerHTML = chips.map((c) => '<span class="chip">' + c + "</span>").join("");
     }
 
+    function renderDyn(p) {
+      const box = el("entry-list") || el("dyn-list");
+      if (!box) return;
+      const entries = (p && p.entries) || [];
+      if (!entries.length) {
+        box.innerHTML = '<p class="hint">没有插件条目。</p>';
+        return;
+      }
+      box.innerHTML = entries.map((d) => {
+        const dynBtns = d.kind === "dynamic"
+          ? '<button class="ghost" type="button" data-reload="' + d.name + '">重载</button>' +
+            '<button class="ghost" type="button" data-unload="' + d.name + '">卸载</button>'
+          : "";
+        const toggle = d.enabled
+          ? '<button class="ghost" type="button" data-disable="' + d.name + '">停用</button>'
+          : '<button class="primary" type="button" data-enable="' + d.name + '">启用</button>';
+        const cfgBox = d.kind === "dynamic"
+          ? '<label class="full">config（JSON）<textarea data-cfg="' + d.name + '">' +
+            escapeHtml(JSON.stringify(d.config || {}, null, 2)) +
+            '</textarea></label>' +
+            '<button class="ghost" type="button" data-savecfg="' + d.name + '">保存此插件配置</button>'
+          : "";
+        return '<div class="plugin">' +
+          '<div class="grid">' +
+          '<div><strong>' + d.name + '</strong> v' + d.version +
+          ' · ' + d.kind + ' · ' + d.state +
+          '<div class="hint">' + (d.description || '') +
+          (d.path ? '<br>' + d.path : '') +
+          (d.last_error ? '<br><span style="color:var(--accent)">失败：' + escapeHtml(d.last_error) + '</span>' : '') +
+          '</div></div>' +
+          '<div class="actions">' + toggle + dynBtns + '</div></div>' +
+          cfgBox +
+        '</div>';
+      }).join("");
+      box.querySelectorAll("[data-reload]").forEach((b) => {
+        b.onclick = () => dynAct("/api/plugins/reload", { name: b.dataset.reload });
+      });
+      box.querySelectorAll("[data-unload]").forEach((b) => {
+        b.onclick = () => dynAct("/api/plugins/unload", { name: b.dataset.unload });
+      });
+      box.querySelectorAll("[data-enable]").forEach((b) => {
+        b.onclick = () => dynAct("/api/plugins/" + encodeURIComponent(b.dataset.enable) + "/enable", {});
+      });
+      box.querySelectorAll("[data-disable]").forEach((b) => {
+        b.onclick = () => dynAct("/api/plugins/" + encodeURIComponent(b.dataset.disable) + "/disable", {});
+      });
+      box.querySelectorAll("[data-savecfg]").forEach((b) => {
+        b.onclick = () => savePluginConfig(b.dataset.savecfg, box);
+      });
+    }
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[c]));
+    }
+    async function savePluginConfig(name, root) {
+      const ta = (root || document).querySelector('[data-cfg="' + name + '"]');
+      try {
+        const config = JSON.parse(ta.value || "{}");
+        const r = await api("/api/plugins/" + encodeURIComponent(name) + "/config", {
+          method: "PUT",
+          body: JSON.stringify({ config }),
+        });
+        renderDyn(r.plugins);
+        banner("已更新 " + name + " 配置并重启该插件", "ok");
+      } catch (e) {
+        banner(e.message, "err");
+      }
+    }
+    async function refreshDyn() {
+      const p = await api("/api/plugins");
+      renderDyn(p);
+    }
+    async function dynAct(path, body) {
+      try {
+        const r = await api(path, { method: "POST", body: JSON.stringify(body) });
+        renderDyn(r.plugins);
+        banner((r.changed && r.changed.join("；")) || ("已处理 " + (r.name || "")), "ok");
+      } catch (e) {
+        banner(e.message, "err");
+      }
+    }
+
     async function load() {
       banner("加载中…");
       const view = await api("/api/config");
       fill(view.config);
       renderStatus(view);
+      await refreshDyn();
       banner("已加载。密钥框里的 ******** 或空白表示不修改。", "ok");
     }
 
@@ -349,6 +446,8 @@
 
     el("reload").onclick = () => load().catch((e) => banner(e.message, "err"));
     el("save").onclick = () => save().catch((e) => banner(e.message, "err"));
+    el("dyn-load").onclick = () => dynAct("/api/plugins/load", { path: el("dyn-path").value.trim() });
+    el("dyn-scan").onclick = () => dynAct("/api/plugins/scan", {});
     el("login-go").onclick = () => {
       setToken(el("login-token").value.trim());
       el("login").style.display = "none";

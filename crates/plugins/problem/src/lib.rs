@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{Local, Timelike};
-use fujiang_core::{BotContext, Event, Flow, Plugin};
+use fujiang_core::{BotContext, Event, Flow, Plugin, PluginScope};
 use fujiang_store::DailyProblem;
 use rand::seq::SliceRandom;
 use rand::{rngs::StdRng, SeedableRng};
@@ -16,10 +16,15 @@ const BANDS: &[(&str, &str)] = &[
     ("1600-2000", "1600 2000 !*special new"),
 ];
 
+#[derive(Default)]
 pub struct ProblemPlugin;
 
 #[async_trait]
 impl Plugin for ProblemPlugin {
+    fn meta(&self) -> fujiang_core::PluginMeta {
+        fujiang_core::PluginMeta::new("problem", "CF 抽题与每日一题", self.commands())
+    }
+
     fn name(&self) -> &'static str {
         "problem"
     }
@@ -41,7 +46,12 @@ impl Plugin for ProblemPlugin {
         &[".problem", ".cftag", ".每日一题"]
     }
 
-    async fn handle(&self, ctx: &BotContext, ev: &Event) -> anyhow::Result<Flow> {
+    async fn handle(
+        &self,
+        ctx: &BotContext,
+        ev: &Event,
+        _scope: &PluginScope,
+    ) -> anyhow::Result<Flow> {
         let Some(msg) = ev.as_message() else {
             return Ok(Flow::Continue);
         };

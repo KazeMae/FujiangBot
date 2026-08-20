@@ -17,6 +17,7 @@ use sqlx::{Row, SqlitePool};
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
+    db_path: PathBuf,
     pub image_root: PathBuf,
     archive_dir: PathBuf,
     archive_after_days: Arc<AtomicU64>,
@@ -63,6 +64,7 @@ impl Store {
         sqlx::migrate!("./migrations").run(&pool).await?;
         let store = Self {
             pool,
+            db_path: PathBuf::from(&opts.db),
             image_root: opts.image_root,
             archive_dir: opts.archive_dir,
             archive_after_days: Arc::new(AtomicU64::new(opts.archive_after_days)),
@@ -75,6 +77,38 @@ impl Store {
 
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    /// Directory that contains the host database (usually `data/`).
+    pub fn data_dir(&self) -> PathBuf {
+        self.db_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// Private files for one plugin: `{data_dir}/plugin-data/{name}/`.
+    pub fn plugin_data_dir(&self, name: &str) -> anyhow::Result<PathBuf> {
+        Ok(self
+            .data_dir()
+            .join("plugin-data")
+            .join(sanitize_plugin_name(name)?))
+    }
+
+    /// Open (or create) `{plugin_data_dir}/plugin.sqlite`. Schema is the plugin's job.
+    pub async fn open_plugin_db(&self, name: &str) -> anyhow::Result<SqlitePool> {
+        let dir = self.plugin_data_dir(name)?;
+        tokio::fs::create_dir_all(&dir).await?;
+        let path = dir.join("plugin.sqlite");
+        let connect = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .foreign_keys(true);
+        Ok(SqlitePoolOptions::new()
+            .max_connections(3)
+            .connect_with(connect)
+            .await?)
     }
 
     pub async fn get_setting(&self, key: &str) -> anyhow::Result<Option<String>> {
@@ -493,6 +527,16 @@ impl Store {
     }
 }
 
+pub fn sanitize_plugin_name(name: &str) -> anyhow::Result<&str> {
+    anyhow::ensure!(!name.is_empty(), "plugin name is empty");
+    anyhow::ensure!(
+        name.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+        "plugin name `{name}` must be [A-Za-z0-9_-]"
+    );
+    Ok(name)
+}
+
 pub fn md5_hex(bytes: &[u8]) -> String {
     use md5::{Digest, Md5};
     let mut h = Md5::new();
@@ -701,6 +745,27 @@ mod tests {
         store.set_archive_params(0, 24);
         let skipped = store.archive_due().await.unwrap();
         assert_eq!(skipped.moved, 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn plugin_db_is_separate_file() {
+        let (store, dir) = open_tmp().await;
+        assert!(sanitize_plugin_name("../x").is_err());
+        assert!(sanitize_plugin_name("").is_err());
+        let pool = store.open_plugin_db("memo").await.unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS t(id INTEGER PRIMARY KEY, v TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO t(v) VALUES('ok')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let path = dir.join("plugin-data/memo/plugin.sqlite");
+        assert!(path.exists());
+        assert_ne!(path, dir.join("t.db"));
+        pool.close().await;
         let _ = std::fs::remove_dir_all(dir);
     }
 

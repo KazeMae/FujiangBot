@@ -29,6 +29,11 @@ username = ""
 api_key = ""
 limit = 10
 
+[plugins]
+dir = "plugins"
+watch = true
+disabled = []
+
 [plugins.contest]
 enabled = true
 update_minutes = 60
@@ -49,6 +54,14 @@ delete_files_on_album_del = false
 
 [plugins.luck]
 enabled = true
+
+# 动态插件各自一份 JSON，例如：
+# [plugins.configs.echo]
+# prefix = "."
+#
+# [plugins.configs.memo]
+# max_per_source = 50
+# ttl_days = 0
 
 # 内嵌配置页，不要和 adapter.event_listen 抢端口
 [admin]

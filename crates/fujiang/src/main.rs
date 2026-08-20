@@ -1,5 +1,6 @@
 mod admin;
 mod config;
+mod dynload;
 mod plugins;
 mod runtime;
 
@@ -8,6 +9,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use config::AppConfig;
+use dynload::PluginHub;
 use fujiang_core::{BotContext, Dispatcher};
 use fujiang_store::{Store, StoreOpts};
 use runtime::AppState;
@@ -74,8 +76,24 @@ async fn run(path: PathBuf) -> anyhow::Result<()> {
             .user_agent("fujiang-bot/0.1")
             .build()?,
         config: Arc::new(RwLock::new(cfg.to_bot_config())),
+        plugin_configs: Arc::new(RwLock::new(plugins::all_configs(&cfg))),
     };
     dispatcher.start_all(&ctx).await?;
+
+    let hub = Arc::new(PluginHub::new(&cfg.plugins.dir));
+    hub.set_disabled(cfg.plugins.disabled.clone()).await;
+    if let Err(e) = hub.scan(&dispatcher, &ctx).await {
+        tracing::warn!(error = %e, "initial plugin scan");
+    }
+    if cfg.plugins.watch {
+        let h = hub.clone();
+        let d = dispatcher.clone();
+        let c = ctx.clone();
+        let stop = process_stop.clone();
+        tokio::spawn(async move {
+            h.watch_loop(d, c, stop).await;
+        });
+    }
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     {
@@ -87,7 +105,7 @@ async fn run(path: PathBuf) -> anyhow::Result<()> {
     }
 
     let admin_listen = cfg.admin.listen.clone();
-    let state = Arc::new(AppState::new(path, cfg, ctx, dispatcher, tx));
+    let state = Arc::new(AppState::new(path, cfg, ctx, dispatcher, hub, tx));
     state.start_gateway(adapter).await;
 
     let listener = tokio::net::TcpListener::bind(admin::parse_listen(&admin_listen)?).await?;

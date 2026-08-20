@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{Local, TimeZone, Timelike};
-use fujiang_core::{BotContext, Event, Flow, Plugin, Source};
+use fujiang_core::{BotContext, Event, Flow, Plugin, PluginScope, Source};
 use fujiang_store::ContestRow;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -17,12 +17,14 @@ const OJS: &[(&str, &str)] = &[
 ];
 
 #[derive(Default)]
-pub struct ContestPlugin {
-    stop: CancellationToken,
-}
+pub struct ContestPlugin;
 
 #[async_trait]
 impl Plugin for ContestPlugin {
+    fn meta(&self) -> fujiang_core::PluginMeta {
+        fujiang_core::PluginMeta::new("contest", "比赛日历与开赛提醒", self.commands())
+    }
+
     fn name(&self) -> &'static str {
         "contest"
     }
@@ -42,15 +44,32 @@ impl Plugin for ContestPlugin {
 
     fn commands(&self) -> &'static [&'static str] {
         &[
-            ".contest", ".cf", ".lg", ".nc", ".atc", ".scpc", ".cfall", ".lgall", ".ncall",
-            ".atcall", ".scpcall", ".day", ".bot", ".remind",
+            ".contest",
+            ".cf",
+            ".lg",
+            ".nc",
+            ".atc",
+            ".scpc",
+            ".cfall",
+            ".lgall",
+            ".ncall",
+            ".atcall",
+            ".scpcall",
+            ".day",
+            ".bot",
+            ".remind",
+            ".remindoff",
         ]
     }
 
-    async fn on_start(&self, ctx: &BotContext) -> anyhow::Result<()> {
-        let stop = self.stop.clone();
+    fn command_prefixes(&self) -> &'static [&'static str] {
+        &[".remind"]
+    }
+
+    async fn on_start(&self, ctx: &BotContext, scope: &PluginScope) -> anyhow::Result<()> {
+        let stop = scope.stop_token();
         let refresh_ctx = ctx.clone();
-        tokio::spawn(async move {
+        scope.spawn(async move {
             loop {
                 if stop.is_cancelled() {
                     break;
@@ -69,19 +88,19 @@ impl Plugin for ContestPlugin {
             }
         });
         let remind_ctx = ctx.clone();
-        let stop2 = self.stop.clone();
-        tokio::spawn(async move {
+        let stop2 = scope.stop_token();
+        scope.spawn(async move {
             daily_remind_loop(remind_ctx, stop2).await;
         });
         Ok(())
     }
 
-    async fn on_stop(&self) -> anyhow::Result<()> {
-        self.stop.cancel();
-        Ok(())
-    }
-
-    async fn handle(&self, ctx: &BotContext, ev: &Event) -> anyhow::Result<Flow> {
+    async fn handle(
+        &self,
+        ctx: &BotContext,
+        ev: &Event,
+        _scope: &PluginScope,
+    ) -> anyhow::Result<Flow> {
         let Some(msg) = ev.as_message() else {
             return Ok(Flow::Continue);
         };

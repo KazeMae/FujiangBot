@@ -1,17 +1,18 @@
 [package]
-name = "fujiang-plugin-rank"
+name = "fujiang-plugin-memo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Example plugin: per-chat memos with a private SQLite"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-chrono.workspace = true
 fujiang-core = { path = "../../fujiang-core" }
-fujiang-store = { path = "../../fujiang-store" }
-reqwest.workspace = true
-serde.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true

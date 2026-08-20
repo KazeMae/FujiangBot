@@ -1,13 +1,18 @@
 use async_trait::async_trait;
 use chrono::Local;
-use fujiang_core::{BotContext, Event, Flow, Plugin};
+use fujiang_core::{BotContext, Event, Flow, Plugin, PluginScope};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
+#[derive(Default)]
 pub struct LuckPlugin;
 
 #[async_trait]
 impl Plugin for LuckPlugin {
+    fn meta(&self) -> fujiang_core::PluginMeta {
+        fujiang_core::PluginMeta::new("luck", "每日幸运数字", self.commands())
+    }
+
     fn name(&self) -> &'static str {
         "luck"
     }
@@ -22,7 +27,12 @@ impl Plugin for LuckPlugin {
         &[".luck"]
     }
 
-    async fn handle(&self, ctx: &BotContext, ev: &Event) -> anyhow::Result<Flow> {
+    async fn handle(
+        &self,
+        ctx: &BotContext,
+        ev: &Event,
+        _scope: &PluginScope,
+    ) -> anyhow::Result<Flow> {
         let Some(msg) = ev.as_message() else {
             return Ok(Flow::Continue);
         };

@@ -1,16 +1,31 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::event::{Event, MessageEvent, Segment, Source};
+use crate::scope::PluginScope;
 use crate::BotConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flow {
     Continue,
     Stop,
+}
+
+/// What events a plugin wants after command routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interest {
+    /// Only messages whose first token or prefix matches this plugin's commands.
+    Commands,
+    /// All allowed messages (and still receives its own commands first).
+    Messages,
+    /// Every event, including notice / request / meta.
+    All,
 }
 
 #[async_trait]
@@ -36,11 +51,31 @@ pub struct BotContext {
     pub store: fujiang_store::Store,
     pub http: reqwest::Client,
     pub config: Arc<RwLock<BotConfig>>,
+    pub plugin_configs: Arc<RwLock<HashMap<String, Value>>>,
 }
 
 impl BotContext {
     pub async fn bot_config(&self) -> BotConfig {
         self.config.read().await.clone()
+    }
+
+    pub async fn plugin_config(&self, name: &str) -> Value {
+        self.plugin_configs
+            .read()
+            .await
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Default::default()))
+    }
+
+    /// `{data}/plugin-data/{name}/` for files this plugin owns.
+    pub fn plugin_data_dir(&self, name: &str) -> anyhow::Result<PathBuf> {
+        self.store.plugin_data_dir(name)
+    }
+
+    /// Private SQLite for this plugin. Do not put plugin tables in the host db.
+    pub async fn open_plugin_db(&self, name: &str) -> anyhow::Result<sqlx::SqlitePool> {
+        self.store.open_plugin_db(name).await
     }
 
     pub async fn messenger(&self) -> Arc<dyn Messenger> {
@@ -99,15 +134,74 @@ fn is_http_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
 
+/// Bump when `Plugin` / `BotContext` layout or the create symbol changes.
+pub const PLUGIN_ABI: u32 = 2;
+
+#[derive(Debug, Clone, Copy)]
+pub struct PluginMeta {
+    pub name: &'static str,
+    pub version: &'static str,
+    pub description: &'static str,
+    pub commands: &'static [&'static str],
+}
+
+impl PluginMeta {
+    pub fn new(
+        name: &'static str,
+        description: &'static str,
+        commands: &'static [&'static str],
+    ) -> Self {
+        Self {
+            name,
+            version: env!("CARGO_PKG_VERSION"),
+            description,
+            commands,
+        }
+    }
+}
+
+/// Export a type as a loadable cdylib.
+///
+/// The `.so` / `.dylib` must be built from this workspace (same rustc + fujiang-core).
+/// `create` returns a thin pointer to `Box<dyn Plugin>`.
+#[macro_export]
+macro_rules! declare_plugin {
+    ($ty:ty) => {
+        #[no_mangle]
+        pub extern "C" fn fujiang_plugin_abi() -> u32 {
+            $crate::PLUGIN_ABI
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C" fn fujiang_create_plugin() -> *mut Box<dyn $crate::Plugin> {
+            let plugin: Box<dyn $crate::Plugin> = Box::new(<$ty>::default());
+            Box::into_raw(Box::new(plugin))
+        }
+    };
+}
+
 #[async_trait]
 pub trait Plugin: Send + Sync {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta::new(self.name(), "", self.commands())
+    }
+
     fn name(&self) -> &'static str;
     fn help(&self) -> &'static str;
     fn commands(&self) -> &'static [&'static str] {
         &[]
     }
 
-    async fn on_start(&self, _ctx: &BotContext) -> anyhow::Result<()> {
+    /// Prefix matches for commands that eat the rest of the token (`.remind08:30`).
+    fn command_prefixes(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn interest(&self) -> Interest {
+        Interest::Commands
+    }
+
+    async fn on_start(&self, _ctx: &BotContext, _scope: &PluginScope) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -115,5 +209,10 @@ pub trait Plugin: Send + Sync {
         Ok(())
     }
 
-    async fn handle(&self, ctx: &BotContext, ev: &Event) -> anyhow::Result<Flow>;
+    async fn handle(
+        &self,
+        ctx: &BotContext,
+        ev: &Event,
+        scope: &PluginScope,
+    ) -> anyhow::Result<Flow>;
 }

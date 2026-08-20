@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use fujiang_core::{BotContext, Event, Flow, Plugin};
+use fujiang_core::{BotContext, Event, Flow, Interest, Plugin, PluginScope};
 use fujiang_store::{AttachResult, DetachResult};
 use tracing::warn;
 
@@ -24,10 +24,15 @@ const HELP: &str = "学话、收藏夹、图库。改学习/图库默认要在 f
 回复一张图 + .删除<tag>      只摘这一个 tag\n\
 回复一张图 + .标签           列出这张图的全部 tag";
 
+#[derive(Default)]
 pub struct FunPlugin;
 
 #[async_trait]
 impl Plugin for FunPlugin {
+    fn meta(&self) -> fujiang_core::PluginMeta {
+        fujiang_core::PluginMeta::new("fun", "学话、收藏夹、图库", self.commands())
+    }
+
     fn name(&self) -> &'static str {
         "fun"
     }
@@ -42,7 +47,20 @@ impl Plugin for FunPlugin {
         ]
     }
 
-    async fn handle(&self, ctx: &BotContext, ev: &Event) -> anyhow::Result<Flow> {
+    fn command_prefixes(&self) -> &'static [&'static str] {
+        &[".添加", ".删除"]
+    }
+
+    fn interest(&self) -> Interest {
+        Interest::Messages
+    }
+
+    async fn handle(
+        &self,
+        ctx: &BotContext,
+        ev: &Event,
+        _scope: &PluginScope,
+    ) -> anyhow::Result<Flow> {
         let Some(msg) = ev.as_message() else {
             return Ok(Flow::Continue);
         };
