@@ -581,6 +581,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sqlx",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -635,6 +636,19 @@ dependencies = [
  "chrono",
  "fujiang-core",
  "rand 0.8.7",
+]
+
+[[package]]
+name = "fujiang-plugin-memo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fujiang-core",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

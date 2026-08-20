@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -65,6 +66,16 @@ impl BotContext {
             .get(name)
             .cloned()
             .unwrap_or_else(|| Value::Object(Default::default()))
+    }
+
+    /// `{data}/plugin-data/{name}/` for files this plugin owns.
+    pub fn plugin_data_dir(&self, name: &str) -> anyhow::Result<PathBuf> {
+        self.store.plugin_data_dir(name)
+    }
+
+    /// Private SQLite for this plugin. Do not put plugin tables in the host db.
+    pub async fn open_plugin_db(&self, name: &str) -> anyhow::Result<sqlx::SqlitePool> {
+        self.store.open_plugin_db(name).await
     }
 
     pub async fn messenger(&self) -> Arc<dyn Messenger> {

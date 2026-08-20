@@ -45,7 +45,7 @@ HTTP 对接示例：LLOneBot HTTP 监听 `3000`，事件上报 `http://127.0.0.1
 cargo run -p fujiang -- migrate --from ./FujiangBot --config config.toml
 ```
 
-关掉某个插件：在 `config.toml` 里设 `[plugins.<name>].enabled = false`，或打开管理页开关。
+关掉内置插件：`[plugins.<name>].enabled = false`，或管理页 Entry 表里停用。动态插件停用写入 `plugins.disabled`，库可以留在内存，不删磁盘文件。写法、分发规则、ABI 和管理页 API 见 [插件说明](docs/plugins.md)。
 
 消息按群分表（`msg_g<群号>`，私聊 `msg_pm`）。超过 `archive_after_days` 的记录按月落到 `archive_dir`（如 `data/archive/msg_g741798363_202608.sqlite`）。`archive_after_days = 0` 关闭归档。
 
@@ -66,14 +66,16 @@ cargo run -p fujiang -- migrate --from ./FujiangBot --config config.toml
 
 群里发 `.help` 会拼出当前已启用插件的说明。前缀默认 `.`，区分大小写。
 
-内置插件按 `PluginMeta` 登记（名字、版本、简介、命令）。额外插件编译成 `.so` / `.dylib` 放到 `plugins/`（`[plugins].dir`），进程会扫描并在 `watch = true` 时热加载。写法见 [插件约定](docs/plugins.md)。示例：
+内置插件按 `PluginMeta` 登记（名字、版本、简介、命令）。额外插件编译成 `.so` / `.dylib` 放到 `plugins/`（`[plugins].dir`），进程会扫描并在 `watch = true` 时热加载。完整约定见 [插件说明](docs/plugins.md)。示例：
 
 ```bash
-cargo build -p fujiang-plugin-echo
+cargo build -p fujiang-plugin-echo    # 最小：.ping → pong
+cargo build -p fujiang-plugin-memo    # 完整：私有 SQLite 备忘
 cp target/debug/libfujiang_plugin_echo.dylib plugins/   # Linux 用 .so
+cp target/debug/libfujiang_plugin_memo.dylib plugins/
 ```
 
-群里 `.ping` 应回复 `pong`。管理页可以手动加载 / 卸载 / 重载。`.so` 必须用本仓库同一套 rustc 编，不能跨版本拷贝。
+群里 `.ping` 应回复 `pong`；`.memo add 明天交题` 写入 `data/plugin-data/memo/plugin.sqlite`，不进主库。管理页可以启用 / 停用 / 加载 / 卸载 / 重载，也能改动态插件的 JSON。`.so` 必须用本仓库同一套 rustc 编（ABI 2），不能跨版本拷贝。重载时新库启动失败会继续用旧实例。
 
 ### contest
 
@@ -150,7 +152,8 @@ Codeforces 排行。`.rank` 和 `.rk` 相同。`{year*}` 可写多个年级，�
 
 ## 文档
 
-- [插件约定与动态加载](docs/plugins.md)
+- [插件说明](docs/plugins.md)（写插件、分发、Scope、配置、动态 `.so`、管理页 API）
+- [插件运行时取舍](docs/plugin-lifecycle.md)
 - [本期不做](docs/out-of-scope.md)
 - [以后再说](docs/later.md)
 - [napcat-sdk API 缺口](crates/napcat-sdk/API_GAP.md)

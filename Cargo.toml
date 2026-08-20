@@ -12,6 +12,7 @@ members = [
     "crates/plugins/fun",
     "crates/plugins/luck",
     "crates/plugins/echo",
+    "crates/plugins/memo",
 ]
 
 [workspace.package]
