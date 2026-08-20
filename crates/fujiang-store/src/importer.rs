@@ -41,7 +41,7 @@ async fn import_cf_users(store: &Store, path: &Path) -> anyhow::Result<Option<us
     };
     let arr = v.as_array().cloned().unwrap_or_default();
     let now = chrono::Utc::now().timestamp();
-    let mut n = 0usize;
+    let mut users = Vec::new();
     for u in arr {
         let handle = u
             .get("cf_id")
@@ -51,7 +51,7 @@ async fn import_cf_users(store: &Store, path: &Path) -> anyhow::Result<Option<us
         if handle.is_empty() {
             continue;
         }
-        let user = CfUser {
+        users.push(CfUser {
             year: as_i64(&u["year"]),
             name: as_str(&u["name"]),
             handle,
@@ -63,11 +63,10 @@ async fn import_cf_users(store: &Store, path: &Path) -> anyhow::Result<Option<us
             is_main: as_i64(&u["is_main"]),
             updated_at: now,
             ..CfUser::default()
-        };
-        store.upsert_cf_user(&user).await?;
-        n += 1;
+        });
     }
-    Ok(Some(n))
+    store.upsert_cf_users(&users).await?;
+    Ok(Some(users.len()))
 }
 
 async fn import_standings(store: &Store, path: &Path) -> anyhow::Result<Option<usize>> {
@@ -78,9 +77,8 @@ async fn import_standings(store: &Store, path: &Path) -> anyhow::Result<Option<u
         Some(o) => o,
         None => return Ok(Some(0)),
     };
-    let mut n = 0usize;
+    let mut rows = Vec::new();
     for (cid, list) in obj {
-        let mut rows = Vec::new();
         if let Some(arr) = list.as_array() {
             for item in arr {
                 let name = as_str(&item["name"]);
@@ -96,11 +94,11 @@ async fn import_standings(store: &Store, path: &Path) -> anyhow::Result<Option<u
                     old_rating: as_i64(&item["oldRating"]),
                     new_rating: as_i64(&item["newRating"]),
                 });
-                n += 1;
             }
         }
-        store.replace_standings(cid, &rows).await?;
     }
+    let n = rows.len();
+    store.upsert_standings(&rows).await?;
     Ok(Some(n))
 }
 

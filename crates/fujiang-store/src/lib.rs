@@ -1,17 +1,20 @@
 mod importer;
 mod messages;
 mod models;
+mod plugin_db;
 mod tags;
 
 pub use importer::migrate_from_python;
 pub use messages::{default_archive_dir, shard_table, ArchiveReport};
 pub use models::*;
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
 
 #[derive(Clone)]
@@ -22,6 +25,18 @@ pub struct Store {
     archive_dir: PathBuf,
     archive_after_days: Arc<AtomicU64>,
     archive_every_secs: Arc<AtomicU64>,
+    known_shards: Arc<Mutex<HashSet<String>>>,
+    plugin_pools: Arc<tokio::sync::Mutex<HashMap<String, SqlitePool>>>,
+}
+
+pub(crate) fn sqlite_connect(path: impl AsRef<Path>) -> SqliteConnectOptions {
+    SqliteConnectOptions::new()
+        .filename(path.as_ref())
+        .create_if_missing(true)
+        .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(5))
 }
 
 pub struct StoreOpts {
@@ -53,13 +68,9 @@ impl Store {
         tokio::fs::create_dir_all(&opts.image_root).await.ok();
         tokio::fs::create_dir_all(&opts.archive_dir).await.ok();
 
-        let connect = SqliteConnectOptions::new()
-            .filename(&opts.db)
-            .create_if_missing(true)
-            .foreign_keys(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
-            .connect_with(connect)
+            .connect_with(sqlite_connect(&opts.db))
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
         let store = Self {
@@ -69,9 +80,13 @@ impl Store {
             archive_dir: opts.archive_dir,
             archive_after_days: Arc::new(AtomicU64::new(opts.archive_after_days)),
             archive_every_secs: Arc::new(AtomicU64::new(opts.archive_every_hours.max(1) * 3600)),
+            known_shards: Arc::new(Mutex::new(HashSet::new())),
+            plugin_pools: plugin_db::new_plugin_pools(),
         };
+        store.load_known_shards().await?;
         store.split_legacy_messages().await?;
         store.migrate_legacy_albums().await?;
+        store.split_plugin_tables().await?;
         Ok(store)
     }
 
@@ -96,18 +111,15 @@ impl Store {
             .join(sanitize_plugin_name(name)?))
     }
 
-    /// Open (or create) `{plugin_data_dir}/plugin.sqlite`. Schema is the plugin's job.
+    /// Open (or create) `{plugin_data_dir}/plugin.sqlite`.
+    /// Built-in plugins get schema via `ensure_plugin`; dynamic plugins create their own tables.
     pub async fn open_plugin_db(&self, name: &str) -> anyhow::Result<SqlitePool> {
         let dir = self.plugin_data_dir(name)?;
         tokio::fs::create_dir_all(&dir).await?;
         let path = dir.join("plugin.sqlite");
-        let connect = SqliteConnectOptions::new()
-            .filename(&path)
-            .create_if_missing(true)
-            .foreign_keys(true);
         Ok(SqlitePoolOptions::new()
             .max_connections(3)
-            .connect_with(connect)
+            .connect_with(sqlite_connect(&path))
             .await?)
     }
 
@@ -131,10 +143,11 @@ impl Store {
         Ok(())
     }
 
-    // --- contests ---
+    // --- contests (plugin-data/contest/plugin.sqlite) ---
 
     pub async fn replace_contests(&self, oj: &str, items: &[ContestRow]) -> anyhow::Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let pool = self.contest_pool().await?;
+        let mut tx = pool.begin().await?;
         sqlx::query("DELETE FROM contests WHERE oj = ?")
             .bind(oj)
             .execute(&mut *tx)
@@ -159,22 +172,24 @@ impl Store {
     }
 
     pub async fn contests_by_oj(&self, oj: &str) -> anyhow::Result<Vec<ContestRow>> {
+        let pool = self.contest_pool().await?;
         let rows = sqlx::query_as::<_, ContestRow>(
             "SELECT id, oj, title, begin_ts, end_ts, url, source, updated_at
              FROM contests WHERE oj = ? ORDER BY begin_ts ASC",
         )
         .bind(oj)
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await?;
         Ok(rows)
     }
 
     pub async fn contests_all(&self) -> anyhow::Result<Vec<ContestRow>> {
+        let pool = self.contest_pool().await?;
         Ok(sqlx::query_as::<_, ContestRow>(
             "SELECT id, oj, title, begin_ts, end_ts, url, source, updated_at
              FROM contests ORDER BY begin_ts ASC",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await?)
     }
 
@@ -183,25 +198,28 @@ impl Store {
         start_ts: i64,
         end_ts: i64,
     ) -> anyhow::Result<Vec<ContestRow>> {
+        let pool = self.contest_pool().await?;
         Ok(sqlx::query_as::<_, ContestRow>(
             "SELECT id, oj, title, begin_ts, end_ts, url, source, updated_at
              FROM contests WHERE begin_ts >= ? AND begin_ts < ? ORDER BY begin_ts ASC",
         )
         .bind(start_ts)
         .bind(end_ts)
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await?)
     }
 
     pub async fn remind_groups(&self) -> anyhow::Result<Vec<RemindGroup>> {
+        let pool = self.contest_pool().await?;
         Ok(
             sqlx::query_as::<_, RemindGroup>("SELECT group_id, hour, min FROM remind_groups")
-                .fetch_all(&self.pool)
+                .fetch_all(&pool)
                 .await?,
         )
     }
 
     pub async fn set_remind(&self, group_id: i64, hour: i64, min: i64) -> anyhow::Result<()> {
+        let pool = self.contest_pool().await?;
         sqlx::query(
             "INSERT INTO remind_groups(group_id, hour, min) VALUES(?, ?, ?)
              ON CONFLICT(group_id) DO UPDATE SET hour = excluded.hour, min = excluded.min",
@@ -209,89 +227,115 @@ impl Store {
         .bind(group_id)
         .bind(hour)
         .bind(min)
-        .execute(&self.pool)
+        .execute(&pool)
         .await?;
         Ok(())
     }
 
     pub async fn delete_remind(&self, group_id: i64) -> anyhow::Result<bool> {
+        let pool = self.contest_pool().await?;
         let r = sqlx::query("DELETE FROM remind_groups WHERE group_id = ?")
             .bind(group_id)
-            .execute(&self.pool)
+            .execute(&pool)
             .await?;
         Ok(r.rows_affected() > 0)
     }
 
-    // --- rank ---
+    // --- rank (plugin-data/rank/plugin.sqlite) ---
 
     pub async fn cf_users(&self) -> anyhow::Result<Vec<CfUser>> {
+        let pool = self.rank_pool().await?;
         Ok(sqlx::query_as::<_, CfUser>(
             "SELECT id, year, name, handle, last_rating, max_rating, solved, last_month, valid_rating, is_main, updated_at
              FROM cf_users ORDER BY year DESC, name ASC",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await?)
     }
 
     pub async fn cf_users_by_year(&self, year: i64) -> anyhow::Result<Vec<CfUser>> {
+        let pool = self.rank_pool().await?;
         Ok(sqlx::query_as::<_, CfUser>(
             "SELECT id, year, name, handle, last_rating, max_rating, solved, last_month, valid_rating, is_main, updated_at
              FROM cf_users WHERE year = ? ORDER BY name ASC",
         )
         .bind(year)
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await?)
     }
 
     pub async fn cf_users_by_name(&self, year: i64, name: &str) -> anyhow::Result<Vec<CfUser>> {
+        let pool = self.rank_pool().await?;
         Ok(sqlx::query_as::<_, CfUser>(
             "SELECT id, year, name, handle, last_rating, max_rating, solved, last_month, valid_rating, is_main, updated_at
              FROM cf_users WHERE year = ? AND name = ?",
         )
         .bind(year)
         .bind(name)
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await?)
     }
 
     pub async fn upsert_cf_user(&self, u: &CfUser) -> anyhow::Result<()> {
-        sqlx::query(
-            "INSERT INTO cf_users(year, name, handle, last_rating, max_rating, solved, last_month, valid_rating, is_main, updated_at)
-             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(handle) DO UPDATE SET
-                year=excluded.year, name=excluded.name,
-                last_rating=excluded.last_rating, max_rating=excluded.max_rating,
-                solved=excluded.solved, last_month=excluded.last_month,
-                valid_rating=excluded.valid_rating, is_main=excluded.is_main,
-                updated_at=excluded.updated_at",
-        )
-        .bind(u.year)
-        .bind(&u.name)
-        .bind(&u.handle)
-        .bind(u.last_rating)
-        .bind(u.max_rating)
-        .bind(u.solved)
-        .bind(u.last_month)
-        .bind(u.valid_rating)
-        .bind(u.is_main)
-        .bind(u.updated_at)
-        .execute(&self.pool)
-        .await?;
+        self.upsert_cf_users(std::slice::from_ref(u)).await
+    }
+
+    pub async fn upsert_cf_users(&self, users: &[CfUser]) -> anyhow::Result<()> {
+        if users.is_empty() {
+            return Ok(());
+        }
+        let pool = self.rank_pool().await?;
+        let mut tx = pool.begin().await?;
+        for u in users {
+            sqlx::query(
+                "INSERT INTO cf_users(year, name, handle, last_rating, max_rating, solved, last_month, valid_rating, is_main, updated_at)
+                 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(handle) DO UPDATE SET
+                    year=excluded.year, name=excluded.name,
+                    last_rating=excluded.last_rating, max_rating=excluded.max_rating,
+                    solved=excluded.solved, last_month=excluded.last_month,
+                    valid_rating=excluded.valid_rating, is_main=excluded.is_main,
+                    updated_at=excluded.updated_at
+                 WHERE cf_users.year <> excluded.year
+                    OR cf_users.name <> excluded.name
+                    OR cf_users.last_rating <> excluded.last_rating
+                    OR cf_users.max_rating <> excluded.max_rating
+                    OR cf_users.solved <> excluded.solved
+                    OR cf_users.last_month <> excluded.last_month
+                    OR cf_users.valid_rating <> excluded.valid_rating
+                    OR cf_users.is_main <> excluded.is_main",
+            )
+            .bind(u.year)
+            .bind(&u.name)
+            .bind(&u.handle)
+            .bind(u.last_rating)
+            .bind(u.max_rating)
+            .bind(u.solved)
+            .bind(u.last_month)
+            .bind(u.valid_rating)
+            .bind(u.is_main)
+            .bind(u.updated_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
     pub async fn delete_cf_user(&self, handle: &str) -> anyhow::Result<bool> {
+        let pool = self.rank_pool().await?;
         let r = sqlx::query("DELETE FROM cf_users WHERE handle = ?")
             .bind(handle)
-            .execute(&self.pool)
+            .execute(&pool)
             .await?;
         Ok(r.rows_affected() > 0)
     }
 
     pub async fn handle_exists(&self, handle: &str) -> anyhow::Result<bool> {
+        let pool = self.rank_pool().await?;
         let row = sqlx::query("SELECT 1 FROM cf_users WHERE handle = ?")
             .bind(handle)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&pool)
             .await?;
         Ok(row.is_some())
     }
@@ -301,7 +345,25 @@ impl Store {
         contest_id: &str,
         rows: &[StandingRow],
     ) -> anyhow::Result<()> {
-        let mut tx = self.pool.begin().await?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut tagged = Vec::with_capacity(rows.len());
+        for s in rows {
+            tagged.push(StandingRow {
+                contest_id: contest_id.to_string(),
+                ..s.clone()
+            });
+        }
+        self.upsert_standings(&tagged).await
+    }
+
+    pub async fn upsert_standings(&self, rows: &[StandingRow]) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let pool = self.rank_pool().await?;
+        let mut tx = pool.begin().await?;
         for s in rows {
             sqlx::query(
                 "INSERT INTO contest_standings(contest_id, handle, label, rank, old_rating, new_rating)
@@ -310,7 +372,7 @@ impl Store {
                     label=excluded.label, rank=excluded.rank,
                     old_rating=excluded.old_rating, new_rating=excluded.new_rating",
             )
-            .bind(contest_id)
+            .bind(&s.contest_id)
             .bind(&s.handle)
             .bind(&s.label)
             .bind(s.rank)
@@ -324,27 +386,30 @@ impl Store {
     }
 
     pub async fn standings(&self, contest_id: &str) -> anyhow::Result<Vec<StandingRow>> {
+        let pool = self.rank_pool().await?;
         Ok(sqlx::query_as::<_, StandingRow>(
             "SELECT contest_id, handle, label, rank, old_rating, new_rating
              FROM contest_standings WHERE contest_id = ? ORDER BY rank ASC",
         )
         .bind(contest_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await?)
     }
 
-    // --- daily problems ---
+    // --- daily problems (plugin-data/problem/plugin.sqlite) ---
 
     pub async fn daily_for_date(&self, date: &str) -> anyhow::Result<Vec<DailyProblem>> {
+        let pool = self.problem_pool().await?;
         Ok(sqlx::query_as::<_, DailyProblem>(
             "SELECT date, band, contest_id, idx, url FROM daily_problems WHERE date = ?",
         )
         .bind(date)
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await?)
     }
 
     pub async fn save_daily(&self, p: &DailyProblem) -> anyhow::Result<()> {
+        let pool = self.problem_pool().await?;
         sqlx::query(
             "INSERT INTO daily_problems(date, band, contest_id, idx, url)
              VALUES(?, ?, ?, ?, ?)
@@ -356,12 +421,12 @@ impl Store {
         .bind(p.contest_id)
         .bind(&p.idx)
         .bind(&p.url)
-        .execute(&self.pool)
+        .execute(&pool)
         .await?;
         Ok(())
     }
 
-    // --- learn ---
+    // --- learn / stars (plugin-data/fun/plugin.sqlite) ---
 
     pub async fn learn_add(
         &self,
@@ -370,6 +435,7 @@ impl Store {
         created_by: i64,
         group_id: Option<i64>,
     ) -> anyhow::Result<i64> {
+        let pool = self.fun_pool().await?;
         let now = chrono::Utc::now().timestamp();
         let r = sqlx::query(
             "INSERT INTO learn_replies(trigger, reply, created_by, created_at, group_id)
@@ -380,7 +446,7 @@ impl Store {
         .bind(created_by)
         .bind(now)
         .bind(group_id)
-        .execute(&self.pool)
+        .execute(&pool)
         .await?;
         Ok(r.last_insert_rowid())
     }
@@ -390,6 +456,7 @@ impl Store {
         group_id: Option<i64>,
         trigger: Option<&str>,
     ) -> anyhow::Result<Vec<LearnReply>> {
+        let pool = self.fun_pool().await?;
         let sql = match (group_id, trigger) {
             (Some(_), Some(_)) => {
                 "SELECT id, trigger, reply, created_by, created_at, group_id
@@ -415,7 +482,7 @@ impl Store {
         if let Some(t) = trigger {
             q = q.bind(t);
         }
-        Ok(q.fetch_all(&self.pool).await?)
+        Ok(q.fetch_all(&pool).await?)
     }
 
     pub async fn learn_del(
@@ -424,13 +491,14 @@ impl Store {
         trigger: &str,
         n: Option<i64>,
     ) -> anyhow::Result<u64> {
+        let pool = self.fun_pool().await?;
         if let Some(n) = n {
             let rows = self.learn_list(group_id, Some(trigger)).await?;
             let idx = (n - 1) as usize;
             if let Some(row) = rows.get(idx) {
                 let r = sqlx::query("DELETE FROM learn_replies WHERE id = ?")
                     .bind(row.id)
-                    .execute(&self.pool)
+                    .execute(&pool)
                     .await?;
                 return Ok(r.rows_affected());
             }
@@ -440,12 +508,12 @@ impl Store {
             sqlx::query("DELETE FROM learn_replies WHERE group_id = ? AND trigger = ?")
                 .bind(gid)
                 .bind(trigger)
-                .execute(&self.pool)
+                .execute(&pool)
                 .await?
         } else {
             sqlx::query("DELETE FROM learn_replies WHERE group_id IS NULL AND trigger = ?")
                 .bind(trigger)
-                .execute(&self.pool)
+                .execute(&pool)
                 .await?
         };
         Ok(r.rows_affected())
@@ -456,6 +524,7 @@ impl Store {
         group_id: Option<i64>,
         trigger: &str,
     ) -> anyhow::Result<Option<String>> {
+        let pool = self.fun_pool().await?;
         if let Some(gid) = group_id {
             let row = sqlx::query(
                 "SELECT reply FROM learn_replies
@@ -463,7 +532,7 @@ impl Store {
             )
             .bind(gid)
             .bind(trigger)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&pool)
             .await?;
             if row.is_some() {
                 return Ok(row.map(|r| r.get::<String, _>(0)));
@@ -474,7 +543,7 @@ impl Store {
              WHERE group_id IS NULL AND trigger = ? ORDER BY RANDOM() LIMIT 1",
         )
         .bind(trigger)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&pool)
         .await?;
         Ok(row.map(|r| r.get::<String, _>(0)))
     }
@@ -482,14 +551,16 @@ impl Store {
     // --- stars ---
 
     pub async fn star_list(&self) -> anyhow::Result<Vec<Star>> {
+        let pool = self.fun_pool().await?;
         Ok(sqlx::query_as::<_, Star>(
             "SELECT id, name, url, created_by, updated_at FROM stars ORDER BY name",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await?)
     }
 
     pub async fn star_add(&self, name: &str, url: &str, by: i64) -> anyhow::Result<bool> {
+        let pool = self.fun_pool().await?;
         let now = chrono::Utc::now().timestamp();
         let r = sqlx::query(
             "INSERT OR IGNORE INTO stars(name, url, created_by, updated_at) VALUES(?, ?, ?, ?)",
@@ -498,12 +569,13 @@ impl Store {
         .bind(url)
         .bind(by)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&pool)
         .await?;
         Ok(r.rows_affected() > 0)
     }
 
     pub async fn star_set(&self, name: &str, url: &str, by: i64) -> anyhow::Result<()> {
+        let pool = self.fun_pool().await?;
         let now = chrono::Utc::now().timestamp();
         sqlx::query(
             "INSERT INTO stars(name, url, created_by, updated_at) VALUES(?, ?, ?, ?)
@@ -513,15 +585,16 @@ impl Store {
         .bind(url)
         .bind(by)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&pool)
         .await?;
         Ok(())
     }
 
     pub async fn star_del(&self, name: &str) -> anyhow::Result<bool> {
+        let pool = self.fun_pool().await?;
         let r = sqlx::query("DELETE FROM stars WHERE name = ?")
             .bind(name)
-            .execute(&self.pool)
+            .execute(&pool)
             .await?;
         Ok(r.rows_affected() > 0)
     }
@@ -745,6 +818,141 @@ mod tests {
         store.set_archive_params(0, 24);
         let skipped = store.archive_due().await.unwrap();
         assert_eq!(skipped.moved, 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn sqlite_uses_wal() {
+        let (store, dir) = open_tmp().await;
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn plugin_data_not_in_host_db() {
+        let (store, dir) = open_tmp().await;
+        store
+            .upsert_cf_user(&CfUser {
+                year: 2024,
+                name: "甲".into(),
+                handle: "foo".into(),
+                ..CfUser::default()
+            })
+            .await
+            .unwrap();
+        store.learn_add("hi", "hello", 1, None).await.unwrap();
+        let host_tables: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+                .fetch_all(store.pool())
+                .await
+                .unwrap();
+        for t in [
+            "cf_users",
+            "contests",
+            "learn_replies",
+            "images",
+            "daily_problems",
+        ] {
+            assert!(
+                !host_tables.iter().any(|n| n == t),
+                "{t} still on host: {host_tables:?}"
+            );
+        }
+        assert!(dir.join("plugin-data/rank/plugin.sqlite").exists());
+        assert!(dir.join("plugin-data/fun/plugin.sqlite").exists());
+        assert_eq!(store.cf_users().await.unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn splits_existing_host_plugin_tables() {
+        let dir = std::env::temp_dir().join(format!("fujiang-test-{}", uuid_like()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("t.db");
+        {
+            let pool = sqlx::SqlitePool::connect_with(sqlite_connect(&db))
+                .await
+                .unwrap();
+            sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO cf_users(year, name, handle, last_rating, max_rating, solved, last_month, valid_rating, is_main, updated_at)
+                 VALUES(2024, '甲', 'oldhandle', 1, 2, 3, 4, 5, 1, 9)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO settings(key, value) VALUES('rank_rating_at', 'stamp')")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO settings(key, value) VALUES('messages_archived_at', 'keep')")
+                .execute(&pool)
+                .await
+                .unwrap();
+            pool.close().await;
+        }
+        let store = Store::open(db.to_str().unwrap(), dir.join("img"))
+            .await
+            .unwrap();
+        let users = store.cf_users().await.unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].handle, "oldhandle");
+        assert_eq!(
+            store
+                .plugin_get("rank", "rank_rating_at")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("stamp")
+        );
+        assert_eq!(
+            store
+                .get_setting("messages_archived_at")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("keep")
+        );
+        assert!(store.get_setting("rank_rating_at").await.unwrap().is_none());
+        let leftover: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cf_users'",
+        )
+        .fetch_optional(store.pool())
+        .await
+        .unwrap();
+        assert!(leftover.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn cf_user_upsert_skips_unchanged() {
+        let (store, dir) = open_tmp().await;
+        let mut u = CfUser {
+            year: 2024,
+            name: "甲".into(),
+            handle: "foo".into(),
+            last_rating: 1200,
+            max_rating: 1400,
+            updated_at: 1,
+            ..CfUser::default()
+        };
+        store.upsert_cf_user(&u).await.unwrap();
+        u.updated_at = 2;
+        store.upsert_cf_user(&u).await.unwrap();
+        let got = store.cf_users().await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].last_rating, 1200);
+        assert_eq!(got[0].updated_at, 1, "identical payload should not rewrite");
+        u.last_rating = 1300;
+        u.updated_at = 3;
+        store.upsert_cf_user(&u).await.unwrap();
+        let got = store.cf_users().await.unwrap();
+        assert_eq!(got[0].last_rating, 1300);
+        assert_eq!(got[0].updated_at, 3);
         let _ = std::fs::remove_dir_all(dir);
     }
 
