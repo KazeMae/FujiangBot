@@ -75,7 +75,7 @@ cp target/debug/libfujiang_plugin_echo.dylib plugins/   # Linux 用 .so
 cp target/debug/libfujiang_plugin_memo.dylib plugins/
 ```
 
-群里 `.ping` 应回复 `pong`；`.memo add 明天交题` 写入 `data/plugin-data/memo/plugin.sqlite`，不进主库。管理页可以启用 / 停用 / 加载 / 卸载 / 重载，也能改动态插件的 JSON。`.so` 必须用本仓库同一套 rustc 编（ABI 2），不能跨版本拷贝。重载时新库启动失败会继续用旧实例。
+群里 `.ping` 应回复 `pong`；`.memo add 明天交题` 写入 `data/plugin-data/memo/plugin.sqlite`，不进主库。管理页可以启用 / 停用 / 加载 / 卸载 / 重载，也能改动态插件的 JSON。`.so` 必须用本仓库同一套 rustc 编（ABI 3），不能跨版本拷贝。重载时新库启动失败会继续用旧实例。
 
 ### contest
 
@@ -132,15 +132,15 @@ Codeforces 排行。`.rank` 和 `.rk` 相同。`{year*}` 可写多个年级，�
 | `.learn del <触发词> [n]` | 删全部；带序号只删第 n 条 |
 | `.star` | 列出收藏 |
 | `.star add\|set\|del <名> [url]` | 新增（重名拒绝）/ 覆盖 / 删除 |
-| `.tag list` | 所有 tag、张数、别名 |
+| `.tag list` | 所有 tag、条数、别名 |
 | `.tag add <tag>` | 只建空 tag |
 | `.tag alias <tag> <别名>` | `来只别名` 也算这个 tag |
-| `.tag merge <from> <to>` | 把 from 上的图也挂到 to，from 还在 |
-| `.tag retire <tag>` | 去掉这个 tag（图还在） |
-| `来只<tag>` | 随机一张带该 tag 的图 |
-| 回复图 + `.添加<tag>` / `.删除<tag>` / `.标签` | 挂 tag / 只摘这一个 / 列出这张图的 tag |
+| `.tag merge <from> <to>` | 把 from 上的条目也挂到 to，from 还在 |
+| `.tag retire <tag>` | 去掉这个 tag（文件还在） |
+| `来只<tag>` | 随机一条带该 tag 的图或视频 |
+| 回复图/视频 + `.添加<tag>` / `.删除<tag>` / `.标签` | 挂 tag / 只摘这一个 / 列出这条的 tag |
 
-一张图可挂多个 tag；摘掉最后一个 tag 也不删文件。
+图片和视频共用 tag；摘掉最后一个 tag 也不删文件。
 
 ### luck
 

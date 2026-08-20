@@ -617,6 +617,63 @@ pub fn md5_hex(bytes: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
+pub fn is_video_ext(ext: &str) -> bool {
+    matches!(
+        ext.trim_start_matches('.').to_ascii_lowercase().as_str(),
+        "mp4" | "webm" | "mov" | "mkv" | "m4v"
+    )
+}
+
+pub fn is_video_path(path: impl AsRef<std::path::Path>) -> bool {
+    path.as_ref()
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(is_video_ext)
+}
+
+/// Guess a filename extension from magic bytes, falling back to `hint` (e.g. "mp4").
+pub fn sniff_media_ext(bytes: &[u8], hint: Option<&str>) -> String {
+    if let Some(ext) = sniff_magic(bytes) {
+        return ext.to_string();
+    }
+    if let Some(h) = hint {
+        let h = h.trim_start_matches('.').to_ascii_lowercase();
+        if is_image_ext(&h) || is_video_ext(&h) {
+            return h;
+        }
+    }
+    "bin".into()
+}
+
+pub fn is_image_ext(ext: &str) -> bool {
+    matches!(
+        ext.trim_start_matches('.').to_ascii_lowercase().as_str(),
+        "jpg" | "jpeg" | "png" | "gif" | "webp"
+    )
+}
+
+fn sniff_magic(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
+        return Some("jpg");
+    }
+    if bytes.starts_with(b"\x89PNG") {
+        return Some("png");
+    }
+    if bytes.starts_with(b"GIF8") {
+        return Some("gif");
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("webp");
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return Some("mp4");
+    }
+    if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        return Some("webm");
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -730,6 +787,50 @@ mod tests {
         assert!(store.random_by_tag("团建").await.unwrap().is_some());
         assert!(store.image_root.join(&img.rel_path).exists());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn video_in_same_tag_pool() {
+        let (store, dir) = open_tmp().await;
+        let img = store.image_upsert(b"fake-jpeg", "jpg", 1).await.unwrap();
+        let vid = store
+            .image_upsert(b"fake-mp4-bytes", "mp4", 1)
+            .await
+            .unwrap();
+        store.image_attach(&img.md5, "福哥", 1).await.unwrap();
+        store.image_attach(&vid.md5, "福哥", 1).await.unwrap();
+        assert!(vid.rel_path.ends_with(".mp4"));
+        assert!(is_video_path(store.image_root.join(&vid.rel_path)));
+        assert!(!is_video_path(store.image_root.join(&img.rel_path)));
+        let mut saw_img = false;
+        let mut saw_vid = false;
+        for _ in 0..40 {
+            let p = store.random_by_tag("福哥").await.unwrap().unwrap();
+            if is_video_path(&p) {
+                saw_vid = true;
+            } else {
+                saw_img = true;
+            }
+            if saw_img && saw_vid {
+                break;
+            }
+        }
+        assert!(saw_img && saw_vid, "tag pool should mix stills and video");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sniff_image_and_video_magic() {
+        assert_eq!(sniff_media_ext(&[0xFF, 0xD8, 0xFF], None), "jpg");
+        let mut webp = b"RIFF....WEBP".to_vec();
+        webp[4..8].copy_from_slice(&[1, 2, 3, 4]);
+        assert_eq!(sniff_media_ext(&webp, None), "webp");
+        let mut mp4 = vec![0u8; 12];
+        mp4[4..8].copy_from_slice(b"ftyp");
+        assert_eq!(sniff_media_ext(&mp4, None), "mp4");
+        assert_eq!(sniff_media_ext(b"nope", Some("MP4")), "mp4");
+        assert!(is_video_ext("mov"));
+        assert!(!is_video_ext("gif"));
     }
 
     #[tokio::test]

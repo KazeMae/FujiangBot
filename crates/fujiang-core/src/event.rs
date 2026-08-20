@@ -60,6 +60,7 @@ pub enum Segment {
     Text { text: String },
     At { target: AtTarget },
     Image { src: Media, summary: Option<String> },
+    Video { src: Media, name: Option<String> },
     Reply { id: i64 },
     File { src: Media, name: Option<String> },
     Face { id: String },
@@ -105,6 +106,22 @@ impl MessageEvent {
     pub fn first_image(&self) -> Option<&Media> {
         self.segments.iter().find_map(|s| match s {
             Segment::Image { src, .. } => Some(src),
+            _ => None,
+        })
+    }
+
+    pub fn first_video(&self) -> Option<&Media> {
+        self.segments.iter().find_map(|s| match s {
+            Segment::Video { src, .. } => Some(src),
+            _ => None,
+        })
+    }
+
+    /// First image or video, in segment order. `true` means video.
+    pub fn first_visual(&self) -> Option<(&Media, bool)> {
+        self.segments.iter().find_map(|s| match s {
+            Segment::Image { src, .. } => Some((src, false)),
+            Segment::Video { src, .. } => Some((src, true)),
             _ => None,
         })
     }

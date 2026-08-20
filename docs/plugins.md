@@ -3,7 +3,7 @@
 内置插件（contest / rank / problem / fun / luck）和 `plugins/` 里热插的 `.so` / `.dylib` / `.dll` 走同一套 `fujiang_core::Plugin`。业务只依赖中间层，**禁止**依赖 `napcat-sdk`。换 OneBot 实现端只加 adapter，插件不用改。
 
 最小模板：`crates/plugins/echo`（`.ping` → pong）。
-完整模板：`crates/plugins/memo`（自己的 SQLite、配置、后台清理）。约定与当前代码一致（`PLUGIN_ABI = 2`）。
+完整模板：`crates/plugins/memo`（自己的 SQLite、配置、后台清理）。约定与当前代码一致（`PLUGIN_ABI = 3`）。
 
 | 读者 | 从哪读 |
 |---|---|
@@ -134,6 +134,7 @@ let stop = scope.stop_token();                // 可传入更里层的 select
 ctx.reply_text(msg, "文本").await?;
 ctx.send_text(msg.source, "文本").await?;
 ctx.send_image(msg.source, "/abs/or/relative/path.jpg").await?;
+ctx.send_video(msg.source, "/abs/or/relative/path.mp4").await?;
 ctx.send_segments(target, vec![
     Segment::text("hi "),
     Segment::At { target: AtTarget::User(qq) },
@@ -176,7 +177,7 @@ let prefix = v.get("prefix").and_then(|x| x.as_str()).unwrap_or(".");
 | contest | `plugin-data/contest/plugin.sqlite` | 比赛日历、群提醒、`contest_*` / `preremind:*` |
 | rank | `plugin-data/rank/plugin.sqlite` | CF 用户、比赛榜、`rank_*` |
 | problem | `plugin-data/problem/plugin.sqlite` | 每日一题 |
-| fun | `plugin-data/fun/plugin.sqlite` | 学话、收藏、图库元数据（图片文件仍在 `image_root`） |
+| fun | `plugin-data/fun/plugin.sqlite` | 学话、收藏、图库元数据（图片/视频文件仍在 `image_root`） |
 | memo 等动态插件 | `plugin-data/<name>/plugin.sqlite` | 自己的 schema |
 
 从旧主库升级时，启动会把上述表拷进插件库再从 `fujiang.db` 删掉，只做一次。
@@ -236,7 +237,7 @@ let bytes = ctx.fetch_media_bytes(media).await?;
 
 学话范围：写入时带当前 `group_id`（私聊为 `NULL`）。群里触发先查本群，没有再用全局（导入的旧 `learn.json` 是 `NULL`）。
 
-图库是「一张图多个 tag」，不是旧版专辑。摘掉最后一个 tag 也不删文件。
+图库是「一条媒体（图或视频）多个 tag」，不是旧版专辑。摘掉最后一个 tag 也不删文件。`来只<tag>` 从该 tag 下随机抽一张图或一条视频。
 
 ---
 
@@ -257,6 +258,8 @@ msg.command_line()         // raw_text.trim()
 msg.raw_text / msg.segments
 msg.reply_id()             // 回复了哪条
 msg.first_image()          // 这条里第一张图
+msg.first_video()          // 这条里第一条视频
+msg.first_visual()         // 图或视频，`(media, is_video)`
 msg.sender.nickname / card
 ```
 
@@ -267,7 +270,7 @@ msg.sender.nickname / card
 | `Request` | `kind` / `flag` / `user_id` / `group_id` / `comment` |
 | `Meta { kind }` | 心跳等 |
 
-`Segment`：`Text` / `At { target: User(qq) \| All }` / `Image { src, summary }` / `Reply { id }` / `File { src, name }` / `Face { id }` / `Unknown { ty, raw }`。
+`Segment`：`Text` / `At { target: User(qq) \| All }` / `Image { src, summary }` / `Video { src, name }` / `Reply { id }` / `File { src, name }` / `Face { id }` / `Unknown { ty, raw }`。
 
 `Media`：`Url` / `Path` / `Base64` / `FileId`。
 
@@ -363,7 +366,7 @@ fujiang-core = { path = "../../fujiang-core" }
 
 `declare_plugin!` 导出：
 
-- `fujiang_plugin_abi() -> u32` 必须等于宿主的 `PLUGIN_ABI`（现在是 **2**）
+- `fujiang_plugin_abi() -> u32` 必须等于宿主的 `PLUGIN_ABI`（现在是 **3**）
 - `fujiang_create_plugin() -> *mut Box<dyn Plugin>` 薄指针，类型必须 `Default`
 
 ### 8.3 硬限制
@@ -506,7 +509,7 @@ ttl_days = 0
 
 | 现象 | 原因 / 处理 |
 |---|---|
-| 加载报 ABI 不符 | 用当前仓库重编 `.so`。ABI 现在是 2 |
+| 加载报 ABI 不符 | 用当前仓库重编 `.so`。ABI 现在是 3 |
 | 重载失败但机器人还在响应旧命令 | 正常。新库 `on_start` 失败会回滚，看 Entry 的 `last_error` |
 | 停用后文件还在、watch 又启用了 | 名字在 `plugins.disabled` 里就不会自动启动 |
 | 卸载很慢或警告 still in use | 还有 `handle` 没返回，或任务没走 `scope.spawn` |

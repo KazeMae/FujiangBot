@@ -36,4 +36,4 @@ PluginHub
 
 `replace`：对新实例 `on_start`，成功才 `on_stop` 旧的。`insert` 在名字已存在时是空操作；热重载必须走 `replace`。
 
-ABI：改 `Plugin` / `BotContext` / 导出符号就 bump `PLUGIN_ABI`（当前 2）。
+ABI：改 `Plugin` / `BotContext` / 导出符号就 bump `PLUGIN_ABI`（当前 3）。
