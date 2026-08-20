@@ -261,7 +261,7 @@ async fn import_dir_images(store: &Store, dir: &Path, tag: Option<&str>) -> anyh
             .and_then(|e| e.to_str())
             .unwrap_or("jpg")
             .to_lowercase();
-        if !matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp") {
+        if !(crate::is_image_ext(&ext) || crate::is_video_ext(&ext)) {
             continue;
         }
         let bytes = match fs::read(file.path()) {

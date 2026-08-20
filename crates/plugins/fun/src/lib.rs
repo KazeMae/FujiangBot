@@ -13,16 +13,16 @@ const HELP: &str = "学话、收藏夹、图库。改学习/图库默认要在 f
 .star add <名> <url>         新增（重名拒绝）\n\
 .star set <名> <url>         新增或覆盖\n\
 .star del <名>\n\
-【图库】一张图可挂多个 tag；摘掉最后一个 tag 也不删文件。\n\
-.tag list                    所有 tag、张数、别名\n\
+【图库】图片和视频共用 tag；摘掉最后一个 tag 也不删文件。\n\
+.tag list                    所有 tag、条数、别名\n\
 .tag add <tag>               只建空 tag\n\
 .tag alias <tag> <别名>      来只别名 也算这个 tag\n\
-.tag merge <from> <to>       把 from 上的图也挂到 to，from 还在\n\
-.tag retire <tag>            去掉这个 tag（图还在）\n\
-来只<tag>                    随机一张带该 tag 的图\n\
-回复一张图 + .添加<tag>      给这张图挂 tag\n\
-回复一张图 + .删除<tag>      只摘这一个 tag\n\
-回复一张图 + .标签           列出这张图的全部 tag";
+.tag merge <from> <to>       把 from 上的条目也挂到 to，from 还在\n\
+.tag retire <tag>            去掉这个 tag（文件还在）\n\
+来只<tag>                    随机一条带该 tag 的图或视频\n\
+回复图/视频 + .添加<tag>     给这条挂 tag\n\
+回复图/视频 + .删除<tag>     只摘这一个 tag\n\
+回复图/视频 + .标签          列出这条的全部 tag";
 
 #[derive(Default)]
 pub struct FunPlugin;
@@ -89,7 +89,7 @@ impl Plugin for FunPlugin {
         }
 
         if line.starts_with(".添加") || line.starts_with(".删除") {
-            handle_image_cmd(ctx, msg, &line).await?;
+            handle_media_cmd(ctx, msg, &line).await?;
             return Ok(Flow::Stop);
         }
 
@@ -97,7 +97,12 @@ impl Plugin for FunPlugin {
             if !name.is_empty() {
                 match ctx.store.random_by_tag(name).await? {
                     Some(path) if path.exists() => {
-                        ctx.send_image(msg.source, path.to_string_lossy()).await?;
+                        let p = path.to_string_lossy();
+                        if fujiang_store::is_video_path(&path) {
+                            ctx.send_video(msg.source, p).await?;
+                        } else {
+                            ctx.send_image(msg.source, p).await?;
+                        }
                     }
                     _ => {}
                 }
@@ -273,7 +278,7 @@ async fn handle_tag(
         let mut s = String::from("tag：");
         for item in list {
             s.push_str(&format!(
-                "\n{}  {}张  别名:{:?}",
+                "\n{}  {}条  别名:{:?}",
                 item.tag.name, item.image_count, item.aliases
             ));
         }
@@ -302,7 +307,7 @@ async fn handle_tag(
             ctx.reply_text(
                 msg,
                 if ok {
-                    "已去掉这个 tag（图片文件还在）"
+                    "已去掉这个 tag（文件还在）"
                 } else {
                     "不存在"
                 },
@@ -317,7 +322,7 @@ async fn handle_tag(
     Ok(())
 }
 
-async fn handle_image_cmd(
+async fn handle_media_cmd(
     ctx: &BotContext,
     msg: &fujiang_core::MessageEvent,
     line: &str,
@@ -329,30 +334,34 @@ async fn handle_image_cmd(
     let add = line.starts_with(".添加");
     let name: String = line.chars().skip(3).collect();
     if name.is_empty() {
-        ctx.reply_text(msg, "格式：回复图片后发 .添加名 / .删除名")
+        ctx.reply_text(msg, "格式：回复图片或视频后发 .添加名 / .删除名")
             .await?;
         return Ok(());
     }
-    let Some(bytes) = reply_image_bytes(ctx, msg).await? else {
+    let Some(got) = reply_visual(ctx, msg).await? else {
         return Ok(());
     };
+    let kind = if got.video { "视频" } else { "图" };
     if add {
-        let img = ctx.store.image_upsert(&bytes, "jpg", msg.user_id()).await?;
+        let img = ctx
+            .store
+            .image_upsert(&got.bytes, &got.ext, msg.user_id())
+            .await?;
         let text = match ctx
             .store
             .image_attach(&img.md5, &name, msg.user_id())
             .await?
         {
             AttachResult::Attached => format!("已挂上 tag「{name}」🤫"),
-            AttachResult::Already => format!("这张图已有 tag「{name}」"),
+            AttachResult::Already => format!("这条{kind}已有 tag「{name}」"),
         };
         ctx.reply_text(msg, text).await?;
     } else {
-        let md5 = fujiang_store::md5_hex(&bytes);
+        let md5 = fujiang_store::md5_hex(&got.bytes);
         let text = match ctx.store.image_detach(&md5, &name).await? {
-            DetachResult::Detached => format!("已从这张图去掉 tag「{name}」"),
-            DetachResult::NoSuchTag => format!("这张图没有 tag「{name}」"),
-            DetachResult::UnknownImage => "图库里没有这张图".into(),
+            DetachResult::Detached => format!("已从这条{kind}去掉 tag「{name}」"),
+            DetachResult::NoSuchTag => format!("这条{kind}没有 tag「{name}」"),
+            DetachResult::UnknownImage => format!("图库里没有这条{kind}"),
         };
         ctx.reply_text(msg, text).await?;
     }
@@ -363,45 +372,48 @@ async fn handle_show_tags(
     ctx: &BotContext,
     msg: &fujiang_core::MessageEvent,
 ) -> anyhow::Result<()> {
-    let Some(md5) = reply_image_md5(ctx, msg).await? else {
+    let Some(got) = reply_visual(ctx, msg).await? else {
         return Ok(());
     };
+    let md5 = fujiang_store::md5_hex(&got.bytes);
     let tags = ctx.store.image_tags(&md5).await?;
+    let kind = if got.video { "视频" } else { "图" };
     if tags.is_empty() {
-        ctx.reply_text(msg, "这张图还没有 tag").await?;
+        ctx.reply_text(msg, format!("这条{kind}还没有 tag")).await?;
     } else {
-        ctx.reply_text(msg, format!("这张图的 tag：{}", tags.join("、")))
+        ctx.reply_text(msg, format!("这条{kind}的 tag：{}", tags.join("、")))
             .await?;
     }
     Ok(())
 }
 
-async fn reply_image_md5(
-    ctx: &BotContext,
-    msg: &fujiang_core::MessageEvent,
-) -> anyhow::Result<Option<String>> {
-    Ok(reply_image_bytes(ctx, msg)
-        .await?
-        .map(|b| fujiang_store::md5_hex(&b)))
+struct QuotedVisual {
+    bytes: Vec<u8>,
+    ext: String,
+    video: bool,
 }
 
-async fn reply_image_bytes(
+async fn reply_visual(
     ctx: &BotContext,
     msg: &fujiang_core::MessageEvent,
-) -> anyhow::Result<Option<Vec<u8>>> {
+) -> anyhow::Result<Option<QuotedVisual>> {
     let Some(rid) = msg.reply_id() else {
-        ctx.reply_text(msg, "请先回复一张图片").await?;
+        ctx.reply_text(msg, "请先回复一张图片或视频").await?;
         return Ok(None);
     };
     let quoted = ctx.messenger().await.get_message(rid).await?;
-    let Some(media) = quoted.first_image() else {
-        ctx.reply_text(msg, "回复的不是图片").await?;
+    let Some((media, video)) = quoted.first_visual() else {
+        ctx.reply_text(msg, "回复的不是图片或视频").await?;
         return Ok(None);
     };
     match ctx.fetch_media_bytes(media).await {
-        Ok(b) => Ok(Some(b)),
+        Ok(bytes) => {
+            let hint = if video { Some("mp4") } else { Some("jpg") };
+            let ext = fujiang_store::sniff_media_ext(&bytes, hint);
+            Ok(Some(QuotedVisual { bytes, ext, video }))
+        }
         Err(e) => {
-            warn!(error = %e, "fetch image");
+            warn!(error = %e, "fetch media");
             ctx.reply_text(msg, "ERROR😪").await?;
             Ok(None)
         }

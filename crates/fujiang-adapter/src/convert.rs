@@ -106,6 +106,14 @@ fn from_recv(s: RecvSegment) -> Segment {
                 .unwrap_or(Media::FileId(String::new()));
             Segment::Image { src, summary }
         }
+        RecvSegment::Video { file, url, .. } => {
+            let src = url
+                .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+                .map(Media::Url)
+                .or_else(|| file.filter(|s| !s.is_empty()).map(Media::FileId))
+                .unwrap_or(Media::FileId(String::new()));
+            Segment::Video { src, name: None }
+        }
         RecvSegment::File {
             file,
             file_id,
@@ -140,6 +148,7 @@ pub fn to_send(s: &Segment) -> SendSegment {
             }
             img
         }
+        Segment::Video { src, .. } => Structs::video(onebot_file(src)),
         Segment::File { src, name } => Structs::file(onebot_file(src), name.clone()),
         Segment::Face { id } => Structs::face(id),
         Segment::Unknown { .. } => Structs::text(""),
@@ -240,6 +249,35 @@ mod tests {
         };
         match to_send(&seg) {
             SendSegment::Image { file, .. } => {
+                assert!(file.starts_with("file://"), "{file}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn recv_http_video_stays_url() {
+        let seg = from_recv(RecvSegment::Video {
+            file: Some("{abc}.video".into()),
+            url: Some("https://example.com/a.mp4".into()),
+            file_size: None,
+        });
+        match seg {
+            Segment::Video {
+                src: Media::Url(u), ..
+            } => assert_eq!(u, "https://example.com/a.mp4"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn video_segment_uses_file_uri() {
+        let seg = Segment::Video {
+            src: Media::Path("data/images/x.mp4".into()),
+            name: None,
+        };
+        match to_send(&seg) {
+            SendSegment::Video { file, .. } => {
                 assert!(file.starts_with("file://"), "{file}");
             }
             other => panic!("{other:?}"),

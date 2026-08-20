@@ -109,7 +109,18 @@ impl BotContext {
         .await
     }
 
-    /// Load image bytes. HTTP(S) URLs are downloaded; cache ids go through get_image.
+    pub async fn send_video(&self, target: Source, path: impl Into<String>) -> anyhow::Result<i64> {
+        self.send_segments(
+            target,
+            vec![Segment::Video {
+                src: crate::event::Media::Path(path.into()),
+                name: None,
+            }],
+        )
+        .await
+    }
+
+    /// Load media bytes. HTTP(S) URLs are downloaded; cache ids go through get_image, then get_file.
     pub async fn fetch_media_bytes(&self, media: &crate::event::Media) -> anyhow::Result<Vec<u8>> {
         use crate::event::Media;
         match media {
@@ -120,10 +131,14 @@ impl BotContext {
             Media::Path(p) => Ok(tokio::fs::read(p).await?),
             Media::Base64(s) => {
                 let raw = s.strip_prefix("base64://").unwrap_or(s);
-                anyhow::bail!("base64 image not supported here ({} bytes)", raw.len())
+                anyhow::bail!("base64 media not supported here ({} bytes)", raw.len())
             }
             Media::Url(u) | Media::FileId(u) => {
-                let path = self.messenger().await.get_image(u).await?;
+                let m = self.messenger().await;
+                let path = match m.get_image(u).await {
+                    Ok(p) => p,
+                    Err(_) => m.get_file(u).await?,
+                };
                 Ok(tokio::fs::read(&path).await?)
             }
         }
@@ -135,7 +150,7 @@ fn is_http_url(s: &str) -> bool {
 }
 
 /// Bump when `Plugin` / `BotContext` layout or the create symbol changes.
-pub const PLUGIN_ABI: u32 = 2;
+pub const PLUGIN_ABI: u32 = 3;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PluginMeta {
