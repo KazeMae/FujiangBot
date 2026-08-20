@@ -112,7 +112,7 @@ impl Plugin for ContestPlugin {
         if line == ".bot" {
             let t = ctx
                 .store
-                .get_setting("contest_updated_at")
+                .plugin_get("contest", "contest_updated_at")
                 .await?
                 .unwrap_or_else(|| "尚未更新".into());
             ctx.reply_text(
@@ -195,7 +195,9 @@ async fn refresh(ctx: &BotContext) -> anyhow::Result<()> {
         ctx.store.replace_contests(&oj, &list).await?;
     }
     let stamp = Local::now().format("%Y年%m月%d日%H时%M分%S秒").to_string();
-    ctx.store.set_setting("contest_updated_at", &stamp).await?;
+    ctx.store
+        .plugin_set("contest", "contest_updated_at", &stamp)
+        .await?;
     info!("contests updated");
     Ok(())
 }
@@ -421,7 +423,7 @@ async fn pre_remind(ctx: &BotContext, stop: &CancellationToken) -> anyhow::Resul
         let delta = c.begin_ts - now;
         if (3600..=12 * 3600).contains(&delta) {
             let key = format!("preremind:{}", c.url);
-            if ctx.store.get_setting(&key).await?.is_some() {
+            if ctx.store.plugin_get("contest", &key).await?.is_some() {
                 continue;
             }
             let msg = format!(
@@ -446,7 +448,7 @@ async fn pre_remind(ctx: &BotContext, stop: &CancellationToken) -> anyhow::Resul
                         .await;
                 }
             });
-            ctx.store.set_setting(&key, "1").await?;
+            ctx.store.plugin_set("contest", &key, "1").await?;
         }
     }
     Ok(())

@@ -4,7 +4,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
-use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Row, SqlitePool};
 use tracing::{info, warn};
 
@@ -72,9 +71,26 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) async fn load_known_shards(&self) -> anyhow::Result<()> {
+        let rows = sqlx::query("SELECT name FROM message_shards")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut known = self.known_shards.lock().unwrap();
+        for r in rows {
+            let name: String = r.get(0);
+            if valid_shard(&name) {
+                known.insert(name);
+            }
+        }
+        Ok(())
+    }
+
     pub async fn ensure_shard(&self, group_id: Option<i64>) -> anyhow::Result<String> {
         let table = shard_table(group_id)?;
         debug_assert!(valid_shard(&table));
+        if self.known_shards.lock().unwrap().contains(&table) {
+            return Ok(table);
+        }
         let create = format!("CREATE TABLE IF NOT EXISTS {table} ({DDL_COLS})");
         sqlx::query(&create).execute(&self.pool).await?;
         sqlx::query(&format!(
@@ -92,6 +108,7 @@ impl Store {
             .bind(group_id)
             .execute(&self.pool)
             .await?;
+        self.known_shards.lock().unwrap().insert(table.clone());
         Ok(table)
     }
 
@@ -277,16 +294,14 @@ async fn write_archive_file(
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
     }
-    let opts = SqliteConnectOptions::new()
-        .filename(path)
-        .create_if_missing(true);
-    let pool = SqlitePool::connect_with(opts).await?;
+    let pool = SqlitePool::connect_with(crate::sqlite_connect(path)).await?;
     sqlx::query(&format!("CREATE TABLE IF NOT EXISTS messages ({DDL_COLS})"))
         .execute(&pool)
         .await?;
     sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS messages_mid ON messages(message_id)")
         .execute(&pool)
         .await?;
+    let mut tx = pool.begin().await?;
     for row in rows {
         sqlx::query(
             "INSERT OR IGNORE INTO messages(
@@ -304,9 +319,10 @@ async fn write_archive_file(
         .bind(&row.raw_text)
         .bind(&row.segments_json)
         .bind(row.inserted_at)
-        .execute(&pool)
+        .execute(&mut *tx)
         .await?;
     }
+    tx.commit().await?;
     pool.close().await;
     Ok(())
 }

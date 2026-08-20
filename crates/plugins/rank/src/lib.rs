@@ -131,12 +131,12 @@ impl Plugin for RankPlugin {
             "--updateTime" | "-u" => {
                 let a = ctx
                     .store
-                    .get_setting("rank_rating_at")
+                    .plugin_get("rank", "rank_rating_at")
                     .await?
                     .unwrap_or_else(|| "-".into());
                 let b = ctx
                     .store
-                    .get_setting("rank_standings_at")
+                    .plugin_get("rank", "rank_standings_at")
                     .await?
                     .unwrap_or_else(|| "-".into());
                 ctx.reply_text(
@@ -510,7 +510,8 @@ async fn refresh_ratings(ctx: &BotContext) -> anyhow::Result<()> {
         let _ = &mut u;
     }
     ctx.store
-        .set_setting(
+        .plugin_set(
+            "rank",
             "rank_rating_at",
             &chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         )
@@ -527,7 +528,7 @@ async fn refresh_ranks(ctx: &BotContext) -> anyhow::Result<()> {
             let mut nu = u.clone();
             nu.valid_rating = valid;
             ctx.store.upsert_cf_user(&nu).await?;
-            let mut rows = Vec::new();
+            let mut rows = Vec::with_capacity(hist.len());
             for h in hist {
                 rows.push(fujiang_store::StandingRow {
                     contest_id: h.contest_id.to_string(),
@@ -538,19 +539,13 @@ async fn refresh_ranks(ctx: &BotContext) -> anyhow::Result<()> {
                     new_rating: h.new_rating,
                 });
             }
-            // group by contest
-            let mut by: HashMap<String, Vec<fujiang_store::StandingRow>> = HashMap::new();
-            for r in rows {
-                by.entry(r.contest_id.clone()).or_default().push(r);
-            }
-            for (cid, rs) in by {
-                ctx.store.replace_standings(&cid, &rs).await?;
-            }
+            ctx.store.upsert_standings(&rows).await?;
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
     ctx.store
-        .set_setting(
+        .plugin_set(
+            "rank",
             "rank_standings_at",
             &chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         )

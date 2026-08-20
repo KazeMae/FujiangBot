@@ -7,6 +7,7 @@ use crate::{md5_hex, AttachResult, DetachResult, ImageRow, Store, Tag, TagListIt
 
 impl Store {
     pub async fn tag_ensure(&self, name: &str) -> anyhow::Result<Tag> {
+        let pool = self.fun_pool().await?;
         let name = name.trim();
         anyhow::ensure!(!name.is_empty(), "tag 名为空");
         if let Some(t) = self.tag_by_alias(name).await? {
@@ -14,7 +15,7 @@ impl Store {
         }
         sqlx::query("INSERT OR IGNORE INTO tags(name) VALUES(?)")
             .bind(name)
-            .execute(&self.pool)
+            .execute(&pool)
             .await?;
         let tag = self
             .tag_by_name(name)
@@ -23,46 +24,49 @@ impl Store {
         sqlx::query("INSERT OR IGNORE INTO tag_aliases(alias, tag_id) VALUES(?, ?)")
             .bind(name)
             .bind(tag.id)
-            .execute(&self.pool)
+            .execute(&pool)
             .await?;
         Ok(tag)
     }
 
     pub async fn tag_by_name(&self, name: &str) -> anyhow::Result<Option<Tag>> {
+        let pool = self.fun_pool().await?;
         Ok(
             sqlx::query_as::<_, Tag>("SELECT id, name FROM tags WHERE name = ?")
                 .bind(name)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&pool)
                 .await?,
         )
     }
 
     pub async fn tag_by_alias(&self, alias: &str) -> anyhow::Result<Option<Tag>> {
+        let pool = self.fun_pool().await?;
         Ok(sqlx::query_as::<_, Tag>(
             "SELECT t.id, t.name FROM tags t
              JOIN tag_aliases a ON a.tag_id = t.id
              WHERE a.alias = ?",
         )
         .bind(alias)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&pool)
         .await?)
     }
 
     pub async fn tag_list(&self) -> anyhow::Result<Vec<TagListItem>> {
+        let pool = self.fun_pool().await?;
         let tags = sqlx::query_as::<_, Tag>("SELECT id, name FROM tags ORDER BY name")
-            .fetch_all(&self.pool)
+            .fetch_all(&pool)
             .await?;
         let mut out = Vec::new();
         for tag in tags {
             let image_count: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM image_tags WHERE tag_id = ?")
                     .bind(tag.id)
-                    .fetch_one(&self.pool)
+                    .fetch_one(&pool)
                     .await?;
             let aliases: Vec<String> =
                 sqlx::query("SELECT alias FROM tag_aliases WHERE tag_id = ?")
                     .bind(tag.id)
-                    .fetch_all(&self.pool)
+                    .fetch_all(&pool)
                     .await?
                     .into_iter()
                     .map(|r| r.get::<String, _>(0))
@@ -77,6 +81,7 @@ impl Store {
     }
 
     pub async fn tag_alias(&self, name: &str, alias: &str) -> anyhow::Result<String> {
+        let pool = self.fun_pool().await?;
         let tag = self.tag_ensure(name).await?;
         let alias = alias.trim();
         anyhow::ensure!(!alias.is_empty(), "别名为空");
@@ -86,12 +91,13 @@ impl Store {
         )
         .bind(alias)
         .bind(tag.id)
-        .execute(&self.pool)
+        .execute(&pool)
         .await?;
         Ok(format!("{alias} -> {}", tag.name))
     }
 
     pub async fn tag_merge(&self, from: &str, to: &str) -> anyhow::Result<String> {
+        let pool = self.fun_pool().await?;
         let src = self
             .tag_by_alias(from)
             .await?
@@ -108,7 +114,7 @@ impl Store {
         .bind(dst.id)
         .bind(now)
         .bind(src.id)
-        .execute(&self.pool)
+        .execute(&pool)
         .await?;
         Ok(format!(
             "已给 {} 张带「{}」的图挂上「{}」（「{}」仍保留）",
@@ -120,22 +126,24 @@ impl Store {
     }
 
     pub async fn tag_retire(&self, name: &str) -> anyhow::Result<bool> {
+        let pool = self.fun_pool().await?;
         let Some(tag) = self.tag_by_alias(name).await? else {
             return Ok(false);
         };
         sqlx::query("DELETE FROM tags WHERE id = ?")
             .bind(tag.id)
-            .execute(&self.pool)
+            .execute(&pool)
             .await?;
         Ok(true)
     }
 
     pub async fn image_by_md5(&self, md5: &str) -> anyhow::Result<Option<ImageRow>> {
+        let pool = self.fun_pool().await?;
         Ok(sqlx::query_as::<_, ImageRow>(
             "SELECT id, md5, rel_path, added_by, added_at FROM images WHERE md5 = ?",
         )
         .bind(md5)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&pool)
         .await?)
     }
 
@@ -157,6 +165,7 @@ impl Store {
             tokio::fs::write(&path, bytes).await?;
         }
         let now = chrono::Utc::now().timestamp();
+        let pool = self.fun_pool().await?;
         sqlx::query(
             "INSERT INTO images(md5, rel_path, added_by, added_at) VALUES(?, ?, ?, ?)
              ON CONFLICT(md5) DO NOTHING",
@@ -165,7 +174,7 @@ impl Store {
         .bind(&rel)
         .bind(added_by)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&pool)
         .await?;
         self.image_by_md5(&md5)
             .await?
@@ -183,6 +192,7 @@ impl Store {
         };
         let tag = self.tag_ensure(tag_name).await?;
         let now = chrono::Utc::now().timestamp();
+        let pool = self.fun_pool().await?;
         let r = sqlx::query(
             "INSERT OR IGNORE INTO image_tags(image_id, tag_id, added_by, added_at)
              VALUES(?, ?, ?, ?)",
@@ -191,7 +201,7 @@ impl Store {
         .bind(tag.id)
         .bind(added_by)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&pool)
         .await?;
         Ok(if r.rows_affected() == 0 {
             AttachResult::Already
@@ -207,10 +217,11 @@ impl Store {
         let Some(tag) = self.tag_by_alias(tag_name).await? else {
             return Ok(DetachResult::NoSuchTag);
         };
+        let pool = self.fun_pool().await?;
         let r = sqlx::query("DELETE FROM image_tags WHERE image_id = ? AND tag_id = ?")
             .bind(img.id)
             .bind(tag.id)
-            .execute(&self.pool)
+            .execute(&pool)
             .await?;
         Ok(if r.rows_affected() == 0 {
             DetachResult::NoSuchTag
@@ -223,13 +234,14 @@ impl Store {
         let Some(img) = self.image_by_md5(md5).await? else {
             return Ok(vec![]);
         };
+        let pool = self.fun_pool().await?;
         let rows = sqlx::query(
             "SELECT t.name FROM tags t
              JOIN image_tags x ON x.tag_id = t.id
              WHERE x.image_id = ? ORDER BY t.name",
         )
         .bind(img.id)
-        .fetch_all(&self.pool)
+        .fetch_all(&pool)
         .await?;
         Ok(rows.into_iter().map(|r| r.get::<String, _>(0)).collect())
     }
@@ -238,13 +250,14 @@ impl Store {
         let Some(tag) = self.tag_by_alias(alias).await? else {
             return Ok(None);
         };
+        let pool = self.fun_pool().await?;
         let row = sqlx::query(
             "SELECT img.rel_path FROM images img
              JOIN image_tags x ON x.image_id = img.id
              WHERE x.tag_id = ? ORDER BY RANDOM() LIMIT 1",
         )
         .bind(tag.id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&pool)
         .await?;
         Ok(row.map(|r| self.image_root.join(r.get::<String, _>(0))))
     }
@@ -299,6 +312,7 @@ impl Store {
                     let _ = tokio::fs::copy(&src, &dst).await;
                 }
                 if self.image_by_md5(&md5).await?.is_none() && (dst.exists() || src.exists()) {
+                    let fun = self.fun_pool().await?;
                     sqlx::query(
                         "INSERT OR IGNORE INTO images(md5, rel_path, added_by, added_at)
                          VALUES(?, ?, ?, ?)",
@@ -307,7 +321,7 @@ impl Store {
                     .bind(&new_rel)
                     .bind(added_by)
                     .bind(added_at)
-                    .execute(&self.pool)
+                    .execute(&fun)
                     .await?;
                 }
                 if self.image_by_md5(&md5).await?.is_some() {

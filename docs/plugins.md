@@ -44,7 +44,7 @@ Crate 边界：
 | crate | 职责 |
 |---|---|
 | `fujiang-core` | `Plugin` / `BotContext` / `Event` / `Dispatcher` / `PluginScope` |
-| `fujiang-store` | SQLite、图库、学话、比赛、CF 用户 |
+| `fujiang-store` | 主库消息；各插件自己的 SQLite |
 | `fujiang-adapter` | OneBot ↔ 中间层 |
 | `fujiang` | 进程、配置、管理页、PluginHub |
 | `napcat-sdk` | 仅 adapter 使用 |
@@ -167,9 +167,21 @@ let prefix = v.get("prefix").and_then(|x| x.as_str()).unwrap_or(".");
 
 ### 5.3 插件自己的数据库
 
-**主库 `fujiang.db` 给宿主和内置插件。** 消息分表、比赛、学话、图库已经在这里，内置 crate 继续用 `ctx.store` 的现成方法。不要把第三方表塞进去：动态插件没法给宿主跑 migration，卸插件也删不干净。
+**主库 `fujiang.db` 只给宿主。** 消息分表、归档参数、`settings` 里宿主自己的键（如 `messages_archived_at`）在这里。
 
-**插件私有数据用自己的 SQLite。** 宿主按名字开文件，schema 由插件在 `on_start` 里 `CREATE TABLE IF NOT EXISTS`（不要用宿主的 `sqlx::migrate!`）。
+**每个插件一份 SQLite。** 路径：`{data}/plugin-data/{name}/plugin.sqlite`。内置插件的表也在各自的文件里：
+
+| 插件 | 文件 | 内容 |
+|---|---|---|
+| contest | `plugin-data/contest/plugin.sqlite` | 比赛日历、群提醒、`contest_*` / `preremind:*` |
+| rank | `plugin-data/rank/plugin.sqlite` | CF 用户、比赛榜、`rank_*` |
+| problem | `plugin-data/problem/plugin.sqlite` | 每日一题 |
+| fun | `plugin-data/fun/plugin.sqlite` | 学话、收藏、图库元数据（图片文件仍在 `image_root`） |
+| memo 等动态插件 | `plugin-data/<name>/plugin.sqlite` | 自己的 schema |
+
+从旧主库升级时，启动会把上述表拷进插件库再从 `fujiang.db` 删掉，只做一次。
+
+动态插件在 `on_start` 里自己 `CREATE TABLE IF NOT EXISTS`（不要用宿主的 `sqlx::migrate!`）：
 
 ```rust
 // 目录：{data}/plugin-data/{name}/
@@ -179,8 +191,6 @@ let pool = ctx.open_plugin_db(self.name()).await?;
 ```
 
 `name` 只能是 `[A-Za-z0-9_-]`。停用 / 卸载插件**不会**删这个目录，避免误删用户数据。要清数据就手动删 `data/plugin-data/<name>/`。
-
-内置插件不必拆库。contest / rank / fun 已经和消息、群号长在一张库里，拆开要迁数据、也没换来隔离。新写的动态插件从第一天就用 `open_plugin_db`。
 
 完整例子见 `crates/plugins/memo`。
 
@@ -206,22 +216,23 @@ let bytes = ctx.fetch_media_bytes(media).await?;
 
 `ctx.http` 是 `reqwest::Client`（UA `fujiang-bot/0.1`），给 Clist / Codeforces 等用。
 
-### 5.6 存储 `ctx.store`（宿主主库，内置插件用）
+### 5.6 存储 `ctx.store`
 
-SQLite。图文件根目录：`ctx.store.image_root`。
+宿主主库只放消息。内置插件的方法仍挂在 `Store` 上，但读写的是 `plugin-data/<name>/plugin.sqlite`。图文件根目录：`ctx.store.image_root`。
 
-| 域 | 方法 |
-|---|---|
-| 键值 | `get_setting` / `set_setting` |
-| 比赛 | `replace_contests` / `contests_by_oj` / `contests_all` / `contests_today` |
-| 提醒 | `set_remind` / `delete_remind` / `remind_groups` |
-| CF 用户 | `upsert_cf_user` / `delete_cf_user` / `cf_users` / `cf_users_by_year` / `cf_users_by_name` / `handle_exists` |
-| 比赛榜 | `replace_standings` / `standings` |
-| 每日一题 | `daily_for_date` / `save_daily` |
-| 学话 | `learn_add` / `learn_list` / `learn_del` / `learn_random`（本群没有则回落到 `group_id IS NULL`） |
-| 收藏 | `star_list` / `star_add` / `star_set` / `star_del` |
-| 图库 | `tag_ensure` / `tag_by_name` / `tag_by_alias` / `tag_list` / `tag_alias` / `tag_merge` / `tag_retire` / `image_upsert` / `image_attach` / `image_detach` / `image_tags` / `random_by_tag` |
-| 消息 | `insert_message`（分发层已自动记，插件一般不用） |
+| 域 | 方法 | 库 |
+|---|---|---|
+| 宿主键值 | `get_setting` / `set_setting` | 主库 |
+| 插件键值 | `plugin_get` / `plugin_set` | 对应插件库 |
+| 比赛 | `replace_contests` / `contests_by_oj` / `contests_all` / `contests_today` | contest |
+| 提醒 | `set_remind` / `delete_remind` / `remind_groups` | contest |
+| CF 用户 | `upsert_cf_user` / `delete_cf_user` / `cf_users` / `cf_users_by_year` / `cf_users_by_name` / `handle_exists` | rank |
+| 比赛榜 | `replace_standings` / `upsert_standings` / `standings` | rank |
+| 每日一题 | `daily_for_date` / `save_daily` | problem |
+| 学话 | `learn_add` / `learn_list` / `learn_del` / `learn_random`（本群没有则回落到 `group_id IS NULL`） | fun |
+| 收藏 | `star_list` / `star_add` / `star_set` / `star_del` | fun |
+| 图库 | `tag_ensure` / `tag_by_name` / `tag_by_alias` / `tag_list` / `tag_alias` / `tag_merge` / `tag_retire` / `image_upsert` / `image_attach` / `image_detach` / `image_tags` / `random_by_tag` | fun（文件在 `image_root`） |
+| 消息 | `insert_message`（分发层已自动记，插件一般不用） | 主库 |
 
 学话范围：写入时带当前 `group_id`（私聊为 `NULL`）。群里触发先查本群，没有再用全局（导入的旧 `learn.json` 是 `NULL`）。
 

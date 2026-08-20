@@ -20,7 +20,7 @@
 
 插件作者面对的是显式的 `Plugin` trait 和 `BotContext`，不是魔术 Context。
 
-存储也一样拆开：宿主主库给消息和内置业务；动态插件用 `open_plugin_db`，文件在 `data/plugin-data/<name>/`。不把第三方 schema 焊进 `fujiang.db`。
+存储也一样拆开：宿主主库只放消息；每个插件（含内置 contest / rank / problem / fun）用 `data/plugin-data/<name>/plugin.sqlite`。动态插件自己 `open_plugin_db` 建表。不把第三方 schema 焊进 `fujiang.db`。
 
 ## 运行时对象
 
