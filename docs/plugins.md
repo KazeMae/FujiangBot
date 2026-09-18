@@ -3,7 +3,7 @@
 内置插件（contest / rank / problem / fun / luck）和 `plugins/` 里热插的 `.so` / `.dylib` / `.dll` 走同一套 `fujiang_core::Plugin`。业务只依赖中间层，**禁止**依赖 `napcat-sdk`。换 OneBot 实现端只加 adapter，插件不用改。
 
 最小模板：`crates/plugins/echo`（`.ping` → pong）。
-完整模板：`crates/plugins/memo`（自己的 SQLite、配置、后台清理）。约定与当前代码一致（`PLUGIN_ABI = 3`）。
+完整模板：`crates/plugins/memo`（自己的 SQLite、配置、后台清理）。约定与当前代码一致（`PLUGIN_ABI = 5`）。
 
 | 读者 | 从哪读 |
 |---|---|
@@ -66,17 +66,19 @@ Crate 边界：
 | `command_prefixes()` | 否 | 无空格入口，如 `.remind08:30`、`.添加猫` |
 | `interest()` | 否 | 默认 `Commands`。`Messages` 收全部消息；`All` 还收通知/请求 |
 | `on_start(ctx, scope)` | 否 | 启动或热启用。后台循环必须 `scope.spawn` |
-| `on_stop()` | 否 | 卸载前额外清理。之后宿主会 `scope.dispose()`，不必自己 cancel |
+| `on_stop()` | 否 | 卸载时在 `dispose` 之后调用。关库、释放资源放这里 |
 
 宿主顺序：
 
 ```
 on_start(ctx, scope)
     → 多条 handle(ctx, ev, 同一把 scope)
-    → on_stop()
-    → scope.dispose()     // cancel token + abort 任务
+    → scope.dispose()     // cancel，等后台任务最多 ~400ms，超时 abort
+    → on_stop()           // 这时再关 SQLite / 释放资源
     → （动态库）等 Arc 唯一后 dlclose
 ```
+
+`on_start` 失败：这把新 scope 立刻 `dispose`，插件不会进分发器；**其它插件照常跑**，管理页 `last_error` 会显示原因。进程不会因为一个插件启动失败而退出。
 
 群白名单和 `.help` 在分发层先处理，插件不必再做 ACL。指令前缀以配置为准：`ctx.bot_config().await.command_prefix`（默认 `.`）。`commands()` 里仍写成 `.ping` 这种点号形式，分发时会换成实际前缀。
 
@@ -87,7 +89,7 @@ on_start(ctx, scope)
 对每条**已通过白名单**的消息：
 
 1. 落库。
-2. 整行等于 `{prefix}help` → 拼当前已启用插件的 `help()`，不再交给插件。
+2. 整行等于 `{prefix}help` → 总菜单；`{prefix}help 名字` → 该插件说明。不再交给插件。
 3. **命令主人**：先看各插件 `commands()` 是否与**第一个空白分隔词**相等；没有再在 `command_prefixes()` 里取**最长前缀**。命中则先调用该插件。
 4. `Flow::Stop` → 结束。`Continue` 或没有主人 → 再把消息交给 `Interest::Messages` 和 `Interest::All`（命令主人不跑第二遍）。
 5. 非消息事件（`Notice` / `Request` / `Meta`）只给 `Interest::All`。目前没有内置插件声明 `All`。
@@ -98,7 +100,77 @@ on_start(ctx, scope)
 - 还要接「来只」「学话」这种非命令文本的，声明 `Messages`（fun）。
 - `.remind08:30` 这类没有空格的入口，除了可写进 `commands()` 外，用 `command_prefixes()`（contest 的 `.remind`，fun 的 `.添加` / `.删除`）。
 
+路由前会：
+
+- 按插件 JSON 的 `priority`（默认 0，越大越先）排序；命令碰撞时也是高优先级赢，并打 warn。
+- 若配置了 `groups`，该插件只看到这些群；`allow_private = false` 则不处理私聊。
+- `{prefix}help` 出总菜单；`{prefix}help 插件名` 只出那一项（说明里的 `.cmd` 会换成当前前缀）。
+
 `Flow`：插件内部处理完应 `Stop`，避免后面的 `Messages` 插件再吃同一条。学话命中后 fun 返回 `Continue`，是有意让其它逻辑仍能看到这条。
+
+### 服务图与事件总线
+
+跨 `.so` 只走 JSON，不要 `Any` downcast。ABI 现在是 **5**。旧动态库要重编。
+
+### 多实例
+
+同一插件可以跑多份。默认实例的 id 等于类型名（`rank`）。额外实例写：
+
+```toml
+[[plugins.instances]]
+id = "rank-fresh"
+plugin = "rank"
+
+[plugins.configs.rank-fresh]
+groups = [555973858]
+share_data = true
+```
+
+管理页「再开一份」。命令声明相同，靠 `groups` 分流；同一群里两份则 `priority` 高的先处理。
+
+- 默认实例 `ctx.provide(scope, "rank", …)` 注册服务名 `rank`
+- 额外实例注册 `rank#rank-fresh`
+- 动态插件（memo）默认每实例一份 sqlite（`plugin-data/memo__rank-fresh/` 这种 key）；`share_data = true` 则和类型共用
+- 内置 contest/rank/fun 的 Store API 仍按类型共用数据；多实例主要用来分群
+- `.help rank-fresh` 看那一份；`.help rank` 在只有一份时也可以
+
+插件读配置用 `ctx.instance_config(scope)`，开库用 `ctx.open_instance_db(scope)`。
+
+```rust
+fn inject(&self) -> &'static [&'static str] { &["rank"] }     // 没有这些服务就先 pending
+fn provides(&self) -> &'static [&'static str] { &["memo"] }   // 声明会 provide 的名字
+
+async fn on_start(&self, ctx: &BotContext, scope: &PluginScope) -> anyhow::Result<()> {
+    ctx.provide(scope, "memo", Arc::new(MemoSvc { /* ... */ }))?;
+    ctx.listen_fn(scope, "rank.updated", |payload| async move {
+        Ok(fujiang_core::EventResult::Continue(None))
+    });
+    Ok(())
+}
+
+// 别处
+ctx.call("rank", "list", json!({})).await?;
+ctx.emit("memo.changed", json!({ "id": 1 }));
+```
+
+- `provide` / `listen` 随 `scope.dispose` 自动撤销。热重载同一 owner 替换服务时，旧 generation 的 revoke 是空操作。
+- `inject` 未满足 → 插件进 pending，管理页状态 `pending`；提供者起来后自动 `on_start`。提供者被停 → 依赖者 demote 回 pending。
+- `inject` 成环 → 启动失败，不挂死。
+- JSON 里也可写 `"inject": ["rank"]`、`"provides": ["foo"]`，和 trait 声明合并。
+- 事件：`emit`（不等待）/ `events.parallel` / `serial`（`Stop` 中断）/ `waterfall`（`Continue(Some(v))` 改 payload）。
+- 内置：`rank` 服务 `list` / `get`；`contest` 服务 `upcoming` / `today`。刷新后发 `rank.updated`、`contest.updated`。宿主还会发 `plugin.started` / `plugin.stopped`。
+
+handle 里**不要**写死 `.luck` / `.ping`。声明仍用点号，匹配用 `fujiang_core::command`：
+
+```rust
+let prefix = ctx.bot_config().await.command_prefix;
+if let Some(rest) = command::strip_token(&msg.command_line(), ".luck", &prefix) {
+    // rest 是参数
+}
+if command::matches_token(&line, ".ping", &prefix) { /* ... */ }
+if let Some(tag) = command::strip_prefix_cmd(&line, ".添加", &prefix) { /* 来只那种粘连命令 */ }
+ctx.reply_text(msg, command::plugin_help(self, &prefix)).await?;
+```
 
 ---
 
@@ -117,7 +189,6 @@ let stop = scope.stop_token();                // 可传入更里层的 select
 
 - **不要** `tokio::spawn` 脱离 scope 的任务。卸载时那些任务不会停，动态库也可能卸不干净。
 - `handle` 里临时刷新（如 `.rank -urk`）同样 `scope.spawn`。
-- `on_start` 失败：这把新 scope 立刻 `dispose`，插件不会进分发器。
 - 热重载 `.so`：先对新库 `on_start`。失败则丢掉新库，**旧实例继续跑**，管理页 `last_error` 会显示原因。成功才停旧的。
 
 进程退出：`stop_all` → 每个插件 `on_stop` + `dispose`，再停 gateway。
@@ -312,6 +383,12 @@ enabled = true
 # 动态插件自己的对象。管理页 JSON 编辑器写的就是这里
 # [plugins.configs.echo]
 # prefix = "."
+#
+# 宿主认的字段，内置 / 动态都能写（内置 typed 项仍走上面的表）：
+# [plugins.configs.luck]
+# groups = [741798363]   # 空或不写 = 所有已放行的群
+# allow_private = true
+# priority = 0
 ```
 
 内置开关是 `plugins.<name>.enabled`。动态插件的停用名单是 `plugins.disabled`。两者不要混用。
@@ -371,7 +448,7 @@ fujiang-core = { path = "../../fujiang-core" }
 
 ### 8.3 硬限制
 
-- **必须用本仓库、同一套 rustc 编译**，不能从别的机器或旧 commit 拷 `.so`。改 `Plugin` / `BotContext` / 导出符号会 bump ABI，旧库会加载失败。
+- **必须用本仓库、同一套 rustc 编译**，不能从别的机器或旧 commit 拷 `.so`。改 `Plugin` / `BotContext` / 导出符号会 bump ABI，旧库会加载失败。当前 `PLUGIN_ABI = 5`。
 - 内置名 `contest` / `rank` / `problem` / `fun` / `luck` 不能被 so 覆盖。
 - 不能热更 `fujiang-core` 本身，只能热插同 ABI 的插件。
 - `plugins/*.so` 等已 gitignore，不要把编好的库提交进仓库。
@@ -509,7 +586,10 @@ ttl_days = 0
 
 | 现象 | 原因 / 处理 |
 |---|---|
-| 加载报 ABI 不符 | 用当前仓库重编 `.so`。ABI 现在是 3 |
+| 加载报 ABI 不符 | 用当前仓库重编 `.so`。ABI 现在是 5 |
+| 改了 `command_prefix` 命令没反应 | handle 里写死了 `.xxx`。改用 `command::strip_token` / `matches_token` |
+| 某个插件启动失败，其它还在 | 正常。看管理页 `last_error` 或日志 |
+| `.help luck` 没有这个插件 | 插件没在跑（关掉了或启动失败） |
 | 重载失败但机器人还在响应旧命令 | 正常。新库 `on_start` 失败会回滚，看 Entry 的 `last_error` |
 | 停用后文件还在、watch 又启用了 | 名字在 `plugins.disabled` 里就不会自动启动 |
 | 卸载很慢或警告 still in use | 还有 `handle` 没返回，或任务没走 `scope.spawn` |
@@ -528,6 +608,9 @@ ttl_days = 0
 
 | 路径 | 内容 |
 |---|---|
+| `crates/fujiang-core/src/services.rs` | 具名服务图 `ServiceHub` |
+| `crates/fujiang-core/src/events.rs` | 事件总线 `emit` / `parallel` / `serial` / `waterfall` |
+| `crates/fujiang-core/src/command.rs` | 前缀感知的命令匹配、`plugin_help`、`groups`/`priority` ACL |
 | `crates/fujiang-core/src/plugin.rs` | `Plugin` / `BotContext` / `Interest` / `PLUGIN_ABI` / `declare_plugin!` |
 | `crates/fujiang-core/src/scope.rs` | `PluginScope` |
 | `crates/fujiang-core/src/dispatch.rs` | 路由、帮助、insert/remove/replace |

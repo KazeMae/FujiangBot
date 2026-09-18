@@ -168,7 +168,7 @@
     </section>
     <section>
       <h2>插件</h2>
-      <p class="hint">开关会热插拔。contest / rank 改刷新间隔会重启对应后台循环。</p>
+      <p class="hint">开关会热插拔。contest / rank 改刷新间隔会重启对应后台循环。每个插件还可在 JSON 里设 groups / allow_private / priority，以及 inject / provides（服务图）。插件用 ctx.provide / ctx.call / ctx.emit / ctx.listen。群里发 .help 插件名 看单插件说明。某个插件启动失败不会拖垮进程。</p>
       <div class="plugin grid">
         <label class="check">contest 启用<input id="plugins.contest.enabled" type="checkbox" /></label>
         <label>contest update_minutes<input id="plugins.contest.update_minutes" type="number" min="5" /></label>
@@ -336,6 +336,10 @@
         s.config_path ? "文件 " + s.config_path : "",
         s.backend ? "backend " + s.backend : "",
         (s.plugins && s.plugins.length) ? "插件 " + s.plugins.join(" / ") : "插件 无",
+        (s.pending && s.pending.length) ? "等待 " + s.pending.join(" / ") : "",
+        (s.services && s.services.length)
+          ? "服务 " + s.services.map((x) => x.name + "@" + x.owner).join(" / ")
+          : "",
       ].filter(Boolean);
       box.innerHTML = chips.map((c) => '<span class="chip">' + c + "</span>").join("");
     }
@@ -349,28 +353,36 @@
         return;
       }
       box.innerHTML = entries.map((d) => {
-        const dynBtns = d.kind === "dynamic"
+        const dynBtns = d.kind === "dynamic" && d.primary
           ? '<button class="ghost" type="button" data-reload="' + d.name + '">重载</button>' +
             '<button class="ghost" type="button" data-unload="' + d.name + '">卸载</button>'
+          : (!d.primary
+            ? '<button class="ghost" type="button" data-drop="' + d.name + '">删除实例</button>'
+            : "");
+        const cloneBtn = d.state !== "error"
+          ? '<button class="ghost" type="button" data-clone="' + (d.plugin || d.name) + '">再开一份</button>'
           : "";
-        const toggle = d.enabled
-          ? '<button class="ghost" type="button" data-disable="' + d.name + '">停用</button>'
-          : '<button class="primary" type="button" data-enable="' + d.name + '">启用</button>';
-        const cfgBox = d.kind === "dynamic"
-          ? '<label class="full">config（JSON）<textarea data-cfg="' + d.name + '">' +
+        const toggle = d.state === "error"
+          ? ""
+          : d.enabled
+            ? '<button class="ghost" type="button" data-disable="' + d.name + '">停用</button>'
+            : '<button class="primary" type="button" data-enable="' + d.name + '">启用</button>';
+        const cfgBox = d.state === "error"
+          ? ""
+          : '<label class="full">config（JSON）<textarea data-cfg="' + d.name + '">' +
             escapeHtml(JSON.stringify(d.config || {}, null, 2)) +
             '</textarea></label>' +
-            '<button class="ghost" type="button" data-savecfg="' + d.name + '">保存此插件配置</button>'
-          : "";
+            '<button class="ghost" type="button" data-savecfg="' + d.name + '">保存此插件配置</button>';
         return '<div class="plugin">' +
           '<div class="grid">' +
           '<div><strong>' + d.name + '</strong> v' + d.version +
-          ' · ' + d.kind + ' · ' + d.state +
+          ' · ' + d.kind + (d.primary === false ? ' · 实例 of ' + (d.plugin || '') : '') +
+          ' · ' + d.state +
           '<div class="hint">' + (d.description || '') +
           (d.path ? '<br>' + d.path : '') +
           (d.last_error ? '<br><span style="color:var(--accent)">失败：' + escapeHtml(d.last_error) + '</span>' : '') +
           '</div></div>' +
-          '<div class="actions">' + toggle + dynBtns + '</div></div>' +
+          '<div class="actions">' + toggle + cloneBtn + dynBtns + '</div></div>' +
           cfgBox +
         '</div>';
       }).join("");
@@ -389,11 +401,31 @@
       box.querySelectorAll("[data-savecfg]").forEach((b) => {
         b.onclick = () => savePluginConfig(b.dataset.savecfg, box);
       });
+      box.querySelectorAll("[data-clone]").forEach((b) => {
+        b.onclick = () => clonePlugin(b.dataset.clone);
+      });
+      box.querySelectorAll("[data-drop]").forEach((b) => {
+        b.onclick = () => dynAct("/api/plugins/instances/drop", { name: b.dataset.drop });
+      });
     }
     function escapeHtml(s) {
       return String(s).replace(/[&<>"']/g, (c) => ({
         "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
       }[c]));
+    }
+    async function clonePlugin(plugin) {
+      const id = window.prompt("新实例 id（字母数字 _-，不能和内置名相同）", plugin + "-2");
+      if (!id) return;
+      try {
+        const r = await api("/api/plugins/instances", {
+          method: "POST",
+          body: JSON.stringify({ id: id.trim(), plugin }),
+        });
+        renderDyn(r.plugins);
+        banner("已开实例 " + id.trim(), "ok");
+      } catch (e) {
+        banner(e.message, "err");
+      }
     }
     async function savePluginConfig(name, root) {
       const ta = (root || document).querySelector('[data-cfg="' + name + '"]');

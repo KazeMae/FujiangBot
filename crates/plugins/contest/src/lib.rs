@@ -1,10 +1,12 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{Local, TimeZone, Timelike};
-use fujiang_core::{BotContext, Event, Flow, Plugin, PluginScope, Source};
-use fujiang_store::ContestRow;
+use fujiang_core::{command, BotContext, Event, Flow, Plugin, PluginScope, Service, Source};
+use fujiang_store::{ContestRow, Store};
 use serde::Deserialize;
+use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -66,7 +68,18 @@ impl Plugin for ContestPlugin {
         &[".remind"]
     }
 
+    fn provides(&self) -> &'static [&'static str] {
+        &["contest"]
+    }
+
     async fn on_start(&self, ctx: &BotContext, scope: &PluginScope) -> anyhow::Result<()> {
+        ctx.provide(
+            scope,
+            "contest",
+            Arc::new(ContestService {
+                store: ctx.store.clone(),
+            }),
+        )?;
         let stop = scope.stop_token();
         let refresh_ctx = ctx.clone();
         scope.spawn(async move {
@@ -104,12 +117,14 @@ impl Plugin for ContestPlugin {
         let Some(msg) = ev.as_message() else {
             return Ok(Flow::Continue);
         };
+        let prefix = ctx.bot_config().await.command_prefix;
         let line = msg.command_line();
-        if line == ".contest" {
-            ctx.reply_text(msg, self.help()).await?;
+        if command::matches_token(&line, ".contest", &prefix) {
+            ctx.reply_text(msg, command::plugin_help(self, &prefix))
+                .await?;
             return Ok(Flow::Stop);
         }
-        if line == ".bot" {
+        if command::matches_token(&line, ".bot", &prefix) {
             let t = ctx
                 .store
                 .plugin_get("contest", "contest_updated_at")
@@ -122,11 +137,11 @@ impl Plugin for ContestPlugin {
             .await?;
             return Ok(Flow::Stop);
         }
-        if line == ".day" {
+        if command::matches_token(&line, ".day", &prefix) {
             ctx.reply_text(msg, day_text(ctx).await?).await?;
             return Ok(Flow::Stop);
         }
-        if line == ".remindoff" {
+        if command::matches_token(&line, ".remindoff", &prefix) {
             if !msg.source.is_group() {
                 ctx.reply_text(msg, "只能在群里关提醒").await?;
                 return Ok(Flow::Stop);
@@ -143,7 +158,7 @@ impl Plugin for ContestPlugin {
             .await?;
             return Ok(Flow::Stop);
         }
-        if let Some(rest) = line.strip_prefix(".remind") {
+        if let Some(rest) = command::strip_prefix_cmd(&line, ".remind", &prefix) {
             if !msg.source.is_group() {
                 ctx.reply_text(msg, "只能在群里设提醒").await?;
                 return Ok(Flow::Stop);
@@ -166,11 +181,11 @@ impl Plugin for ContestPlugin {
         }
 
         for (cmd, oj) in OJS {
-            if line == *cmd {
+            if command::matches_token(&line, cmd, &prefix) {
                 ctx.reply_text(msg, build_one(ctx, oj, 0).await?).await?;
                 return Ok(Flow::Stop);
             }
-            if line == format!("{cmd}all") {
+            if command::matches_token(&line, &format!("{cmd}all"), &prefix) {
                 ctx.reply_text(msg, build_all(ctx, oj).await?).await?;
                 return Ok(Flow::Stop);
             }
@@ -199,6 +214,7 @@ async fn refresh(ctx: &BotContext) -> anyhow::Result<()> {
         .plugin_set("contest", "contest_updated_at", &stamp)
         .await?;
     info!("contests updated");
+    ctx.emit("contest.updated", json!({ "at": stamp }));
     Ok(())
 }
 
@@ -505,4 +521,49 @@ struct AlgItem {
     #[serde(rename = "endTime")]
     end_time: String,
     link: String,
+}
+
+struct ContestService {
+    store: Store,
+}
+
+fn contest_json(c: &ContestRow) -> Value {
+    json!({
+        "oj": c.oj,
+        "title": c.title,
+        "begin_ts": c.begin_ts,
+        "end_ts": c.end_ts,
+        "url": c.url,
+    })
+}
+
+#[async_trait]
+impl Service for ContestService {
+    async fn call(&self, method: &str, args: Value) -> anyhow::Result<Value> {
+        match method {
+            "upcoming" => {
+                let oj = args.get("oj").and_then(|x| x.as_str());
+                let rows = if let Some(oj) = oj {
+                    self.store.contests_by_oj(oj).await?
+                } else {
+                    self.store.contests_all().await?
+                };
+                Ok(Value::Array(rows.iter().map(contest_json).collect()))
+            }
+            "today" => {
+                let start = Local::now().date_naive().and_hms_opt(0, 0, 0).unwrap();
+                let start_ts = Local
+                    .from_local_datetime(&start)
+                    .single()
+                    .map(|t| t.timestamp())
+                    .unwrap_or(0);
+                let rows = self
+                    .store
+                    .contests_today(start_ts, start_ts + 86400)
+                    .await?;
+                Ok(Value::Array(rows.iter().map(contest_json).collect()))
+            }
+            other => anyhow::bail!("contest 没有方法 `{other}`（upcoming / today）"),
+        }
+    }
 }

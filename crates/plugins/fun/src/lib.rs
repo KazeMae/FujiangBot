@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use fujiang_core::{BotContext, Event, Flow, Interest, Plugin, PluginScope};
+use fujiang_core::{command, BotContext, Event, Flow, Interest, Plugin, PluginScope};
 use fujiang_store::{AttachResult, DetachResult};
 use tracing::warn;
 
@@ -23,6 +23,10 @@ const HELP: &str = "学话、收藏夹、图库。改学习/图库默认要在 f
 回复图/视频 + .添加<tag>     给这条挂 tag\n\
 回复图/视频 + .删除<tag>     只摘这一个 tag\n\
 回复图/视频 + .标签          列出这条的全部 tag";
+
+const FUN_CMDS: &[&str] = &[
+    ".learn", ".star", ".tag", ".idea", ".album", ".添加", ".删除", ".标签", ".想法",
+];
 
 #[derive(Default)]
 pub struct FunPlugin;
@@ -64,32 +68,35 @@ impl Plugin for FunPlugin {
         let Some(msg) = ev.as_message() else {
             return Ok(Flow::Continue);
         };
+        let prefix = ctx.bot_config().await.command_prefix;
         let line = msg.command_line();
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() {
-            return Ok(Flow::Continue);
-        }
 
-        if parts[0] == ".learn" {
-            handle_learn(ctx, msg, &parts, &line).await?;
+        if let Some(rest) = command::strip_token(&line, ".learn", &prefix) {
+            handle_learn(ctx, msg, rest, &prefix).await?;
             return Ok(Flow::Stop);
         }
-        if parts[0] == ".star" {
-            handle_star(ctx, msg, &parts).await?;
+        if let Some(rest) = command::strip_token(&line, ".star", &prefix) {
+            handle_star(ctx, msg, rest, &prefix).await?;
             return Ok(Flow::Stop);
         }
-        if parts[0] == ".tag" || parts[0] == ".idea" || parts[0] == ".album" {
-            handle_tag(ctx, msg, &parts).await?;
+        if let Some(rest) = command::strip_any(&line, &[".tag", ".idea", ".album"], &prefix) {
+            handle_tag(ctx, msg, rest, &prefix).await?;
             return Ok(Flow::Stop);
         }
 
-        if line == ".标签" || line == ".想法" {
+        if command::matches_token(&line, ".标签", &prefix)
+            || command::matches_token(&line, ".想法", &prefix)
+        {
             handle_show_tags(ctx, msg).await?;
             return Ok(Flow::Stop);
         }
 
-        if line.starts_with(".添加") || line.starts_with(".删除") {
-            handle_media_cmd(ctx, msg, &line).await?;
+        if let Some(name) = command::strip_prefix_cmd(&line, ".添加", &prefix) {
+            handle_media_cmd(ctx, msg, true, name, &prefix).await?;
+            return Ok(Flow::Stop);
+        }
+        if let Some(name) = command::strip_prefix_cmd(&line, ".删除", &prefix) {
+            handle_media_cmd(ctx, msg, false, name, &prefix).await?;
             return Ok(Flow::Stop);
         }
 
@@ -142,33 +149,37 @@ async fn can_mutate(ctx: &BotContext, qq: i64) -> bool {
 async fn handle_learn(
     ctx: &BotContext,
     msg: &fujiang_core::MessageEvent,
-    parts: &[&str],
-    line: &str,
+    rest: &str,
+    prefix: &str,
 ) -> anyhow::Result<()> {
-    if parts.len() < 2 {
-        ctx.reply_text(msg, HELP).await?;
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    if parts.is_empty() {
+        ctx.reply_text(msg, command::rewrite_help(HELP, FUN_CMDS, prefix))
+            .await?;
         return Ok(());
     }
-    match parts[1] {
+    match parts[0] {
         "add" => {
             if !can_mutate(ctx, msg.user_id()).await {
                 ctx.reply_text(msg, "没有权限").await?;
                 return Ok(());
             }
-            // .learn add <trigger> <rest...>
-            let rest = line.splitn(4, ' ').collect::<Vec<_>>();
-            if rest.len() < 4 {
-                ctx.reply_text(msg, "格式：.learn add <触发词> <回复>")
+            let mut sp = rest.splitn(3, ' ');
+            let _ = sp.next();
+            let trigger = sp.next();
+            let reply = sp.next();
+            let (Some(trigger), Some(reply)) = (trigger, reply) else {
+                ctx.reply_text(msg, format!("格式：{prefix}learn add <触发词> <回复>"))
                     .await?;
                 return Ok(());
-            }
+            };
             ctx.store
-                .learn_add(rest[2], rest[3], msg.user_id(), msg.source.group_id())
+                .learn_add(trigger, reply, msg.user_id(), msg.source.group_id())
                 .await?;
             ctx.reply_text(msg, "learned").await?;
         }
         "list" => {
-            let trigger = parts.get(2).copied();
+            let trigger = parts.get(1).copied();
             let rows = ctx.store.learn_list(msg.source.group_id(), trigger).await?;
             if rows.is_empty() {
                 ctx.reply_text(msg, "空").await?;
@@ -185,19 +196,21 @@ async fn handle_learn(
                 ctx.reply_text(msg, "没有权限").await?;
                 return Ok(());
             }
-            if parts.len() < 3 {
-                ctx.reply_text(msg, "格式：.learn del <触发词> [n]").await?;
+            if parts.len() < 2 {
+                ctx.reply_text(msg, format!("格式：{prefix}learn del <触发词> [n]"))
+                    .await?;
                 return Ok(());
             }
-            let n = parts.get(3).and_then(|x| x.parse().ok());
+            let n = parts.get(2).and_then(|x| x.parse().ok());
             let c = ctx
                 .store
-                .learn_del(msg.source.group_id(), parts[2], n)
+                .learn_del(msg.source.group_id(), parts[1], n)
                 .await?;
             ctx.reply_text(msg, format!("已删除 {c} 条")).await?;
         }
         _ => {
-            ctx.reply_text(msg, HELP).await?;
+            ctx.reply_text(msg, command::rewrite_help(HELP, FUN_CMDS, prefix))
+                .await?;
         }
     }
     Ok(())
@@ -206,59 +219,62 @@ async fn handle_learn(
 async fn handle_star(
     ctx: &BotContext,
     msg: &fujiang_core::MessageEvent,
-    parts: &[&str],
+    rest: &str,
+    prefix: &str,
 ) -> anyhow::Result<()> {
-    if parts.len() == 1 {
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    if parts.is_empty() {
         let rows = ctx.store.star_list().await?;
-        let mut s = String::from("收藏夹：.star add|set|del");
+        let mut s = format!("收藏夹：{prefix}star add|set|del");
         for r in rows {
             s.push_str(&format!("\n{} : {}", r.name, r.url));
         }
         ctx.reply_text(msg, s).await?;
         return Ok(());
     }
-    match parts[1] {
-        "add" if parts.len() == 4 => {
+    match parts[0] {
+        "add" if parts.len() == 3 => {
             if !can_mutate(ctx, msg.user_id()).await {
                 ctx.reply_text(msg, "没有权限").await?;
                 return Ok(());
             }
             if ctx
                 .store
-                .star_add(parts[2], parts[3], msg.user_id())
+                .star_add(parts[1], parts[2], msg.user_id())
                 .await?
             {
                 ctx.reply_text(msg, "stared").await?;
             } else {
-                ctx.reply_text(msg, format!("名称「{}」已存在", parts[2]))
+                ctx.reply_text(msg, format!("名称「{}」已存在", parts[1]))
                     .await?;
             }
         }
-        "set" if parts.len() == 4 => {
+        "set" if parts.len() == 3 => {
             if !can_mutate(ctx, msg.user_id()).await {
                 ctx.reply_text(msg, "没有权限").await?;
                 return Ok(());
             }
             ctx.store
-                .star_set(parts[2], parts[3], msg.user_id())
+                .star_set(parts[1], parts[2], msg.user_id())
                 .await?;
             ctx.reply_text(msg, "stared").await?;
         }
-        "del" if parts.len() == 3 => {
+        "del" if parts.len() == 2 => {
             if !can_mutate(ctx, msg.user_id()).await {
                 ctx.reply_text(msg, "没有权限").await?;
                 return Ok(());
             }
-            if ctx.store.star_del(parts[2]).await? {
-                ctx.reply_text(msg, format!("名称「{}」已删除", parts[2]))
+            if ctx.store.star_del(parts[1]).await? {
+                ctx.reply_text(msg, format!("名称「{}」已删除", parts[1]))
                     .await?;
             } else {
-                ctx.reply_text(msg, format!("名称「{}」不存在", parts[2]))
+                ctx.reply_text(msg, format!("名称「{}」不存在", parts[1]))
                     .await?;
             }
         }
         _ => {
-            ctx.reply_text(msg, "格式：.star add|set|del").await?;
+            ctx.reply_text(msg, format!("格式：{prefix}star add|set|del"))
+                .await?;
         }
     }
     Ok(())
@@ -267,9 +283,11 @@ async fn handle_star(
 async fn handle_tag(
     ctx: &BotContext,
     msg: &fujiang_core::MessageEvent,
-    parts: &[&str],
+    rest: &str,
+    prefix: &str,
 ) -> anyhow::Result<()> {
-    if parts.len() < 2 || parts[1] == "list" {
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    if parts.is_empty() || parts[0] == "list" {
         let list = ctx.store.tag_list().await?;
         if list.is_empty() {
             ctx.reply_text(msg, "还没有 tag").await?;
@@ -289,21 +307,21 @@ async fn handle_tag(
         ctx.reply_text(msg, "没有权限").await?;
         return Ok(());
     }
-    match parts[1] {
-        "add" if parts.len() == 3 => {
-            ctx.store.tag_ensure(parts[2]).await?;
+    match parts[0] {
+        "add" if parts.len() == 2 => {
+            ctx.store.tag_ensure(parts[1]).await?;
             ctx.reply_text(msg, "ok").await?;
         }
-        "alias" if parts.len() == 4 => {
-            let t = ctx.store.tag_alias(parts[2], parts[3]).await?;
+        "alias" if parts.len() == 3 => {
+            let t = ctx.store.tag_alias(parts[1], parts[2]).await?;
             ctx.reply_text(msg, t).await?;
         }
-        "merge" if parts.len() == 4 => {
-            let t = ctx.store.tag_merge(parts[2], parts[3]).await?;
+        "merge" if parts.len() == 3 => {
+            let t = ctx.store.tag_merge(parts[1], parts[2]).await?;
             ctx.reply_text(msg, t).await?;
         }
-        "retire" | "del" if parts.len() == 3 => {
-            let ok = ctx.store.tag_retire(parts[2]).await?;
+        "retire" | "del" if parts.len() == 2 => {
+            let ok = ctx.store.tag_retire(parts[1]).await?;
             ctx.reply_text(
                 msg,
                 if ok {
@@ -315,8 +333,11 @@ async fn handle_tag(
             .await?;
         }
         _ => {
-            ctx.reply_text(msg, "格式：.tag list|add|alias|merge|retire")
-                .await?;
+            ctx.reply_text(
+                msg,
+                format!("格式：{prefix}tag list|add|alias|merge|retire"),
+            )
+            .await?;
         }
     }
     Ok(())
@@ -325,17 +346,21 @@ async fn handle_tag(
 async fn handle_media_cmd(
     ctx: &BotContext,
     msg: &fujiang_core::MessageEvent,
-    line: &str,
+    add: bool,
+    name: &str,
+    prefix: &str,
 ) -> anyhow::Result<()> {
     if !can_mutate(ctx, msg.user_id()).await {
         ctx.reply_text(msg, "没有权限").await?;
         return Ok(());
     }
-    let add = line.starts_with(".添加");
-    let name: String = line.chars().skip(3).collect();
+    let name = name.trim();
     if name.is_empty() {
-        ctx.reply_text(msg, "格式：回复图片或视频后发 .添加名 / .删除名")
-            .await?;
+        ctx.reply_text(
+            msg,
+            format!("格式：回复图片或视频后发 {prefix}添加名 / {prefix}删除名"),
+        )
+        .await?;
         return Ok(());
     }
     let Some(got) = reply_visual(ctx, msg).await? else {

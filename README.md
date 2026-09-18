@@ -79,7 +79,9 @@ cargo run -p fujiang -- migrate --from ./FujiangBot --config config.toml
 
 ## 插件
 
-群里发 `.help` 会拼出当前已启用插件的说明。前缀默认 `.`，区分大小写。
+群里发 `.help` 会拼出当前已启用插件的说明，`.help luck` 只看一项。前缀默认 `.`，区分大小写；改 `command_prefix` 后声明的 `.luck` 会变成 `{prefix}luck`。
+
+每个插件还可在 `[plugins.configs.<name>]` 里写 `groups`（只在这些群生效）、`allow_private`、`priority`（越大越先处理），以及 `inject` / `provides`（服务图）。插件之间用 `ctx.provide` / `ctx.call` / `ctx.emit` / `ctx.listen`，payload 是 JSON。某一个插件 `on_start` 失败不会拖垮整个进程。同一插件可开多实例（`[[plugins.instances]]` 或管理页「再开一份」）。动态 `.so` 必须用当前仓库重编（`PLUGIN_ABI = 5`）。
 
 内置插件按 `PluginMeta` 登记（名字、版本、简介、命令）。额外插件编译成 `.so` / `.dylib` 放到 `plugins/`（`[plugins].dir`），进程会扫描并在 `watch = true` 时热加载。完整约定见 [插件说明](docs/plugins.md)。示例：
 

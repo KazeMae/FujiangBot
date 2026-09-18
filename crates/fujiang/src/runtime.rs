@@ -79,6 +79,9 @@ impl AppState {
         if next.plugins.disabled.is_empty() {
             next.plugins.disabled = old.plugins.disabled.clone();
         }
+        if next.plugins.instances.is_empty() {
+            next.plugins.instances = old.plugins.instances.clone();
+        }
         validate_config(&next)?;
 
         let mut report = ApplyReport::default();
@@ -112,7 +115,9 @@ impl AppState {
         report.applied.push("store.archive".into());
 
         sync_plugins(&self.dispatcher, &self.ctx, &old, &next).await?;
+        sync_builtin_extras(&self.dispatcher, &self.ctx, &next).await?;
         self.hub.set_disabled(next.plugins.disabled.clone()).await;
+        self.hub.set_extras(next.plugins.instances.clone()).await;
         self.hub.reconcile(&self.dispatcher, &self.ctx).await?;
         report.applied.push("plugins".into());
 
@@ -142,6 +147,8 @@ impl AppState {
         let mut next = self.cfg.read().await.clone();
         if plugins::NAMES.contains(&name) {
             plugins::apply_config(&mut next, name, serde_json::json!({ "enabled": enabled }))?;
+        } else if let Some(inst) = next.plugins.instances.iter_mut().find(|i| i.id == name) {
+            inst.disabled = !enabled;
         } else {
             next.plugins.disabled.retain(|n| n != name);
             if !enabled {
@@ -151,25 +158,42 @@ impl AppState {
             }
         }
         self.hub.set_disabled(next.plugins.disabled.clone()).await;
+        self.hub.set_extras(next.plugins.instances.clone()).await;
         *self.ctx.config.write().await = next.to_bot_config();
         *self.ctx.plugin_configs.write().await = plugins::all_configs(&next);
 
         if enabled {
             if plugins::NAMES.contains(&name) {
-                if !self.dispatcher.names().await.iter().any(|n| n == name) {
+                let live = self.dispatcher.names().await.iter().any(|n| n == name)
+                    || self
+                        .dispatcher
+                        .pending_names()
+                        .await
+                        .iter()
+                        .any(|n| n == name);
+                if !live {
                     if let Some(p) = plugins::make(name) {
                         self.dispatcher.insert(p, &self.ctx).await?;
                     }
                 }
+            } else if let Some(inst) = next
+                .plugins
+                .instances
+                .iter()
+                .find(|i| i.id == name)
+                .cloned()
+            {
+                self.dispatcher.remove(name, &self.ctx).await?;
+                self.start_instance(&inst).await?;
             } else {
-                self.dispatcher.remove(name).await?;
+                self.dispatcher.remove(name, &self.ctx).await?;
                 let Some(p) = self.hub.plugin(name).await else {
                     anyhow::bail!("动态插件「{name}」未加载，先放到 plugins/ 或点加载");
                 };
                 self.dispatcher.insert(p, &self.ctx).await?;
             }
         } else {
-            self.dispatcher.remove(name).await?;
+            self.dispatcher.remove(name, &self.ctx).await?;
         }
 
         next.save(&self.config_path)
@@ -210,6 +234,86 @@ impl AppState {
         })
     }
 
+    pub async fn add_instance(
+        &self,
+        id: String,
+        plugin: String,
+        config: Option<serde_json::Value>,
+    ) -> anyhow::Result<ApplyReport> {
+        let _guard = self.apply_lock.lock().await;
+        fujiang_store::sanitize_plugin_name(&id)?;
+        anyhow::ensure!(id != plugin, "默认实例请用启用开关");
+        anyhow::ensure!(
+            !plugins::NAMES.contains(&id.as_str()),
+            "id 不能和内置插件名相同"
+        );
+        let mut next = self.cfg.read().await.clone();
+        anyhow::ensure!(
+            !next.plugins.instances.iter().any(|i| i.id == id),
+            "实例 id「{id}」已存在"
+        );
+        anyhow::ensure!(
+            plugins::NAMES.contains(&plugin.as_str()) || self.hub.plugin(&plugin).await.is_some(),
+            "没有插件「{plugin}」"
+        );
+        if let Some(v) = config {
+            plugins::apply_config(&mut next, &id, v)?;
+        }
+        next.plugins.instances.push(crate::config::PluginInstance {
+            id: id.clone(),
+            plugin: plugin.clone(),
+            disabled: false,
+        });
+        *self.ctx.plugin_configs.write().await = plugins::all_configs(&next);
+        self.hub.set_extras(next.plugins.instances.clone()).await;
+        self.start_instance(&crate::config::PluginInstance {
+            id: id.clone(),
+            plugin,
+            disabled: false,
+        })
+        .await?;
+        next.save(&self.config_path)?;
+        *self.cfg.write().await = next;
+        Ok(ApplyReport {
+            applied: vec![format!("instance.{id}")],
+            restart_required: vec![],
+            plugins: self.dispatcher.names().await,
+        })
+    }
+
+    pub async fn drop_instance(&self, id: &str) -> anyhow::Result<ApplyReport> {
+        let _guard = self.apply_lock.lock().await;
+        anyhow::ensure!(!plugins::NAMES.contains(&id), "默认实例请用停用，不要删除");
+        let mut next = self.cfg.read().await.clone();
+        let n = next.plugins.instances.len();
+        next.plugins.instances.retain(|i| i.id != id);
+        anyhow::ensure!(n != next.plugins.instances.len(), "没有实例「{id}」");
+        self.dispatcher.remove(id, &self.ctx).await?;
+        self.hub.set_extras(next.plugins.instances.clone()).await;
+        let _ = self.hub.reconcile(&self.dispatcher, &self.ctx).await;
+        next.save(&self.config_path)?;
+        *self.cfg.write().await = next;
+        Ok(ApplyReport {
+            applied: vec![format!("instance.{id}.drop")],
+            restart_required: vec![],
+            plugins: self.dispatcher.names().await,
+        })
+    }
+
+    async fn start_instance(&self, inst: &crate::config::PluginInstance) -> anyhow::Result<()> {
+        if plugins::NAMES.contains(&inst.plugin.as_str()) {
+            let p = plugins::make(&inst.plugin)
+                .ok_or_else(|| anyhow::anyhow!("没有内置插件 {}", inst.plugin))?;
+            self.dispatcher
+                .insert_instance(inst.id.clone(), p, &self.ctx)
+                .await
+        } else {
+            self.hub
+                .spawn_instance(&inst.plugin, &inst.id, &self.dispatcher, &self.ctx)
+                .await
+        }
+    }
+
     async fn restart_gateway(&self, adapter: Arc<AnyAdapter>) {
         if let Some(old) = self.gateway.lock().await.take() {
             old.stop.cancel();
@@ -226,16 +330,41 @@ async fn sync_plugins(
     new: &AppConfig,
 ) -> anyhow::Result<()> {
     let running = dispatcher.names().await;
+    let pending = dispatcher.pending_names().await;
     for name in plugins::NAMES {
         let want = plugins::enabled(new, name);
-        let is_on = running.iter().any(|n| n == name);
+        let is_on = running.iter().any(|n| n == name) || pending.iter().any(|n| n == name);
         let restart = want && is_on && plugins::needs_restart(name, old, new);
         if is_on && (!want || restart) {
-            dispatcher.remove(name).await?;
+            dispatcher.remove(name, ctx).await?;
         }
         if want && (!is_on || restart) {
             if let Some(p) = plugins::make(name) {
                 dispatcher.insert(p, ctx).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn sync_builtin_extras(
+    dispatcher: &Dispatcher,
+    ctx: &BotContext,
+    cfg: &AppConfig,
+) -> anyhow::Result<()> {
+    let running = dispatcher.names().await;
+    let pending = dispatcher.pending_names().await;
+    let live = |id: &str| running.iter().any(|n| n == id) || pending.iter().any(|n| n == id);
+    for inst in &cfg.plugins.instances {
+        if !plugins::NAMES.contains(&inst.plugin.as_str()) {
+            continue;
+        }
+        let want = !inst.disabled && !plugins::instance_disabled(cfg, &inst.id);
+        if live(&inst.id) && !want {
+            dispatcher.remove(&inst.id, ctx).await?;
+        } else if want && !live(&inst.id) {
+            if let Some(p) = plugins::make(&inst.plugin) {
+                dispatcher.insert_instance(inst.id.clone(), p, ctx).await?;
             }
         }
     }
@@ -250,7 +379,7 @@ async fn restart_one(
     name: &str,
 ) -> anyhow::Result<()> {
     if plugins::NAMES.contains(&name) {
-        dispatcher.remove(name).await?;
+        dispatcher.remove(name, ctx).await?;
         if plugins::enabled(cfg, name) {
             if let Some(p) = plugins::make(name) {
                 dispatcher.insert(p, ctx).await?;
@@ -258,9 +387,24 @@ async fn restart_one(
         }
         return Ok(());
     }
-    let running = dispatcher.names().await.iter().any(|n| n == name);
-    if running {
-        dispatcher.remove(name).await?;
+    if let Some(inst) = cfg.plugins.instances.iter().find(|i| i.id == name) {
+        dispatcher.remove(name, ctx).await?;
+        if !inst.disabled && !plugins::instance_disabled(cfg, name) {
+            if plugins::NAMES.contains(&inst.plugin.as_str()) {
+                if let Some(p) = plugins::make(&inst.plugin) {
+                    dispatcher.insert_instance(inst.id.clone(), p, ctx).await?;
+                }
+            } else {
+                hub.spawn_instance(&inst.plugin, name, dispatcher, ctx)
+                    .await?;
+            }
+        }
+        return Ok(());
+    }
+    let live = dispatcher.names().await.iter().any(|n| n == name)
+        || dispatcher.pending_names().await.iter().any(|n| n == name);
+    if live {
+        dispatcher.remove(name, ctx).await?;
         if let Some(p) = hub.plugin(name).await {
             dispatcher.insert(p, ctx).await?;
         }

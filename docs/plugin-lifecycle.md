@@ -14,9 +14,11 @@
 
 ## 故意没搬
 
-- Proxy `Context`、`isolate` / realm、装饰器 inject
-- 同一插件多实例、服务依赖图 / epoch
+- Proxy `Context`、`isolate` / realm、装饰器 `@Inject`
+- isolate / realm 命名空间（多实例用显式 id，不是 isolate 符号）
 - 热更 `fujiang-core` 本身（Rust cdylib 做不到安全跨 ABI）
+
+服务图和事件总线是薄版：具名 JSON 调用 + `emit`/`parallel`/`serial`/`waterfall`，绑在 `PluginScope` 上。没有 epoch 字符串、没有跨插件 `Any` 强转。
 
 插件作者面对的是显式的 `Plugin` trait 和 `BotContext`，不是魔术 Context。
 
@@ -34,6 +36,14 @@ PluginHub
        disabled  → 仅动态名，持久化在 plugins.disabled
 ```
 
-`replace`：对新实例 `on_start`，成功才 `on_stop` 旧的。`insert` 在名字已存在时是空操作；热重载必须走 `replace`。
+`replace`：对新实例 `on_start`，成功才停旧的。`insert` 在名字已存在时是空操作；热重载必须走 `replace`。
 
-ABI：改 `Plugin` / `BotContext` / 导出符号就 bump `PLUGIN_ABI`（当前 3）。
+停插件的顺序是 **先 `scope.dispose()`（cancel + 等后台任务退出，超时再 abort），再 `on_stop()`**，这样备忘录这类插件可以先停循环再关 SQLite。
+
+`start_all` 不会因为一个插件 `on_start` 失败而退出进程：失败的插件被移出分发器，错误写进 Dispatcher / 管理页 `last_error`。
+
+宿主还认每个插件 JSON 里的 `groups` / `allow_private` / `priority`（见 [plugins.md](plugins.md) §3、§7）。命令匹配必须走 `fujiang_core::command`，不要在 handle 里写死 `.luck`。
+
+ABI：改 `Plugin` / `BotContext` 字段或导出符号就 bump `PLUGIN_ABI`（当前 5）。给 `BotContext` 加 inherent 方法、或只改 Dispatcher 行为，不必 bump。
+
+多实例：Dispatcher 按 **instance id** 存槽；`Plugin::name()` 仍是类型。`PluginScope::instance_id()` / `plugin_kind()` / `is_primary()`。

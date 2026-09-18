@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::Local;
-use fujiang_core::{BotContext, Event, Flow, Plugin, PluginScope};
+use fujiang_core::{command, BotContext, Event, Flow, Plugin, PluginScope};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -36,13 +36,18 @@ impl Plugin for LuckPlugin {
         let Some(msg) = ev.as_message() else {
             return Ok(Flow::Continue);
         };
+        let prefix = ctx.bot_config().await.command_prefix;
         let line = msg.command_line();
-        let mut parts = line.split_whitespace();
-        if parts.next() != Some(".luck") {
+        let Some(rest) = command::strip_token(&line, ".luck", &prefix) else {
             return Ok(Flow::Continue);
-        }
-        let Some(lim) = parts.next().and_then(|s| s.parse::<i64>().ok()) else {
-            ctx.reply_text(msg, self.help()).await?;
+        };
+        let Some(lim) = rest
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse::<i64>().ok())
+        else {
+            ctx.reply_text(msg, command::plugin_help(self, &prefix))
+                .await?;
             return Ok(Flow::Stop);
         };
         if lim < 1 {

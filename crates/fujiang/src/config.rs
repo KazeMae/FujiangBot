@@ -137,6 +137,9 @@ pub struct PluginsSection {
     /// Dynamic plugin names that stay loaded on disk but are not running.
     #[serde(default)]
     pub disabled: Vec<String>,
+    /// Extra copies of a builtin or dynamic plugin. Default instance id = plugin name.
+    #[serde(default)]
+    pub instances: Vec<PluginInstance>,
 }
 
 impl Default for PluginsSection {
@@ -151,8 +154,17 @@ impl Default for PluginsSection {
             luck: PluginToggle::default(),
             configs: HashMap::new(),
             disabled: Vec::new(),
+            instances: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginInstance {
+    pub id: String,
+    pub plugin: String,
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,11 +1,13 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
-use fujiang_core::{BotContext, Event, Flow, Plugin, PluginScope};
-use fujiang_store::CfUser;
+use fujiang_core::{command, BotContext, Event, Flow, Plugin, PluginScope, Service};
+use fujiang_store::{CfUser, Store};
 use serde::Deserialize;
+use serde_json::{json, Value};
 use tracing::{info, warn};
 
 const HELP: &str = "Codeforces 排行。`.rank` 和 `.rk` 一样。`{year*}` 可写多个年级，不写则看全部。后台会定时刷 rating 和近期比赛排名。\n\
@@ -49,7 +51,18 @@ impl Plugin for RankPlugin {
         &[".rank", ".rk"]
     }
 
+    fn provides(&self) -> &'static [&'static str] {
+        &["rank"]
+    }
+
     async fn on_start(&self, ctx: &BotContext, scope: &PluginScope) -> anyhow::Result<()> {
+        ctx.provide(
+            scope,
+            "rank",
+            Arc::new(RankService {
+                store: ctx.store.clone(),
+            }),
+        )?;
         let ctx = ctx.clone();
         let stop = scope.stop_token();
         scope.spawn(async move {
@@ -89,20 +102,22 @@ impl Plugin for RankPlugin {
         let Some(msg) = ev.as_message() else {
             return Ok(Flow::Continue);
         };
+        let prefix = ctx.bot_config().await.command_prefix;
         let line = msg.command_line();
-        let mut args: Vec<&str> = line.split_whitespace().collect();
-        if args.first().copied() != Some(".rank") && args.first().copied() != Some(".rk") {
+        let Some(rest) = command::strip_any(&line, &[".rank", ".rk"], &prefix) else {
             return Ok(Flow::Continue);
-        }
-        args.remove(0);
+        };
+        let args: Vec<&str> = rest.split_whitespace().collect();
         if args.is_empty() {
-            ctx.reply_text(msg, HELP).await?;
+            ctx.reply_text(msg, command::plugin_help(self, &prefix))
+                .await?;
             return Ok(Flow::Stop);
         }
         let rest: Vec<String> = args.iter().skip(1).map(|s| s.to_string()).collect();
         match args[0] {
             "--help" | "-h" => {
-                ctx.reply_text(msg, HELP).await?;
+                ctx.reply_text(msg, command::plugin_help(self, &prefix))
+                    .await?;
             }
             "--add" | "-a" => add_user(ctx, msg, &rest).await?,
             "--remove" | "-r" => remove_user(ctx, msg, &rest).await?,
@@ -516,6 +531,7 @@ async fn refresh_ratings(ctx: &BotContext) -> anyhow::Result<()> {
             &chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         )
         .await?;
+    ctx.emit("rank.updated", json!({ "kind": "rating" }));
     Ok(())
 }
 
@@ -550,7 +566,47 @@ async fn refresh_ranks(ctx: &BotContext) -> anyhow::Result<()> {
             &chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         )
         .await?;
+    ctx.emit("rank.updated", json!({ "kind": "standings" }));
     Ok(())
+}
+
+struct RankService {
+    store: Store,
+}
+
+fn cf_user_json(u: &CfUser) -> Value {
+    json!({
+        "year": u.year,
+        "name": u.name,
+        "handle": u.handle,
+        "last_rating": u.last_rating,
+        "max_rating": u.max_rating,
+        "solved": u.solved,
+        "last_month": u.last_month,
+        "valid_rating": u.valid_rating,
+    })
+}
+
+#[async_trait]
+impl Service for RankService {
+    async fn call(&self, method: &str, args: Value) -> anyhow::Result<Value> {
+        match method {
+            "list" => {
+                let users = self.store.cf_users().await?;
+                Ok(Value::Array(users.iter().map(cf_user_json).collect()))
+            }
+            "get" => {
+                let handle = args
+                    .get("handle")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("rank.get 需要 handle"))?;
+                let users = self.store.cf_users().await?;
+                let found = users.iter().find(|u| u.handle.eq_ignore_ascii_case(handle));
+                Ok(found.map(cf_user_json).unwrap_or(Value::Null))
+            }
+            other => anyhow::bail!("rank 没有方法 `{other}`（list / get）"),
+        }
+    }
 }
 
 fn valid_rating(hist: &[CfRating]) -> i64 {

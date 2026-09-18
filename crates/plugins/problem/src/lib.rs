@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{Local, Timelike};
-use fujiang_core::{BotContext, Event, Flow, Plugin, PluginScope};
+use fujiang_core::{command, BotContext, Event, Flow, Plugin, PluginScope};
 use fujiang_store::DailyProblem;
 use rand::seq::SliceRandom;
 use rand::{rngs::StdRng, SeedableRng};
@@ -55,20 +55,21 @@ impl Plugin for ProblemPlugin {
         let Some(msg) = ev.as_message() else {
             return Ok(Flow::Continue);
         };
+        let prefix = ctx.bot_config().await.command_prefix;
         let line = msg.command_line();
-        if line == ".cftag" {
+        if command::matches_token(&line, ".cftag", &prefix) {
             ctx.reply_text(msg, TAGS).await?;
             return Ok(Flow::Stop);
         }
-        if line == ".每日一题" {
+        if command::matches_token(&line, ".每日一题", &prefix) {
             let text = daily(ctx).await?;
             ctx.reply_text(msg, text).await?;
             return Ok(Flow::Stop);
         }
-        if let Some(rest) = line.strip_prefix(".problem") {
-            let rest = rest.trim();
+        if let Some(rest) = command::strip_token(&line, ".problem", &prefix) {
             if rest.is_empty() {
-                ctx.reply_text(msg, self.help()).await?;
+                ctx.reply_text(msg, command::plugin_help(self, &prefix))
+                    .await?;
                 return Ok(Flow::Stop);
             }
             let text = pick_problem(ctx, rest, true).await?;

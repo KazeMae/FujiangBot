@@ -42,6 +42,8 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/api/plugins/{name}/config", put(put_plugin_config))
         .route("/api/plugins/{name}/enable", post(enable_plugin))
         .route("/api/plugins/{name}/disable", post(disable_plugin))
+        .route("/api/plugins/instances", post(add_instance))
+        .route("/api/plugins/instances/drop", post(drop_instance))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
     Router::new()
         .route("/", get(index))
@@ -63,6 +65,9 @@ struct ConfigView {
 #[derive(Serialize)]
 struct StatusView {
     plugins: Vec<String>,
+    pending: Vec<String>,
+    services: Vec<fujiang_core::ServiceInfo>,
+    events: Vec<fujiang_core::EventInfo>,
     backend: crate::config::AdapterBackend,
     config_path: String,
     admin_token_required: bool,
@@ -91,10 +96,12 @@ struct BuiltinView {
 #[derive(Serialize)]
 struct PluginEntryView {
     pub name: String,
+    pub plugin: String,
     pub version: String,
     pub description: String,
     pub commands: Vec<String>,
     pub kind: &'static str,
+    pub primary: bool,
     pub path: Option<String>,
     pub enabled: bool,
     pub state: &'static str,
@@ -172,7 +179,11 @@ async fn load_plugin(State(state): State<Arc<AppState>>, Json(body): Json<PathBo
 }
 
 async fn unload_plugin(State(state): State<Arc<AppState>>, Json(body): Json<NameBody>) -> Response {
-    match state.hub.unload(&body.name, &state.dispatcher).await {
+    match state
+        .hub
+        .unload(&body.name, &state.dispatcher, &state.ctx)
+        .await
+    {
         Ok(true) => Json(serde_json::json!({
             "ok": true,
             "plugins": plugins_view(&state).await,
@@ -252,6 +263,53 @@ async fn disable_plugin(State(state): State<Arc<AppState>>, Path(name): Path<Str
     plugin_enable_resp(state, name, false).await
 }
 
+#[derive(serde::Deserialize)]
+struct InstanceBody {
+    id: String,
+    plugin: String,
+    #[serde(default)]
+    config: Option<serde_json::Value>,
+}
+
+async fn add_instance(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<InstanceBody>,
+) -> Response {
+    match state.add_instance(body.id, body.plugin, body.config).await {
+        Ok(report) => Json(serde_json::json!({
+            "ok": true,
+            "report": report,
+            "plugins": plugins_view(&state).await,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: format!("{e:#}"),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn drop_instance(State(state): State<Arc<AppState>>, Json(body): Json<NameBody>) -> Response {
+    match state.drop_instance(&body.name).await {
+        Ok(report) => Json(serde_json::json!({
+            "ok": true,
+            "report": report,
+            "plugins": plugins_view(&state).await,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: format!("{e:#}"),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 async fn plugin_enable_resp(state: Arc<AppState>, name: String, enabled: bool) -> Response {
     match state.set_plugin_enabled(&name, enabled).await {
         Ok(report) => Json(serde_json::json!({
@@ -285,38 +343,98 @@ async fn plugins_view(state: &AppState) -> PluginsView {
             Some(BuiltinView { snapshot, config })
         })
         .collect();
-    let dynamic = state.hub.list(&running, &cfg.plugins.configs).await;
+    let dispatcher_errors = state.dispatcher.last_errors().await;
+    let pending = state.dispatcher.pending_names().await;
+    let live: Vec<String> = running.iter().chain(pending.iter()).cloned().collect();
+    let dynamic = state.hub.list(&live, &cfg.plugins.configs).await;
     let mut entries: Vec<PluginEntryView> = builtin
         .iter()
         .map(|b| {
-            let enabled = running.iter().any(|n| n == &b.snapshot.name);
+            let enabled = live.iter().any(|n| n == &b.snapshot.name);
+            let state = if running.iter().any(|n| n == &b.snapshot.name) {
+                "active"
+            } else if pending.iter().any(|n| n == &b.snapshot.name) {
+                "pending"
+            } else {
+                "disabled"
+            };
             PluginEntryView {
                 name: b.snapshot.name.clone(),
+                plugin: b.snapshot.name.clone(),
                 version: b.snapshot.version.clone(),
                 description: b.snapshot.description.clone(),
                 commands: b.snapshot.commands.clone(),
                 kind: "builtin",
+                primary: true,
                 path: None,
                 enabled,
-                state: if enabled { "active" } else { "disabled" },
+                state,
                 config: b.config.clone(),
-                last_error: None,
+                last_error: dispatcher_errors.get(&b.snapshot.name).cloned(),
             }
         })
         .collect();
     for d in &dynamic {
+        let err = d
+            .last_error
+            .clone()
+            .or_else(|| dispatcher_errors.get(&d.name).cloned());
+        let slot_state = if d.last_error.is_some() && !d.enabled && d.version.is_empty() {
+            "error"
+        } else if running.iter().any(|n| n == &d.name) {
+            "active"
+        } else if pending.iter().any(|n| n == &d.name) {
+            "pending"
+        } else {
+            "loaded"
+        };
+        let plugin_kind = state
+            .hub
+            .kind_of(&d.name)
+            .await
+            .unwrap_or_else(|| d.name.clone());
         entries.push(PluginEntryView {
             name: d.name.clone(),
+            plugin: plugin_kind.clone(),
             version: d.version.clone(),
             description: d.description.clone(),
             commands: d.commands.clone(),
             kind: "dynamic",
+            primary: plugin_kind == d.name,
             path: Some(d.path.clone()),
             enabled: d.enabled,
-            state: if d.enabled { "active" } else { "loaded" },
+            state: slot_state,
             config: d.config.clone(),
-            last_error: d.last_error.clone(),
+            last_error: err,
         });
+    }
+    // Extra builtin instances (id != plugin type).
+    let insts = state.dispatcher.instance_list().await;
+    for inst in insts {
+        if crate::plugins::NAMES.contains(&inst.plugin.as_str()) && inst.id != inst.plugin {
+            let enabled = live.iter().any(|n| n == &inst.id);
+            let state_s = if running.iter().any(|n| n == &inst.id) {
+                "active"
+            } else if pending.iter().any(|n| n == &inst.id) {
+                "pending"
+            } else {
+                "disabled"
+            };
+            entries.push(PluginEntryView {
+                name: inst.id.clone(),
+                plugin: inst.plugin.clone(),
+                version: inst.version,
+                description: inst.description,
+                commands: inst.commands,
+                kind: "builtin",
+                primary: false,
+                path: None,
+                enabled,
+                state: state_s,
+                config: crate::plugins::config_view(&cfg, &inst.id),
+                last_error: dispatcher_errors.get(&inst.id).cloned(),
+            });
+        }
     }
     PluginsView {
         dir: cfg.plugins.dir.clone(),
@@ -380,6 +498,9 @@ async fn status_view(state: &AppState) -> StatusView {
 async fn status_of(state: &AppState, cfg: &AppConfig) -> StatusView {
     StatusView {
         plugins: state.dispatcher.names().await,
+        pending: state.dispatcher.pending_names().await,
+        services: state.ctx.services.list(),
+        events: state.ctx.events.list(),
         backend: cfg.adapter.backend,
         config_path: state.config_path.display().to_string(),
         admin_token_required: !cfg.admin.token.is_empty(),

@@ -20,7 +20,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use fujiang_core::{
-    declare_plugin, BotContext, Event, Flow, MessageEvent, Plugin, PluginMeta, PluginScope, Source,
+    command, declare_plugin, BotContext, Event, Flow, MessageEvent, Plugin, PluginMeta,
+    PluginScope, Source,
 };
 use sqlx::SqlitePool;
 use tokio::sync::Mutex;
@@ -89,7 +90,7 @@ impl Plugin for MemoPlugin {
     }
 
     async fn on_start(&self, ctx: &BotContext, scope: &PluginScope) -> anyhow::Result<()> {
-        let pool = ctx.open_plugin_db(self.name()).await?;
+        let pool = ctx.open_instance_db(scope).await?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS memos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,7 +109,7 @@ impl Plugin for MemoPlugin {
 
         *self.pool.lock().await = Some(pool.clone());
 
-        let cfg = MemoCfg::from_value(&ctx.plugin_config(self.name()).await);
+        let cfg = MemoCfg::from_value(&ctx.instance_config(scope).await);
         if cfg.ttl_days > 0 {
             let ttl = cfg.ttl_days;
             let stop = scope.stop_token();
@@ -146,14 +147,14 @@ impl Plugin for MemoPlugin {
         &self,
         ctx: &BotContext,
         ev: &Event,
-        _scope: &PluginScope,
+        scope: &PluginScope,
     ) -> anyhow::Result<Flow> {
         let Some(msg) = ev.as_message() else {
             return Ok(Flow::Continue);
         };
         let prefix = ctx.bot_config().await.command_prefix;
         let line = msg.command_line();
-        let Some(rest) = strip_cmd(&line, &prefix, "memo") else {
+        let Some(rest) = command::strip_token(&line, ".memo", &prefix) else {
             return Ok(Flow::Continue);
         };
         let pool = {
@@ -161,19 +162,10 @@ impl Plugin for MemoPlugin {
             g.clone()
                 .ok_or_else(|| anyhow::anyhow!("memo db not open"))?
         };
-        let cfg = MemoCfg::from_value(&ctx.plugin_config(self.name()).await);
+        let cfg = MemoCfg::from_value(&ctx.instance_config(scope).await);
         dispatch_cmd(ctx, msg, &pool, &cfg, rest.trim()).await?;
         Ok(Flow::Stop)
     }
-}
-
-fn strip_cmd<'a>(line: &'a str, prefix: &str, name: &str) -> Option<&'a str> {
-    let head = format!("{prefix}{name}");
-    if line == head {
-        return Some("");
-    }
-    let with_space = format!("{head} ");
-    line.strip_prefix(&with_space)
 }
 
 fn source_key(src: Source) -> (&'static str, i64) {
@@ -202,14 +194,17 @@ async fn dispatch_cmd(
     let arg = parts.next().unwrap_or("").trim();
     match verb {
         "" | "help" | "-h" | "--help" => {
-            ctx.reply_text(msg, HELP).await?;
+            let prefix = ctx.bot_config().await.command_prefix;
+            ctx.reply_text(msg, command::rewrite_help(HELP, &[".memo"], &prefix))
+                .await?;
         }
         "add" => add_memo(ctx, msg, pool, cfg, arg).await?,
         "list" => list_memos(ctx, msg, pool).await?,
         "del" | "rm" => del_memo(ctx, msg, pool, arg).await?,
         "count" => count_memos(ctx, msg, pool).await?,
         _ => {
-            ctx.reply_text(msg, "不认识这个子命令，发 .memo 看说明")
+            let prefix = ctx.bot_config().await.command_prefix;
+            ctx.reply_text(msg, format!("不认识这个子命令，发 {prefix}memo 看说明"))
                 .await?;
         }
     }
@@ -337,11 +332,17 @@ mod tests {
 
     #[test]
     fn strip_respects_prefix() {
-        assert_eq!(strip_cmd(".memo", ".", "memo"), Some(""));
-        assert_eq!(strip_cmd(".memo add hi", ".", "memo"), Some("add hi"));
-        assert_eq!(strip_cmd("!memo list", "!", "memo"), Some("list"));
-        assert_eq!(strip_cmd(".memo", "!", "memo"), None);
-        assert_eq!(strip_cmd(".memory", ".", "memo"), None);
+        assert_eq!(command::strip_token(".memo", ".memo", "."), Some(""));
+        assert_eq!(
+            command::strip_token(".memo add hi", ".memo", "."),
+            Some("add hi")
+        );
+        assert_eq!(
+            command::strip_token("!memo list", ".memo", "!"),
+            Some("list")
+        );
+        assert_eq!(command::strip_token(".memo", ".memo", "!"), None);
+        assert_eq!(command::strip_token(".memory", ".memo", "."), None);
     }
 
     #[test]

@@ -62,6 +62,22 @@ enabled = true
 # [plugins.configs.memo]
 # max_per_source = 50
 # ttl_days = 0
+#
+# 所有插件（含内置）都认这些宿主字段，写在 configs 里即可：
+# [plugins.configs.luck]
+# groups = [741798363]   # 空或不写 = 所有生效群
+# allow_private = true
+# priority = 0           # 越大越先处理；命令主人仍最先
+# inject = ["rank"]      # 等这些服务 ready 再 on_start
+# provides = ["luck"]    # 声明会 ctx.provide 的名字（给环检测用）
+#
+# 同一插件多实例（id 必须唯一，不能等于内置名）。默认实例 id = 插件名。
+# [[plugins.instances]]
+# id = "rank-fresh"
+# plugin = "rank"
+# [plugins.configs.rank-fresh]
+# groups = [555973858]
+# share_data = true      # 额外实例默认独立 sqlite；true 则和默认实例共用
 
 # 内嵌配置页，不要和 adapter.event_listen 抢端口
 [admin]

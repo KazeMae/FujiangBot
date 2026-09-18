@@ -68,7 +68,7 @@ async fn run(path: PathBuf) -> anyhow::Result<()> {
     store.spawn_archiver(process_stop.clone());
 
     let adapter = Arc::new(runtime::build_adapter(&cfg)?);
-    let dispatcher = Arc::new(Dispatcher::new(plugins::initial(&cfg)));
+    let dispatcher = Arc::new(Dispatcher::with_instances(plugins::initial(&cfg)));
     let ctx = BotContext {
         messenger: Arc::new(RwLock::new(adapter.messenger())),
         store,
@@ -77,11 +77,16 @@ async fn run(path: PathBuf) -> anyhow::Result<()> {
             .build()?,
         config: Arc::new(RwLock::new(cfg.to_bot_config())),
         plugin_configs: Arc::new(RwLock::new(plugins::all_configs(&cfg))),
+        services: fujiang_core::ServiceHub::new(),
+        events: fujiang_core::EventBus::new(),
     };
-    dispatcher.start_all(&ctx).await?;
+    for (name, err) in dispatcher.start_all(&ctx).await {
+        tracing::error!(plugin = %name, error = %err, "plugin start failed, skipped");
+    }
 
     let hub = Arc::new(PluginHub::new(&cfg.plugins.dir));
     hub.set_disabled(cfg.plugins.disabled.clone()).await;
+    hub.set_extras(cfg.plugins.instances.clone()).await;
     if let Err(e) = hub.scan(&dispatcher, &ctx).await {
         tracing::warn!(error = %e, "initial plugin scan");
     }
@@ -140,7 +145,7 @@ async fn run(path: PathBuf) -> anyhow::Result<()> {
             }
         }
     }
-    state.dispatcher.stop_all().await;
+    state.dispatcher.stop_all(&state.ctx).await;
     state.stop_gateway().await;
     Ok(())
 }

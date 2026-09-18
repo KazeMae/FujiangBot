@@ -8,7 +8,9 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::event::{Event, MessageEvent, Segment, Source};
+use crate::events::{event_fn, EventBus, EventHandler, EventResult};
 use crate::scope::PluginScope;
+use crate::services::{Service, ServiceHub};
 use crate::BotConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +54,8 @@ pub struct BotContext {
     pub http: reqwest::Client,
     pub config: Arc<RwLock<BotConfig>>,
     pub plugin_configs: Arc<RwLock<HashMap<String, Value>>>,
+    pub services: ServiceHub,
+    pub events: EventBus,
 }
 
 impl BotContext {
@@ -66,6 +70,80 @@ impl BotContext {
             .get(name)
             .cloned()
             .unwrap_or_else(|| Value::Object(Default::default()))
+    }
+
+    /// Instance overlay on top of the type-level config (`rank-fresh` over `rank`).
+    pub async fn instance_config(&self, scope: &PluginScope) -> Value {
+        let kind = self.plugin_config(scope.plugin_kind()).await;
+        if scope.is_primary() {
+            return kind;
+        }
+        merge_json(kind, self.plugin_config(scope.instance_id()).await)
+    }
+
+    /// SQLite for this instance. Extra copies get `{kind}__{id}` unless `share_data = true`.
+    pub async fn open_instance_db(&self, scope: &PluginScope) -> anyhow::Result<sqlx::SqlitePool> {
+        self.open_plugin_db(&instance_data_key(
+            scope,
+            &self.instance_config(scope).await,
+        ))
+        .await
+    }
+
+    /// Register a named service. Revoked automatically when `scope` is disposed.
+    pub fn provide(
+        &self,
+        scope: &PluginScope,
+        name: &str,
+        service: Arc<dyn Service>,
+    ) -> anyhow::Result<()> {
+        let owner = scope.plugin_name();
+        anyhow::ensure!(!owner.is_empty(), "provide() needs a named PluginScope");
+        let svc_name = service_name_for(scope, name);
+        let gen = self.services.provide(&svc_name, owner, service)?;
+        let hub = self.services.clone();
+        let owner = owner.to_string();
+        scope.defer(move || {
+            hub.revoke(&svc_name, &owner, gen);
+        });
+        Ok(())
+    }
+
+    pub async fn call(&self, service: &str, method: &str, args: Value) -> anyhow::Result<Value> {
+        self.services.call(service, method, args).await
+    }
+
+    /// Subscribe. Dropped when `scope` is disposed.
+    pub fn listen(&self, scope: &PluginScope, event: &str, handler: Arc<dyn EventHandler>) -> u64 {
+        self.listen_opts(scope, event, handler, false)
+    }
+
+    pub fn listen_opts(
+        &self,
+        scope: &PluginScope,
+        event: &str,
+        handler: Arc<dyn EventHandler>,
+        prepend: bool,
+    ) -> u64 {
+        let plugin = scope.plugin_name();
+        let id = self.events.on(event, plugin, handler, prepend);
+        let bus = self.events.clone();
+        scope.defer(move || {
+            bus.off(id);
+        });
+        id
+    }
+
+    pub fn listen_fn<F, Fut>(&self, scope: &PluginScope, event: &str, f: F) -> u64
+    where
+        F: Fn(Value) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<EventResult>> + Send + 'static,
+    {
+        self.listen(scope, event, event_fn(f))
+    }
+
+    pub fn emit(&self, event: impl Into<String>, payload: Value) {
+        self.events.emit(event, payload);
     }
 
     /// `{data}/plugin-data/{name}/` for files this plugin owns.
@@ -150,7 +228,41 @@ fn is_http_url(s: &str) -> bool {
 }
 
 /// Bump when `Plugin` / `BotContext` layout or the create symbol changes.
-pub const PLUGIN_ABI: u32 = 3;
+pub const PLUGIN_ABI: u32 = 5;
+
+fn merge_json(base: Value, overlay: Value) -> Value {
+    match (base, overlay) {
+        (Value::Object(mut a), Value::Object(b)) => {
+            for (k, v) in b {
+                a.insert(k, v);
+            }
+            Value::Object(a)
+        }
+        (_, over) if over != Value::Null => over,
+        (base, _) => base,
+    }
+}
+
+pub fn service_name_for(scope: &PluginScope, name: &str) -> String {
+    if scope.is_primary() {
+        name.to_string()
+    } else {
+        format!("{name}#{}", scope.instance_id())
+    }
+}
+
+pub fn instance_data_key(scope: &PluginScope, cfg: &Value) -> String {
+    if scope.is_primary()
+        || cfg
+            .get("share_data")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false)
+    {
+        scope.plugin_kind().to_string()
+    } else {
+        format!("{}__{}", scope.plugin_kind(), scope.instance_id())
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct PluginMeta {
@@ -216,10 +328,21 @@ pub trait Plugin: Send + Sync {
         Interest::Commands
     }
 
+    /// Service names this plugin needs before `on_start`. Overlay: `inject` in plugin JSON.
+    fn inject(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Service names this plugin will `ctx.provide` in `on_start`. Overlay: `provides`.
+    fn provides(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     async fn on_start(&self, _ctx: &BotContext, _scope: &PluginScope) -> anyhow::Result<()> {
         Ok(())
     }
 
+    /// Called after the scope has been disposed (background tasks cancelled).
     async fn on_stop(&self) -> anyhow::Result<()> {
         Ok(())
     }
