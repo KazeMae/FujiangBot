@@ -40,6 +40,7 @@ agent 是动态插件。有人在群里或私聊里叫到它时，它把这个�
 |---|---|---|
 | `base_url` | `https://api.deepseek.com` | 对话接口的根地址。插件去掉末尾的 `/` |
 | `model` | `deepseek-flash` | 模型名 |
+| `api` | `chat` | 协议：`chat` 走 `POST {base_url}/chat/completions`；`responses`（别名 `response`）走 `POST {base_url}/responses`（OpenAI Responses：`input` / `instructions` / `output`）。默认 `chat`，DeepSeek 现网默认行为不变。未知值按 `chat` |
 | `api_key_env` | `FUJIANG_LLM_KEY` | 环境变量的名字。这里填名字，不填密钥 |
 | `temperature` | `0.7` | 采样温度 |
 | `max_history_turns` | `20` | 请求里带上的历史回合数。一回合是一条用户消息加上一条回复 |
@@ -58,6 +59,7 @@ agent 是动态插件。有人在群里或私聊里叫到它时，它把这个�
 priority = 10
 base_url = "https://api.deepseek.com"
 model = "deepseek-flash"
+api = "chat"   # 或 "responses"
 api_key_env = "FUJIANG_LLM_KEY"
 system_prompt = "你是福酱，西南科技大学 ACM 群助手。"
 
@@ -70,6 +72,8 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 ```
 
 `config.example.toml` 里的同一段是注释。抄进 `config.toml` 时不要写上密钥。
+
+调用方仍走同一套消息拼装；`api = "responses"` 时客户端把 system 拼进 `instructions`，其余回合放进 `input`，并从 `output_text` 或 `output` 里的 `output_text` 段取出回复。
 
 ## 环境变量
 
