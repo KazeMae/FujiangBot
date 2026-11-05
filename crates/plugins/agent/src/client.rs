@@ -14,7 +14,7 @@ pub enum Role {
     Assistant,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,
