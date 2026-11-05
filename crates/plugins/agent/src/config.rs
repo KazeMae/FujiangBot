@@ -16,19 +16,10 @@ pub struct RateLimit {
     pub per_group_per_hour: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ApiKind {
-    #[default]
-    Chat,
-    Responses,
-}
-
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub base_url: String,
     pub model: String,
-    /// `Chat` posts `/chat/completions`. `Responses` posts `/responses`.
-    pub api: ApiKind,
     pub api_key_env: String,
     pub temperature: f64,
     pub max_history_turns: u32,
@@ -36,17 +27,16 @@ pub struct AgentConfig {
     pub wake_words: Vec<String>,
     pub require_at: bool,
     pub rate_limit: RateLimit,
-    /// Seconds for one chat request. Missing or 0 means 60.
+    /// Seconds for one request. Missing or 0 means 60.
     pub timeout_secs: u64,
 }
 
 impl AgentConfig {
-    /// Lenient parse. Unknown host fields (`priority`, `groups`, `allow_private`, `enabled`) are ignored.
+    /// Lenient parse. Unknown host fields (`priority`, `groups`, `allow_private`, `enabled`) and a leftover `api` key are ignored.
     pub fn from_value(v: &Value) -> Self {
         Self {
             base_url: base_url_from(v),
             model: string_field(v, "model", DEFAULT_MODEL),
-            api: api_kind_from(v),
             api_key_env: string_field(v, "api_key_env", DEFAULT_API_KEY_ENV),
             temperature: temperature_from(v),
             max_history_turns: u32_field(v, "max_history_turns", DEFAULT_MAX_HISTORY_TURNS),
@@ -56,17 +46,6 @@ impl AgentConfig {
             rate_limit: rate_limit_from(v),
             timeout_secs: timeout_secs_from(v),
         }
-    }
-}
-
-fn api_kind_from(v: &Value) -> ApiKind {
-    let Some(text) = v.get("api").and_then(Value::as_str) else {
-        return ApiKind::Chat;
-    };
-    match text.trim().to_ascii_lowercase().as_str() {
-        "response" | "responses" => ApiKind::Responses,
-        // "chat", "chat_completions", blank, and unknown values stay on chat completions.
-        _ => ApiKind::Chat,
     }
 }
 
@@ -141,7 +120,6 @@ mod tests {
     fn assert_defaults(cfg: &AgentConfig) {
         assert_eq!(cfg.base_url, "https://api.deepseek.com");
         assert_eq!(cfg.model, "deepseek-flash");
-        assert_eq!(cfg.api, ApiKind::Chat);
         assert_eq!(cfg.api_key_env, "FUJIANG_LLM_KEY");
         assert_eq!(cfg.temperature, 0.7);
         assert_eq!(cfg.max_history_turns, 20);
@@ -208,38 +186,5 @@ mod tests {
     fn explicit_empty_wake_words_stay_empty() {
         let cfg = AgentConfig::from_value(&json!({ "wake_words": [] }));
         assert!(cfg.wake_words.is_empty());
-    }
-
-    #[test]
-    fn api_defaults_to_chat_and_accepts_responses_aliases() {
-        assert_eq!(AgentConfig::from_value(&json!({})).api, ApiKind::Chat);
-        assert_eq!(
-            AgentConfig::from_value(&json!({"api": "responses"})).api,
-            ApiKind::Responses
-        );
-        assert_eq!(
-            AgentConfig::from_value(&json!({"api": " response "})).api,
-            ApiKind::Responses
-        );
-        assert_eq!(
-            AgentConfig::from_value(&json!({"api": "Responses"})).api,
-            ApiKind::Responses
-        );
-        assert_eq!(
-            AgentConfig::from_value(&json!({"api": "chat_completions"})).api,
-            ApiKind::Chat
-        );
-        assert_eq!(
-            AgentConfig::from_value(&json!({"api": "CHAT"})).api,
-            ApiKind::Chat
-        );
-        assert_eq!(
-            AgentConfig::from_value(&json!({"api": "nope"})).api,
-            ApiKind::Chat
-        );
-        assert_eq!(
-            AgentConfig::from_value(&json!({"api": 1})).api,
-            ApiKind::Chat
-        );
     }
 }
