@@ -4,7 +4,7 @@ mod client;
 mod config;
 
 pub use client::{ChatMessage, LlmClient, LlmError, Role};
-pub use config::{AgentConfig, ApiKind, RateLimit};
+pub use config::{AgentConfig, RateLimit};
 
 use async_trait::async_trait;
 use fujiang_core::{

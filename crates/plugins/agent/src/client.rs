@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::config::{AgentConfig, ApiKind};
+use crate::config::AgentConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -43,7 +43,6 @@ pub struct LlmClient {
     api_key: String,
     temperature: f64,
     timeout: Duration,
-    api: ApiKind,
 }
 
 impl LlmClient {
@@ -54,36 +53,16 @@ impl LlmClient {
         Ok(Self::new(cfg, http, api_key))
     }
 
-    pub async fn chat_completions(&self, messages: &[ChatMessage]) -> Result<String, LlmError> {
-        let (status, body) = match self.api {
-            ApiKind::Chat => {
-                let request = ChatRequest {
-                    model: &self.model,
-                    messages,
-                    temperature: self.temperature,
-                    stream: false,
-                };
-                self.send_json("chat/completions", &request).await?
-            }
-            ApiKind::Responses => {
-                let request = responses_request(&self.model, self.temperature, messages);
-                self.send_json("responses", &request).await?
-            }
-        };
+    pub async fn complete(&self, messages: &[ChatMessage]) -> Result<String, LlmError> {
+        let request = responses_request(&self.model, self.temperature, messages);
+        let (status, body) = self.send_json("responses", &request).await?;
         if !status.is_success() {
-            let body = match self.api {
-                ApiKind::Chat => snippet(&body),
-                ApiKind::Responses => error_message_or_snippet(&body),
-            };
             return Err(LlmError::Api {
                 status: status.as_u16(),
-                body,
+                body: error_message_or_snippet(&body),
             });
         }
-        match self.api {
-            ApiKind::Chat => parse_completion(&body),
-            ApiKind::Responses => parse_responses(&body),
-        }
+        parse_responses(&body)
     }
 
     fn new(cfg: &AgentConfig, http: reqwest::Client, api_key: String) -> Self {
@@ -94,7 +73,6 @@ impl LlmClient {
             api_key,
             temperature: cfg.temperature,
             timeout: Duration::from_secs(cfg.timeout_secs),
-            api: cfg.api,
         }
     }
 
@@ -116,14 +94,6 @@ impl LlmClient {
         let text = response.text().await.map_err(map_reqwest)?;
         Ok((status, text))
     }
-}
-
-#[derive(Serialize)]
-struct ChatRequest<'a> {
-    model: &'a str,
-    messages: &'a [ChatMessage],
-    temperature: f64,
-    stream: bool,
 }
 
 fn require_key(env_name: &str, raw: Option<&str>) -> Result<String, LlmError> {
@@ -291,26 +261,6 @@ fn output_text_part(part: &Value) -> Option<&str> {
     }
 }
 
-fn parse_completion(body: &str) -> Result<String, LlmError> {
-    let value: Value =
-        serde_json::from_str(body).map_err(|err| LlmError::Decode(err.to_string()))?;
-    let Some(choices) = value.get("choices").and_then(Value::as_array) else {
-        return Err(LlmError::Truncated("missing choices".into()));
-    };
-    let Some(content) = choices
-        .first()
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-    else {
-        return Err(LlmError::Truncated("missing message content".into()));
-    };
-    match content {
-        Value::String(text) => Ok(text.clone()),
-        Value::Null => Err(LlmError::Truncated("null content".into())),
-        other => Err(LlmError::Decode(other.to_string())),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex, MutexGuard};
@@ -355,10 +305,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn success_returns_assistant_content() {
+    async fn success_posts_responses_and_returns_output_text() {
         let rec = Rec::default();
         let app = Router::new()
-            .route("/chat/completions", post(record_ok))
+            .route("/responses", post(record_responses))
             .with_state(rec.clone());
         let base = spawn_app(app).await;
         let client = {
@@ -377,99 +327,7 @@ mod tests {
             }
         };
         let text = client
-            .chat_completions(&[ChatMessage {
-                role: Role::User,
-                content: "hi".into(),
-            }])
-            .await
-            .unwrap();
-        assert_eq!(text, "福酱在");
-        let seen = rec.0.lock().unwrap().take().expect("request recorded");
-        assert_eq!(seen.auth, "Bearer env-key-from-config");
-        assert!(
-            seen.content_type.starts_with("application/json"),
-            "{}",
-            seen.content_type
-        );
-        assert_eq!(seen.body["model"], "deepseek-flash");
-        assert_eq!(seen.body["stream"], false);
-        let temp = seen.body["temperature"].as_f64().unwrap();
-        assert!((temp - 0.7).abs() < 1e-9, "{temp}");
-        assert_eq!(seen.body["messages"][0]["role"], "user");
-        assert_eq!(seen.body["messages"][0]["content"], "hi");
-    }
-
-    #[tokio::test]
-    async fn timeout_when_handler_sleeps() {
-        let app = Router::new().route("/chat/completions", post(slow));
-        let base = spawn_app(app).await;
-        let client = test_client(&base, 1);
-        let result = tokio::time::timeout(
-            Duration::from_secs(4),
-            client.chat_completions(&[ChatMessage {
-                role: Role::User,
-                content: "hi".into(),
-            }]),
-        )
-        .await
-        .expect("client hung past its timeout");
-        let err = result.unwrap_err();
-        assert!(matches!(err, LlmError::Timeout), "{err}");
-    }
-
-    #[tokio::test]
-    async fn status_401_and_429_include_status_and_body() {
-        expect_api(
-            StatusCode::UNAUTHORIZED,
-            "bad-key-body",
-            401,
-            "bad-key-body",
-        )
-        .await;
-        expect_api(StatusCode::TOO_MANY_REQUESTS, "slow-down", 429, "slow-down").await;
-    }
-
-    #[tokio::test]
-    async fn truncated_json_is_decode_error() {
-        let app = Router::new().route(
-            "/chat/completions",
-            post(|| async { (StatusCode::OK, r#"{"choices":[{"message":{"content":"hel""#) }),
-        );
-        let err = chat_err(app).await;
-        assert!(matches!(err, LlmError::Decode(_)), "{err}");
-    }
-
-    #[tokio::test]
-    async fn missing_choices_and_null_content_are_truncated() {
-        let empty = Router::new().route(
-            "/chat/completions",
-            post(|| async { Json(json!({"id": "x", "choices": []})) }),
-        );
-        let err = chat_err(empty).await;
-        assert!(matches!(err, LlmError::Truncated(_)), "{err}");
-
-        let null_body = Router::new().route(
-            "/chat/completions",
-            post(|| async {
-                Json(json!({
-                    "choices": [{"message": {"role": "assistant", "content": null}}]
-                }))
-            }),
-        );
-        let err = chat_err(null_body).await;
-        assert!(matches!(err, LlmError::Truncated(_)), "{err}");
-    }
-
-    #[tokio::test]
-    async fn responses_success_sends_input_and_instructions() {
-        let rec = Rec::default();
-        let app = Router::new()
-            .route("/responses", post(record_responses))
-            .with_state(rec.clone());
-        let base = spawn_app(app).await;
-        let client = test_client_with(&base, 60, ApiKind::Responses);
-        let text = client
-            .chat_completions(&[
+            .complete(&[
                 ChatMessage {
                     role: Role::System,
                     content: "be brief".into(),
@@ -496,7 +354,12 @@ mod tests {
         assert_eq!(text, "福酱在");
         let seen = rec.0.lock().unwrap().take().expect("request recorded");
         assert!(seen.path.ends_with("/responses"), "{}", seen.path);
-        assert_eq!(seen.auth, "Bearer test-key");
+        assert_eq!(seen.auth, "Bearer env-key-from-config");
+        assert!(
+            seen.content_type.starts_with("application/json"),
+            "{}",
+            seen.content_type
+        );
         assert_eq!(seen.body["model"], "deepseek-flash");
         assert_eq!(seen.body["stream"], false);
         assert_eq!(seen.body["instructions"], "be brief\nstay kind");
@@ -512,7 +375,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn responses_error_uses_status_and_error_message() {
+    async fn timeout_when_handler_sleeps() {
+        let app = Router::new().route("/responses", post(slow));
+        let base = spawn_app(app).await;
+        let client = test_client(&base, 1);
+        let result = tokio::time::timeout(
+            Duration::from_secs(4),
+            client.complete(&[ChatMessage {
+                role: Role::User,
+                content: "hi".into(),
+            }]),
+        )
+        .await
+        .expect("client hung past its timeout");
+        let err = result.unwrap_err();
+        assert!(matches!(err, LlmError::Timeout), "{err}");
+    }
+
+    #[tokio::test]
+    async fn error_status_uses_error_message() {
         let app = Router::new().route(
             "/responses",
             post(|| async {
@@ -524,15 +405,7 @@ mod tests {
                 )
             }),
         );
-        let base = spawn_app(app).await;
-        let client = test_client_with(&base, 60, ApiKind::Responses);
-        let err = client
-            .chat_completions(&[ChatMessage {
-                role: Role::User,
-                content: "hi".into(),
-            }])
-            .await
-            .unwrap_err();
+        let err = complete_err(app).await;
         match err {
             LlmError::Api { status, body } => {
                 assert_eq!(status, 400);
@@ -543,7 +416,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn responses_multi_segment_output_concatenates_message_text() {
+    async fn truncated_json_is_decode_error() {
+        let app = Router::new().route(
+            "/responses",
+            post(|| async { (StatusCode::OK, r#"{"output_text":"hel""#) }),
+        );
+        let err = complete_err(app).await;
+        assert!(matches!(err, LlmError::Decode(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn empty_output_is_truncated() {
+        let app = Router::new().route(
+            "/responses",
+            post(|| async { Json(json!({"output": [], "output_text": ""})) }),
+        );
+        let err = complete_err(app).await;
+        assert!(matches!(err, LlmError::Truncated(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn multi_segment_output_concatenates_message_text() {
         let app = Router::new().route(
             "/responses",
             post(|| async {
@@ -567,9 +460,9 @@ mod tests {
             }),
         );
         let base = spawn_app(app).await;
-        let client = test_client_with(&base, 60, ApiKind::Responses);
+        let client = test_client(&base, 60);
         let text = client
-            .chat_completions(&[ChatMessage {
+            .complete(&[ChatMessage {
                 role: Role::User,
                 content: "hi".into(),
             }])
@@ -578,47 +471,11 @@ mod tests {
         assert_eq!(text, "AB");
     }
 
-    #[tokio::test]
-    async fn responses_empty_output_is_truncated() {
-        let app = Router::new().route(
-            "/responses",
-            post(|| async { Json(json!({"output": [], "output_text": ""})) }),
-        );
-        let base = spawn_app(app).await;
-        let client = test_client_with(&base, 60, ApiKind::Responses);
-        let err = client
-            .chat_completions(&[ChatMessage {
-                role: Role::User,
-                content: "hi".into(),
-            }])
-            .await
-            .unwrap_err();
-        assert!(matches!(err, LlmError::Truncated(_)), "{err}");
-    }
-
-    async fn expect_api(status: StatusCode, body: &'static str, want: u16, needle: &str) {
-        let app = Router::new().route(
-            "/chat/completions",
-            post(move || async move { (status, body) }),
-        );
-        let err = chat_err(app).await;
-        match err {
-            LlmError::Api {
-                status: got,
-                body: text,
-            } => {
-                assert_eq!(got, want);
-                assert!(text.contains(needle), "{text}");
-            }
-            other => panic!("expected api {want}, got {other}"),
-        }
-    }
-
-    async fn chat_err(app: Router) -> LlmError {
+    async fn complete_err(app: Router) -> LlmError {
         let base = spawn_app(app).await;
         let client = test_client(&base, 60);
         client
-            .chat_completions(&[ChatMessage {
+            .complete(&[ChatMessage {
                 role: Role::User,
                 content: "hi".into(),
             }])
@@ -641,14 +498,9 @@ mod tests {
     }
 
     fn test_client(base: &str, timeout_secs: u64) -> LlmClient {
-        test_client_with(base, timeout_secs, ApiKind::Chat)
-    }
-
-    fn test_client_with(base: &str, timeout_secs: u64, api: ApiKind) -> LlmClient {
         let mut cfg = AgentConfig::from_value(&json!({}));
         cfg.base_url = base.to_string();
         cfg.timeout_secs = timeout_secs;
-        cfg.api = api;
         let http = reqwest::Client::builder().build().unwrap();
         LlmClient::new(&cfg, http, "test-key".into())
     }
@@ -687,18 +539,6 @@ mod tests {
             body,
         };
         *rec.0.lock().unwrap() = Some(seen);
-    }
-
-    async fn record_ok(
-        State(rec): State<Rec>,
-        uri: axum::http::Uri,
-        headers: HeaderMap,
-        Json(body): Json<Value>,
-    ) -> Json<Value> {
-        remember(&rec, &uri, &headers, body);
-        Json(json!({
-            "choices": [{"message": {"role": "assistant", "content": "福酱在"}}]
-        }))
     }
 
     async fn record_responses(
