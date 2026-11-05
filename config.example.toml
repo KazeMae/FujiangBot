@@ -79,6 +79,25 @@ enabled = true
 # groups = [555973858]
 # share_data = true      # 额外实例默认独立 sqlite；true 则和默认实例共用
 
+# 对话插件是动态库，不是内置插件。密钥放进程环境变量，不要写进这个文件。
+# 说明见 docs/agent.md。
+# [plugins.configs.agent]
+# priority = 10
+# base_url = "https://api.deepseek.com"
+# model = "deepseek-flash"
+# api_key_env = "FUJIANG_LLM_KEY"
+# temperature = 0.7
+# max_history_turns = 20
+# timeout_secs = 60
+# system_prompt = "你是福酱，西南科技大学 ACM 群助手。"
+# wake_words = ["福酱"]
+# require_at = false
+# [plugins.configs.agent.rate_limit]
+# per_user_per_hour = 30
+# per_group_per_hour = 120
+# [plugins.configs.agent.personas.strict]
+# system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
+
 # 内嵌配置页，不要和 adapter.event_listen 抢端口
 [admin]
 listen = "127.0.0.1:8787"

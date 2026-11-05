@@ -167,9 +167,14 @@ Codeforces 排行。`.rank` 和 `.rk` 相同。`{year*}` 可写多个年级，�
 |---|---|
 | `.luck N` | 在 1～N 里抽一个整数，`N ≥ 1` |
 
+### agent
+
+被叫到就接话的动态插件。`.agent` 可以清空当前会话、切换人设、查看这一小时还剩几次。配置、环境变量和部署见 [agent 插件](docs/agent.md)。
+
 ## 文档
 
 - [插件说明](docs/plugins.md)（写插件、分发、Scope、配置、动态 `.so`、管理页 API）
+- [agent 插件](docs/agent.md)（对话、人设、每小时次数、部署）
 - [插件运行时取舍](docs/plugin-lifecycle.md)
 - [本期不做](docs/out-of-scope.md)
 - [以后再说](docs/later.md)
