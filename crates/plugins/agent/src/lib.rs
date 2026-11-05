@@ -6,7 +6,7 @@ mod session;
 mod trigger;
 
 pub use client::{ChatMessage, LlmClient, LlmError, Role};
-pub use config::{AgentConfig, RateLimit};
+pub use config::{AgentConfig, ApiKind, RateLimit};
 
 use async_trait::async_trait;
 use fujiang_core::{
