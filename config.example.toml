@@ -85,7 +85,7 @@ enabled = true
 # priority = 10
 # base_url = "https://api.deepseek.com"
 # model = "deepseek-flash"
-# api = "chat"              # chat | responses（默认 chat）
+# # 只走 Responses：POST {base_url}/responses；旧字段 api 若存在会被忽略
 # api_key_env = "FUJIANG_LLM_KEY"
 # temperature = 0.7
 # max_history_turns = 20
