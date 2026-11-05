@@ -124,7 +124,7 @@ impl AgentPlugin {
             }
         };
         let messages = build_messages(&cfg.system_prompt, history, user_text.clone());
-        let reply = match client.chat_completions(&messages).await {
+        let reply = match client.complete(&messages).await {
             Ok(reply) => reply,
             Err(err) => {
                 say(ctx, msg, llm_reply(&err)).await;
