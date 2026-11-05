@@ -6,6 +6,7 @@ members = [
     "crates/fujiang-core",
     "crates/fujiang-store",
     "crates/fujiang",
+    "crates/plugins/agent",
     "crates/plugins/contest",
     "crates/plugins/rank",
     "crates/plugins/problem",
