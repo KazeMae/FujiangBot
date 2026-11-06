@@ -80,12 +80,24 @@ fn schedule_pack_stays_closed_until_opened() {
         .all(|spec| !spec.name().starts_with("schedule.")));
     let mut opened = BTreeSet::new();
     let now = opened.clone();
-    let blocked = skills::exec("schedule_create", &json!({}), &now, &mut opened);
+    let blocked = skills::exec(
+        "schedule_create",
+        &json!({}),
+        BuiltinTools::OFF,
+        &now,
+        &mut opened,
+    );
     match blocked {
         Some(skills::SkillOut::Ready(Err(tag))) => assert_eq!(tag, CLOSED_SKILL),
         other => panic!("{other:?}"),
     }
-    let listed = match skills::exec("skills_list", &json!({}), &now, &mut opened) {
+    let listed = match skills::exec(
+        "skills_list",
+        &json!({}),
+        BuiltinTools::OFF,
+        &now,
+        &mut opened,
+    ) {
         Some(skills::SkillOut::Ready(Ok(value))) => value,
         other => panic!("{other:?}"),
     };
@@ -104,6 +116,7 @@ fn schedule_pack_stays_closed_until_opened() {
     skills::exec(
         "skills_open",
         &json!({"name": " schedule "}),
+        BuiltinTools::OFF,
         &now,
         &mut opened,
     );

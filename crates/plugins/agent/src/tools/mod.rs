@@ -16,6 +16,8 @@ use crate::client::{
     ChatMessage, FunctionCall, FunctionTool, LlmClient, LlmError, ModelOutput, PriorCall,
 };
 
+mod contest_pack;
+mod fun_pack;
 mod qq_read;
 mod schedule_pack;
 mod skills;
@@ -274,21 +276,6 @@ fn builtin_specs(builtins: BuiltinTools) -> Vec<ToolSpec> {
             }),
         ));
     }
-    if builtins.contest {
-        specs.push(builtin_spec(
-            "contest.upcoming",
-            "列出即将开始的比赛。可选字符串参数 oj，例如 Codeforces 或 Atcoder。不传则返回全部。",
-            serde_json::json!({
-                "type": "object",
-                "properties": { "oj": { "type": "string" } }
-            }),
-        ));
-        specs.push(builtin_spec(
-            "contest.today",
-            "列出今天开始的比赛。不需要参数。",
-            default_parameters(),
-        ));
-    }
     if builtins.problem {
         specs.push(builtin_spec(
             "problem.today",
@@ -310,34 +297,6 @@ fn builtin_specs(builtins: BuiltinTools) -> Vec<ToolSpec> {
             serde_json::json!({
                 "type": "object",
                 "properties": { "body": { "type": "string" } }
-            }),
-        ));
-    }
-    if builtins.fun {
-        specs.push(builtin_spec(
-            "fun.tags",
-            "列出图库的 tag，含条数和别名。旧专辑也在这份清单里。不需要参数。还没有 tag 时是空数组。",
-            default_parameters(),
-        ));
-        specs.push(builtin_spec(
-            "fun.stars",
-            "列出收藏夹的名称和链接。不需要参数。还没有收藏时是空数组。",
-            default_parameters(),
-        ));
-        specs.push(builtin_spec(
-            "fun.learn",
-            "列出当前会话的学话。可选字符串 trigger，只返回这个触发词。群里看本群，私聊看全局。还没有时是空数组。",
-            serde_json::json!({
-                "type": "object",
-                "properties": { "trigger": { "type": "string" } }
-            }),
-        ));
-        specs.push(builtin_spec(
-            "fun.search",
-            "在 tag、收藏和当前会话的学话里按原文查找。字符串参数 q。q 为空时这次调用失败。",
-            serde_json::json!({
-                "type": "object",
-                "properties": { "q": { "type": "string" } }
             }),
         ));
     }
@@ -411,7 +370,7 @@ pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
     pass: &ToolPass<'_>,
     hub: &H,
 ) -> ToolTurn {
-    tool_loop(client, messages, pass, hub, |opened| {
+    tool_loop(client, messages, builtins, pass, hub, |opened| {
         skills::round_tools(configured, builtins, opened)
     })
     .await
@@ -420,6 +379,7 @@ pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
 async fn tool_loop<H, F>(
     client: &LlmClient,
     messages: &[ChatMessage],
+    builtins: BuiltinTools,
     pass: &ToolPass<'_>,
     hub: &H,
     mut visible: F,
@@ -492,7 +452,9 @@ where
                             );
                         }
                     };
-                    if let Some(step) = skills::exec(&call.name, &args, &opened_now, &mut opened) {
+                    if let Some(step) =
+                        skills::exec(&call.name, &args, builtins, &opened_now, &mut opened)
+                    {
                         match step {
                             skills::SkillOut::Ready(Ok(value)) => {
                                 prior.push(prior_call(call, value));

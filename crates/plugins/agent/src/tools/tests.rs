@@ -61,14 +61,8 @@ fn builtin_tools_follow_the_switches() {
         vec![
             "rank_list",
             "rank_get",
-            "contest_upcoming",
-            "contest_today",
             "problem_today",
             "memo_list",
-            "fun_tags",
-            "fun_stars",
-            "fun_learn",
-            "fun_search",
             "memory_list",
             "memory_get",
             "memory_upsert",
@@ -98,39 +92,24 @@ fn builtin_tools_follow_the_switches() {
         })
     );
     assert!(on[1].parameters().get("required").is_none());
-    assert_eq!(on[2].service(), "contest");
-    assert_eq!(on[2].method(), "upcoming");
+    assert!(on.iter().all(|spec| spec.service() != "contest"));
+    assert!(on.iter().all(|spec| spec.service() != "fun"));
+    assert_eq!(on[2].service(), "problem");
+    assert_eq!(on[2].method(), "today");
+    assert_eq!(on[2].wire_name(), "problem_today");
     assert_eq!(
         on[2].description(),
-        "列出即将开始的比赛。可选字符串参数 oj，例如 Codeforces 或 Atcoder。不传则返回全部。"
-    );
-    assert_eq!(
-        on[2].parameters(),
-        &json!({
-            "type": "object",
-            "properties": { "oj": { "type": "string" } }
-        })
-    );
-    assert!(on[2].parameters().get("required").is_none());
-    assert_eq!(on[3].method(), "today");
-    assert_eq!(on[3].description(), "列出今天开始的比赛。不需要参数。");
-    assert_eq!(on[3].parameters(), &default_parameters());
-    assert_eq!(on[4].service(), "problem");
-    assert_eq!(on[4].method(), "today");
-    assert_eq!(on[4].wire_name(), "problem_today");
-    assert_eq!(
-        on[4].description(),
         "返回当前每日一题里已经保存的题目。不需要参数。还没保存时是空数组。"
     );
-    assert_eq!(on[4].parameters(), &default_parameters());
-    assert_eq!(on[5].service(), "memo");
-    assert_eq!(on[5].method(), "list");
-    assert_eq!(on[5].wire_name(), "memo_list");
+    assert_eq!(on[2].parameters(), &default_parameters());
+    assert_eq!(on[3].service(), "memo");
+    assert_eq!(on[3].method(), "list");
+    assert_eq!(on[3].wire_name(), "memo_list");
     assert_eq!(
-        on[5].description(),
+        on[3].description(),
         "列出当前对话已经记下的备忘。不需要参数。还没有备忘时是空数组。"
     );
-    assert_eq!(on[5].parameters(), &default_parameters());
+    assert_eq!(on[3].parameters(), &default_parameters());
     assert!(on.iter().all(|spec| spec.name() != "memo.add"));
 
     let rank_only = assemble_tools(
@@ -154,13 +133,7 @@ fn builtin_tools_follow_the_switches() {
             ..BuiltinTools::OFF
         },
     );
-    assert_eq!(
-        contest_only
-            .iter()
-            .map(ToolSpec::wire_name)
-            .collect::<Vec<_>>(),
-        vec!["contest_upcoming", "contest_today"]
-    );
+    assert!(contest_only.is_empty());
     let problem_only = assemble_tools(
         &[],
         BuiltinTools {
@@ -179,8 +152,8 @@ fn builtin_tools_follow_the_switches() {
 
     let extra = ToolSpec::parse("memo.search", "查备忘", json!({})).unwrap();
     let with_extra = assemble_tools(&[extra], BuiltinTools::ON);
-    assert_eq!(with_extra[15].name(), "memo.search");
-    assert_eq!(with_extra[15].wire_name(), "memo_search");
+    assert_eq!(with_extra[9].name(), "memo.search");
+    assert_eq!(with_extra[9].wire_name(), "memo_search");
 
     let write = assemble_tools(
         &[],
@@ -219,7 +192,7 @@ fn builtin_tools_follow_the_switches() {
     )
     .unwrap();
     let kept_builtin = assemble_tools(std::slice::from_ref(&configured), BuiltinTools::ON);
-    assert_eq!(kept_builtin.len(), 15);
+    assert_eq!(kept_builtin.len(), 9);
     assert_eq!(kept_builtin[0].description(), on[0].description());
     assert_eq!(kept_builtin[0].parameters(), on[0].parameters());
 
@@ -239,14 +212,8 @@ fn catalog_lists_logical_names_for_the_enabled_set() {
         "可用工具：\n\
 rank.list：列出本群 Codeforces 榜上的队员，含 handle 和 rating。不需要参数。\n\
 rank.get：按 Codeforces handle 查一位已登记队员。可选字符串参数 handle。不传则这次查询失败。\n\
-contest.upcoming：列出即将开始的比赛。可选字符串参数 oj，例如 Codeforces 或 Atcoder。不传则返回全部。\n\
-contest.today：列出今天开始的比赛。不需要参数。\n\
 problem.today：返回当前每日一题里已经保存的题目。不需要参数。还没保存时是空数组。\n\
 memo.list：列出当前对话已经记下的备忘。不需要参数。还没有备忘时是空数组。\n\
-fun.tags：列出图库的 tag，含条数和别名。旧专辑也在这份清单里。不需要参数。还没有 tag 时是空数组。\n\
-fun.stars：列出收藏夹的名称和链接。不需要参数。还没有收藏时是空数组。\n\
-fun.learn：列出当前会话的学话。可选字符串 trigger，只返回这个触发词。群里看本群，私聊看全局。还没有时是空数组。\n\
-fun.search：在 tag、收藏和当前会话的学话里按原文查找。字符串参数 q。q 为空时这次调用失败。\n\
 memory.list：列出分层记忆的键。可选字符串 scope：account、group 或 user。不传时群里看账号、本群和当前发言人，私聊看账号和当前发言人。还没有时是空数组。\n\
 memory.get：读取一条分层记忆。字符串 scope 和 key。没有这条时结果是 null。\n\
 memory.upsert：写入或覆盖一条分层记忆。字符串 scope、key、value。value 最多 500 个字。user 只写当前发言人，group 只写当前群。\n\
@@ -290,7 +257,7 @@ async fn tool_call_round_trips_through_the_hub_then_returns_text() {
     let schema = json!({"type": "object", "properties": {"limit": {"type": "integer"}}});
     let tools = vec![
         ToolSpec::parse("rank.list", "当前榜", schema.clone()).unwrap(),
-        ToolSpec::parse("contest.upcoming", "近期比赛", json!({"type": "object"})).unwrap(),
+        ToolSpec::parse("echo.ping", "近期比赛", json!({"type": "object"})).unwrap(),
     ];
     let hub = Rec::default();
     let messages = vec![
@@ -313,7 +280,7 @@ async fn tool_call_round_trips_through_the_hub_then_returns_text() {
         hub.log.lock().unwrap().clone(),
         vec![
             ("rank".into(), "list".into(), json!({"limit": 2})),
-            ("contest".into(), "upcoming".into(), json!({})),
+            ("echo".into(), "ping".into(), json!({})),
         ]
     );
     let bodies = script.bodies.lock().unwrap().clone();
@@ -323,7 +290,7 @@ async fn tool_call_round_trips_through_the_hub_then_returns_text() {
     assert_eq!(bodies[0]["tools"][0]["name"], "rank_list");
     assert_eq!(bodies[0]["tools"][0]["description"], "当前榜");
     assert_eq!(bodies[0]["tools"][0]["parameters"], schema);
-    assert_eq!(bodies[0]["tools"][1]["name"], "contest_upcoming");
+    assert_eq!(bodies[0]["tools"][1]["name"], "echo_ping");
     assert_eq!(bodies[0]["instructions"], "be brief");
     assert_eq!(bodies[0]["input"].as_array().unwrap().len(), 1);
     assert!(bodies[0].get("previous_response_id").is_none());
@@ -339,10 +306,10 @@ async fn tool_call_round_trips_through_the_hub_then_returns_text() {
     assert_eq!(input[2]["type"], "function_call_output");
     assert_eq!(input[2]["call_id"], "call_rank");
     assert_eq!(input[2]["output"], r#"{"via":"rank.list"}"#);
-    assert_eq!(input[3]["name"], "contest_upcoming");
+    assert_eq!(input[3]["name"], "echo_ping");
     assert_eq!(input[3]["arguments"], "{}");
     assert_eq!(input[4]["type"], "function_call_output");
-    assert_eq!(input[4]["output"], r#"{"via":"contest.upcoming"}"#);
+    assert_eq!(input[4]["output"], r#"{"via":"echo.ping"}"#);
     assert_eq!(bodies[1]["instructions"], "be brief");
     assert!(bodies[1].get("previous_response_id").is_none());
 }
@@ -429,10 +396,17 @@ async fn empty_tools_call_complete_once() {
     let client = test_client(&base);
     let hub = Rec::default();
     let pass = ToolPass::rounds(3);
-    let reply = super::tool_loop(&client, &user("在吗"), &pass, &hub, |_| Vec::new())
-        .await
-        .reply
-        .unwrap();
+    let reply = super::tool_loop(
+        &client,
+        &user("在吗"),
+        BuiltinTools::OFF,
+        &pass,
+        &hub,
+        |_| Vec::new(),
+    )
+    .await
+    .reply
+    .unwrap();
     assert_eq!(reply, ToolReply::Text("本周有两场".into()));
     assert!(hub.log.lock().unwrap().is_empty());
     assert_eq!(script.hits.load(Ordering::SeqCst), 1);
@@ -456,7 +430,7 @@ async fn missing_call_id_is_a_decode_error() {
 }
 
 #[tokio::test]
-async fn builtin_rank_and_contest_calls_return_the_model_text() {
+async fn builtin_rank_and_problem_calls_return_the_model_text() {
     let script = Script::new(Kind::ThreeThenText);
     let base = spawn_app(script.clone()).await;
     let client = test_client(&base);
@@ -471,20 +445,12 @@ async fn builtin_rank_and_contest_calls_return_the_model_text() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        reply,
-        ToolReply::Text("今天 Codeforces 一场。榜上 12 人。".into())
-    );
+    assert_eq!(reply, ToolReply::Text("榜上 12 人。今天有一题。".into()));
     assert_eq!(
         hub.log.lock().unwrap().clone(),
         vec![
             ("rank".into(), "list".into(), json!({})),
-            (
-                "contest".into(),
-                "upcoming".into(),
-                json!({"oj": "Codeforces"})
-            ),
-            ("contest".into(), "today".into(), json!({})),
+            ("problem".into(), "today".into(), json!({})),
         ]
     );
     let bodies = script.bodies.lock().unwrap().clone();
@@ -500,14 +466,8 @@ async fn builtin_rank_and_contest_calls_return_the_model_text() {
         vec![
             "rank_list",
             "rank_get",
-            "contest_upcoming",
-            "contest_today",
             "problem_today",
             "memo_list",
-            "fun_tags",
-            "fun_stars",
-            "fun_learn",
-            "fun_search",
             "memory_list",
             "memory_get",
             "memory_upsert",
@@ -524,42 +484,8 @@ async fn builtin_rank_and_contest_calls_return_the_model_text() {
     assert_eq!(bodies[1]["input"][2]["output"], r#"{"via":"rank.list"}"#);
     assert_eq!(
         bodies[1]["input"][4]["output"],
-        r#"{"via":"contest.upcoming"}"#
+        r#"{"via":"problem.today"}"#
     );
-    assert_eq!(
-        bodies[1]["input"][6]["output"],
-        r#"{"via":"contest.today"}"#
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn builtin_contest_today_error_uses_the_degraded_reply() {
-    let catch = Catch::default();
-    let _guard = tracing::subscriber::set_default(catch.clone());
-    let script = Script::new(Kind::TodayCall);
-    let base = spawn_app(script.clone()).await;
-    let client = test_client(&base);
-    let hub = Rec {
-        log: Mutex::new(Vec::new()),
-        fail: true,
-    };
-    let reply = reply_of(
-        &client,
-        &user("今天有比赛吗"),
-        &[],
-        BuiltinTools::ON,
-        3,
-        &hub,
-    )
-    .await
-    .unwrap();
-    assert_eq!(reply, ToolReply::Degraded(TOOL_FAIL_REPLY));
-    let log = hub.log.lock().unwrap().clone();
-    assert_eq!(log.len(), 1);
-    assert_eq!(log[0].0, "contest");
-    assert_eq!(log[0].1, "today");
-    assert_eq!(script.hits.load(Ordering::SeqCst), 1);
-    assert!(catch.has("agent tool"));
 }
 
 #[tokio::test]
@@ -651,13 +577,12 @@ async fn disabled_builtin_group_stays_out_of_the_request() {
     assert_eq!(
         names,
         vec![
-            "contest_upcoming".to_string(),
-            "contest_today".to_string(),
             "memo_search".to_string(),
             "skills_list".to_string(),
             "skills_open".to_string(),
         ]
     );
+    assert!(names.iter().all(|name| !name.starts_with("contest_")));
     assert!(hub.log.lock().unwrap().is_empty());
 }
 
@@ -724,12 +649,10 @@ enum Kind {
     Unknown,
     MissingId,
     ThreeThenText,
-    TodayCall,
     GetAndToday,
     ProblemCall,
     Metered,
     MemoList,
-    FunLearn,
     MemoryUpsert,
     MemoryBad,
 }
@@ -787,8 +710,7 @@ async fn handle(State(script): State<Script>, Json(body): Json<Value>) -> Json<V
         Kind::Unknown if n == 0 => one_call_with("call_x", "no_such", "{}"),
         Kind::Unknown => text_body(),
         Kind::ThreeThenText if n == 0 => three_calls(),
-        Kind::ThreeThenText => saying("今天 Codeforces 一场。榜上 12 人。"),
-        Kind::TodayCall => one_call_with("call_today", "contest_today", "{}"),
+        Kind::ThreeThenText => saying("榜上 12 人。今天有一题。"),
         Kind::GetAndToday if n == 0 => get_and_today(),
         Kind::GetAndToday => saying("tourist 是 3000。今天有一题。"),
         Kind::ProblemCall => one_call_with("call_problem", "problem_today", "{}"),
@@ -810,10 +732,6 @@ async fn handle(State(script): State<Script>, Json(body): Json<Value>) -> Json<V
         }),
         Kind::MemoList if n == 0 => one_call_with("call_memo", "memo_list", "{}"),
         Kind::MemoList => saying("这个对话有一条备忘。"),
-        Kind::FunLearn if n == 0 => {
-            one_call_with("call_fun", "fun_learn", r#"{"group_id":99,"trigger":"猫"}"#)
-        }
-        Kind::FunLearn => saying("学话里有一条。"),
         Kind::MemoryUpsert if n == 0 => one_call_with(
             "call_mem",
             "memory_upsert",
@@ -860,14 +778,8 @@ fn three_calls() -> Value {
             },
             {
                 "type": "function_call",
-                "call_id": "call_up",
-                "name": "contest_upcoming",
-                "arguments": "{\"oj\":\"Codeforces\"}"
-            },
-            {
-                "type": "function_call",
-                "call_id": "call_today",
-                "name": "contest_today",
+                "call_id": "call_problem",
+                "name": "problem_today",
                 "arguments": "{}"
             }
         ]
@@ -904,8 +816,8 @@ fn two_calls() -> Value {
             },
             {
                 "type": "function_call",
-                "call_id": "call_contest",
-                "name": "contest_upcoming",
+                "call_id": "call_echo",
+                "name": "echo_ping",
                 "arguments": "{}"
             }
         ]
@@ -947,6 +859,8 @@ impl ToolHub for Rec {
     }
 }
 
+#[path = "contest_pack_tests.rs"]
+mod contest_pack_tests;
 #[path = "fun_tests.rs"]
 mod fun_tests;
 #[path = "memo_tests.rs"]

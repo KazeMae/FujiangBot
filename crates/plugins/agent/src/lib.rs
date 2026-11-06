@@ -513,9 +513,10 @@ mod tests {
         assert!(rank.contains("rank.get："));
         assert!(!rank.contains("别的说明"));
         assert!(!rank.contains("contest.upcoming"));
+        assert!(!rank.contains("contest.today"));
         assert!(rank.contains("memo.list："));
-        assert!(rank.contains("fun.tags："));
-        assert!(rank.contains("fun.search："));
+        assert!(!rank.contains("fun.tags"));
+        assert!(!rank.contains("fun.search"));
         assert!(!rank.contains("memo.add"));
         assert!(!rank.contains("fun.delete"));
         assert!(!rank.contains('_'));

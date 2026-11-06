@@ -77,11 +77,11 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 | `timeout_secs` | `60` | 单次请求的超时秒数。写成 `0` 时仍是 60 秒。工具循环里的每一次模型请求都用这个值 |
 | `max_tool_rounds` | `3` | 一轮发言里最多执行几次工具。到顶后模型还要调用工具时，回复一句中文并停下。`0` 表示一次都不执行 |
 | `enable_rank_tools` | `true` | 为 false 时，请求不带 `rank_list` 和 `rank_get`。缺省或类型不对时仍是 true |
-| `enable_contest_tools` | `true` | 为 false 时，请求不带 `contest_upcoming` 和 `contest_today`。缺省或类型不对时仍是 true |
+| `enable_contest_tools` | `true` | 为 false 时，`skills.list` 不列技能包 `contest`，`skills.open` 把它当未知包。为 true 时，打开 `contest` 之后的请求才带 `contest_upcoming` 和 `contest_today`。缺省或类型不对时仍是 true |
 | `enable_problem_tools` | `true` | 为 false 时，请求不带 `problem_today`。缺省或类型不对时仍是 true |
 | `enable_memo_tools` | `true` | 为 false 时，请求不带 `memo_list`，也不带 `memo_add`。缺省或类型不对时仍是 true |
 | `enable_memo_write_tools` | `false` | 为 true 且 `enable_memo_tools` 为 true 时，请求才带 `memo_add`。缺省或类型不对时是 false |
-| `enable_fun_tools` | `true` | 为 false 时，请求不带 `fun_tags`、`fun_stars`、`fun_learn`、`fun_search`。缺省或类型不对时仍是 true |
+| `enable_fun_tools` | `true` | 为 false 时，`skills.list` 不列技能包 `fun`，`skills.open` 把它当未知包。为 true 时，打开 `fun` 之后的请求才带 `fun_tags`、`fun_stars`、`fun_learn`、`fun_search`。缺省或类型不对时仍是 true |
 | `enable_memory_tools` | `true` | 为 false 时，请求不带五个 `memory_*`。缺省或类型不对时仍是 true |
 | `enable_memory_write_tools` | `true` | 为 true 且 `enable_memory_tools` 为 true 时，请求才带 `memory_upsert`、`memory_forget` 和 `memory_consolidate`。缺省或类型不对时是 true |
 | `memory_max_unused_days` | `90` | 整理时，上次使用早于这么多天的删掉。从未使用的改看 `updated_at`。缺省或类型不对时是 90。写成 `0` 时窗口就是 0 天 |
@@ -126,11 +126,13 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
 ## 工具
 
-适配层把 Responses 的 `function_call` 交给 ServiceHub。模型返回 `function_call` 时，插件按工具名调用 `ctx.call`。`memory` 例外，直接读写本插件的 sqlite。`skills` 和占位包 `ping` 由本插件直接回答。`qq.read` 和 `schedule` 也由本插件处理，不走 ServiceHub。结果放进下一次请求的 `function_call_output`。模型返回文本后，这一轮结束。工具来回只留在这一轮的内存里。会话表仍只保存用户原文和最终回复。分层记忆写在另一张表，见上文「分层记忆」。定时任务写在 `scheduled_jobs`，见下文「数据与部署」。
+适配层把 Responses 的 `function_call` 交给 ServiceHub。模型返回 `function_call` 时，插件按工具名调用 `ctx.call`。`memory` 例外，直接读写本插件的 sqlite。`skills` 和占位包 `ping` 由本插件直接回答。`qq.read` 和 `schedule` 也由本插件处理，不走 ServiceHub。`fun` 和 `contest` 是技能包，打开之后仍走 ServiceHub。结果放进下一次请求的 `function_call_output`。模型返回文本后，这一轮结束。工具来回只留在这一轮的内存里。会话表仍只保存用户原文和最终回复。分层记忆写在另一张表，见上文「分层记忆」。定时任务写在 `scheduled_jobs`，见下文「数据与部署」。
 
 工具名的格式是 `服务.方法`。第一个 `.` 之前是服务名，之后是方法名。`rank.list` 调用 rank 的 `list`。`rank.get` 调用 rank 的 `get`。`contest.upcoming` 调用 contest 的 `upcoming`。`problem.today` 调用 problem 的 `today`。Responses 要求函数名匹配 `^[a-zA-Z0-9_-]+$`，所以请求里的 `name` 把 `.` 换成 `_`。`rank.list` 发出去是 `rank_list`。`rank.get` 发出去是 `rank_get`。
 
-默认带十七个常驻工具。十五个是原来的业务工具，另外两个是 `skills.list` 和 `skills.open`，没有开关。`memo.add` 默认不带。fun 不注册写工具，也没有删除图库的方法。分层记忆的读写默认都带。技能包里的工具不在这十七个里。`schedule` 是其中一个包，打开名是 `schedule`。四个工具是 `schedule.list`、`schedule.create`、`schedule.update`、`schedule.cancel`，请求里是 `schedule_list`、`schedule_create`、`schedule_update`、`schedule_cancel`。创建者 QQ 由宿主写入当前发言人。到点只发文字：群要求创建者仍是成员，私聊只发给创建者本人。打开规则和投递见 [agent skills](agent-skills.md)。
+默认带十一个常驻工具。九个是业务工具：`rank.list`、`rank.get`、`problem.today`、`memo.list`、`memory.list`、`memory.get`、`memory.upsert`、`memory.forget`、`memory.consolidate`。另外两个是 `skills.list` 和 `skills.open`，没有开关。`memo.add` 默认不带。分层记忆的读写默认都带。`fun` 和 `contest` 是技能包，不在这十一个里。fun 不注册写工具，也没有删除图库的方法。其它技能包里的工具也不在这十一个里。`schedule` 是其中一个包，打开名是 `schedule`。四个工具是 `schedule.list`、`schedule.create`、`schedule.update`、`schedule.cancel`，请求里是 `schedule_list`、`schedule_create`、`schedule_update`、`schedule_cancel`。创建者 QQ 由宿主写入当前发言人。到点只发文字：群要求创建者仍是成员，私聊只发给创建者本人。打开规则和投递见 [agent skills](agent-skills.md)。
+
+下表里的 `contest.*` 和 `fun.*` 要等对应的包打开才进入请求。`memo.add` 仍默认不注册。表里其余行在各自开关打开时属于常驻工具。
 
 | 配置名 | 请求里的函数名 | 调用 | 参数 |
 |---|---|---|---|
@@ -159,11 +161,11 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
 `problem.today` 返回数组。每项有 `date`、`band`、`contest_id`、`idx`、`url`。这一天还没有保存的题目时，数组是空的。日期和 `.每日一题` 用同一个规则。过了 `daily_reset_hour` 才换下一天。这个方法只读。调用 `problem.today` 不会抽新题。
 
-`enable_rank_tools` 为 false 时，请求不带 `rank_list` 和 `rank_get`。`enable_contest_tools` 为 false 时，请求不带 `contest_upcoming` 和 `contest_today`。`enable_problem_tools` 为 false 时，请求不带 `problem_today`。这三个字段缺省时按 true 处理。类型不是布尔值时也按 true 处理。
+`enable_rank_tools` 为 false 时，请求不带 `rank_list` 和 `rank_get`。`enable_problem_tools` 为 false 时，请求不带 `problem_today`。这两个字段缺省时按 true 处理。类型不是布尔值时也按 true 处理。`enable_contest_tools` 同样默认 true。为 false 时，`skills.list` 不列 `contest`，`skills.open` 把它当未知包，请求里也不会出现 `contest_upcoming` 和 `contest_today`。为 true 时，要先 `skills.open`，`name` 是 `contest`，后续回合才带上这两个工具。
 
 `enable_memo_tools` 同样默认 true。为 false 时，请求不带 `memo_list` 和 `memo_add`。`enable_memo_write_tools` 默认 false。只有它和 `enable_memo_tools` 都是 true 时，请求才带 `memo_add`。
 
-`enable_fun_tools` 默认 true。为 false 时，请求不带 `fun_tags`、`fun_stars`、`fun_learn`、`fun_search`。缺省或类型不对时仍是 true。没有 `enable_fun_write_tools`。fun 服务只有这四个读方法。`delete`、`retire`、`add` 这类名字会报错，图库行还在。
+`enable_fun_tools` 默认 true。为 false 时，`skills.list` 不列 `fun`，`skills.open` 把它当未知包，请求里也不会出现 `fun_tags`、`fun_stars`、`fun_learn`、`fun_search`。缺省或类型不对时仍是 true。为 true 时，要先 `skills.open`，`name` 是 `fun`，后续回合才带上这四个工具。没有 `enable_fun_write_tools`。fun 服务只有这四个读方法。`delete`、`retire`、`add` 这类名字会报错，图库行还在。
 
 `memory.list` 按层返回键。不传 `scope` 时，群里是账号、本群和当前发言人，私聊是账号和当前发言人。返回的每一条都记一次使用。`memory.get` 没有这条时结果是 null，并且不加用量。读到时记一次使用。`memory.upsert` 的 `value` 最多 500 个字。`user` 的编号是当前发言人，`group` 的编号是当前群，`account` 的编号是空字符串。模型传来的 `user_id` 会被盖掉。`memory.forget` 在 `prefix` 为 true 时按前缀删除。`memory.consolidate` 的规则见上文「分层记忆」。这五个工具不走 ServiceHub。
 
@@ -179,7 +181,7 @@ fun 编进 fujiang。`on_start` 执行 `ctx.provide("fun", …)`。四个读方�
 
 `fun.search` 在 tag 的名字和别名、收藏的名称和链接、以及当前会话的学话里做包含匹配。匹配按原文，`cat` 对不上 `Cat`。学话的范围和 `fun.learn` 相同。返回对象有 `tags`、`stars`、`learn` 三个数组，形状和上面三个方法一样。`q` 缺失或空白时，服务返回错误，用户看到「我没查成，过一会儿再问我一次。」查不到时三个数组都是空的，这不是错误。
 
-`[[plugins.configs.agent.tools]]` 可以再追加别的 `服务.方法`。配置项的函数名和某个已启用内置工具相同，就留下内置的那一项。这个内置工具的开关为 false 时，同名配置项会发出去。
+`[[plugins.configs.agent.tools]]` 可以再追加别的 `服务.方法`。配置项的函数名和某个已启用内置工具相同，就留下内置的那一项。这个内置工具的开关为 false 时，同名配置项会发出去。`fun.*` 和 `contest.*` 走技能包的规则：没打开时不发出去，打开之后用包里的说明。开关为 false 时，这两类名字也不从配置项里发出去。
 
 `skills.list` 和 `skills.open` 每次都在请求里。业务工具仍按各自的开关组装。正常请求因此带 `tools`，并走工具循环。一轮发言里的执行次数不超过 `max_tool_rounds`。打开一个技能包花掉其中一次。工具列表在代码里变成空时，请求不带 `tools`，插件只调用一次 `LlmClient::complete`。当前这两个常驻工具不会把列表变空。
 
