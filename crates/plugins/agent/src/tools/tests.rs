@@ -152,10 +152,12 @@ async fn tool_call_round_trips_through_the_hub_then_returns_text() {
         ChatMessage {
             role: Role::System,
             content: "be brief".into(),
+            images: Vec::new(),
         },
         ChatMessage {
             role: Role::User,
             content: "最近有比赛吗".into(),
+            images: Vec::new(),
         },
     ];
     let reply = run_tool_loop(&client, &messages, &tools, BuiltinTools::OFF, 3, &hub)
@@ -438,6 +440,7 @@ fn user(text: &str) -> Vec<ChatMessage> {
     vec![ChatMessage {
         role: Role::User,
         content: text.into(),
+        images: Vec::new(),
     }]
 }
 

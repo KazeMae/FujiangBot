@@ -100,7 +100,11 @@ pub async fn recent_turns(
         let Some(role) = parse_role(&role) else {
             continue;
         };
-        out.push(ChatMessage { role, content });
+        out.push(ChatMessage {
+            role,
+            content,
+            images: Vec::new(),
+        });
     }
     Ok(out)
 }
@@ -368,10 +372,12 @@ mod tests {
                 ChatMessage {
                     role: Role::User,
                     content: "u3".into(),
+                    images: Vec::new(),
                 },
                 ChatMessage {
                     role: Role::Assistant,
                     content: "a3".into(),
+                    images: Vec::new(),
                 },
             ]
         );

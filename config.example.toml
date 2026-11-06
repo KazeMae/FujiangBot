@@ -90,6 +90,10 @@ enabled = true
 # temperature = 0.7
 # max_history_turns = 20
 # timeout_secs = 60
+# vision_enabled = false
+# max_image_bytes = 5242880
+# # 默认不看图。改成 true 之后，当前消息里的图片才会取字节，并放进 Responses 的 input_image。
+# # 单张超过 max_image_bytes 就回复一句中文，不调用模型。写成 0 时仍是 5242880。
 # max_tool_rounds = 3
 # enable_rank_tools = true
 # enable_contest_tools = true

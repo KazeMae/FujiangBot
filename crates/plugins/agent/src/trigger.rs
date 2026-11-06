@@ -82,12 +82,14 @@ pub fn build_messages(
         messages.push(ChatMessage {
             role: Role::System,
             content: prompt.to_string(),
+            images: Vec::new(),
         });
     }
     messages.extend(history);
     messages.push(ChatMessage {
         role: Role::User,
         content: user_text,
+        images: Vec::new(),
     });
     messages
 }
@@ -330,6 +332,7 @@ mod tests {
         let history = vec![ChatMessage {
             role: Role::Assistant,
             content: "早".into(),
+            images: Vec::new(),
         }];
         let messages = build_messages("  你是福酱  ", history, "天气".into());
         assert_eq!(messages.len(), 3);

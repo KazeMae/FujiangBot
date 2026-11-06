@@ -14,6 +14,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_MAX_TOOL_ROUNDS: u32 = 3;
 const DEFAULT_USER_RATE: u32 = 30;
 const DEFAULT_GROUP_RATE: u32 = 120;
+const DEFAULT_MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RateLimit {
@@ -42,6 +43,8 @@ pub struct AgentConfig {
     pub enable_rank_tools: bool,
     pub enable_contest_tools: bool,
     pub tools: Vec<ToolSpec>,
+    pub vision_enabled: bool,
+    pub max_image_bytes: u64,
 }
 
 impl AgentConfig {
@@ -64,6 +67,8 @@ impl AgentConfig {
             enable_rank_tools: bool_field(v, "enable_rank_tools", true),
             enable_contest_tools: bool_field(v, "enable_contest_tools", true),
             tools: tools_from(v),
+            vision_enabled: bool_field(v, "vision_enabled", false),
+            max_image_bytes: max_image_bytes_from(v),
         }
     }
 
@@ -131,6 +136,13 @@ fn timeout_secs_from(v: &Value) -> u64 {
     match v.get("timeout_secs").and_then(Value::as_u64) {
         Some(0) | None => DEFAULT_TIMEOUT_SECS,
         Some(secs) => secs,
+    }
+}
+
+fn max_image_bytes_from(v: &Value) -> u64 {
+    match v.get("max_image_bytes").and_then(Value::as_u64) {
+        Some(0) | None => DEFAULT_MAX_IMAGE_BYTES,
+        Some(n) => n,
     }
 }
 
@@ -230,6 +242,8 @@ mod tests {
         assert!(cfg.enable_rank_tools);
         assert!(cfg.enable_contest_tools);
         assert!(cfg.tools.is_empty());
+        assert!(!cfg.vision_enabled);
+        assert_eq!(cfg.max_image_bytes, 5 * 1024 * 1024);
     }
 
     #[test]
@@ -286,7 +300,9 @@ mod tests {
             "max_tool_rounds": "nope",
             "enable_rank_tools": "no",
             "enable_contest_tools": 0,
-            "tools": "nope"
+            "tools": "nope",
+            "vision_enabled": "yes",
+            "max_image_bytes": "big"
         }));
         assert_defaults(&cfg);
     }
@@ -378,5 +394,19 @@ mod tests {
         }));
         assert!(rank_only.enable_rank_tools);
         assert!(!rank_only.enable_contest_tools);
+    }
+
+    #[test]
+    fn vision_defaults_off_and_zero_cap_uses_five_mib() {
+        let on = AgentConfig::from_value(&json!({
+            "vision_enabled": true,
+            "max_image_bytes": 1024
+        }));
+        assert!(on.vision_enabled);
+        assert_eq!(on.max_image_bytes, 1024);
+
+        let zero = AgentConfig::from_value(&json!({ "max_image_bytes": 0 }));
+        assert!(!zero.vision_enabled);
+        assert_eq!(zero.max_image_bytes, 5 * 1024 * 1024);
     }
 }
