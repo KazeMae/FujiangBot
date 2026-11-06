@@ -59,6 +59,7 @@ async fn memo_list_fills_the_current_chat_and_a_missing_service_degrades() {
         problem: false,
         memo: true,
         memo_write: false,
+        fun: false,
     };
     let reply = run_tool_loop(&client, &user("备忘里有什么"), &[], memo_only, &pass, &hub)
         .await

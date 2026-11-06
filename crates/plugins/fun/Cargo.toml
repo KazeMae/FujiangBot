@@ -10,5 +10,6 @@ async-trait.workspace = true
 fujiang-core = { path = "../../fujiang-core" }
 fujiang-store = { path = "../../fujiang-store" }
 rand.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -1,7 +1,13 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use fujiang_core::{command, BotContext, Event, Flow, Interest, Plugin, PluginScope};
 use fujiang_store::{AttachResult, DetachResult};
 use tracing::warn;
+
+mod service;
+
+use service::FunService;
 
 const HELP: &str = "学话、收藏夹、图库。改学习/图库默认要在 fun.admins 里（名单空=谁都能改）。\n\
 【学话】原话触发。本群有条目只用本群的，没有则用导入/私聊里的全局词库。\n\
@@ -57,6 +63,15 @@ impl Plugin for FunPlugin {
 
     fn interest(&self) -> Interest {
         Interest::Messages
+    }
+
+    fn provides(&self) -> &'static [&'static str] {
+        &["fun"]
+    }
+
+    async fn on_start(&self, ctx: &BotContext, scope: &PluginScope) -> anyhow::Result<()> {
+        ctx.provide(scope, "fun", Arc::new(FunService::new(ctx.store.clone())))?;
+        Ok(())
     }
 
     async fn handle(
@@ -374,7 +389,7 @@ async fn handle_media_cmd(
             .await?;
         let text = match ctx
             .store
-            .image_attach(&img.md5, &name, msg.user_id())
+            .image_attach(&img.md5, name, msg.user_id())
             .await?
         {
             AttachResult::Attached => format!("已挂上 tag「{name}」🤫"),
@@ -383,7 +398,7 @@ async fn handle_media_cmd(
         ctx.reply_text(msg, text).await?;
     } else {
         let md5 = fujiang_store::md5_hex(&got.bytes);
-        let text = match ctx.store.image_detach(&md5, &name).await? {
+        let text = match ctx.store.image_detach(&md5, name).await? {
             DetachResult::Detached => format!("已从这条{kind}去掉 tag「{name}」"),
             DetachResult::NoSuchTag => format!("这条{kind}没有 tag「{name}」"),
             DetachResult::UnknownImage => format!("图库里没有这条{kind}"),
