@@ -13,7 +13,7 @@ use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Level, Metadata, Subscriber};
 
 use super::*;
-use crate::client::{ChatMessage, LlmClient, Role};
+use crate::client::{ChatMessage, LlmClient, LlmError, Role};
 use crate::config::AgentConfig;
 
 #[test]
@@ -248,7 +248,7 @@ async fn tool_call_round_trips_through_the_hub_then_returns_text() {
             images: Vec::new(),
         },
     ];
-    let reply = run_tool_loop(&client, &messages, &tools, BuiltinTools::OFF, 3, &hub)
+    let reply = reply_of(&client, &messages, &tools, BuiltinTools::OFF, 3, &hub)
         .await
         .unwrap();
     assert_eq!(reply, ToolReply::Text("本周有两场".into()));
@@ -299,7 +299,7 @@ async fn round_cap_degrades_without_another_hub_call() {
     let client = test_client(&base);
     let tools = vec![ToolSpec::parse("rank.list", "当前榜", json!({})).unwrap()];
     let hub = Rec::default();
-    let reply = run_tool_loop(&client, &user("再查"), &tools, BuiltinTools::OFF, 1, &hub)
+    let reply = reply_of(&client, &user("再查"), &tools, BuiltinTools::OFF, 1, &hub)
         .await
         .unwrap();
     assert_eq!(reply, ToolReply::Degraded(TOOL_CAP_REPLY));
@@ -311,7 +311,7 @@ async fn round_cap_degrades_without_another_hub_call() {
     let base = spawn_app(script.clone()).await;
     let client = test_client(&base);
     let hub = Rec::default();
-    let reply = run_tool_loop(&client, &user("再查"), &tools, BuiltinTools::OFF, 0, &hub)
+    let reply = reply_of(&client, &user("再查"), &tools, BuiltinTools::OFF, 0, &hub)
         .await
         .unwrap();
     assert_eq!(reply, ToolReply::Degraded(TOOL_CAP_REPLY));
@@ -332,7 +332,7 @@ async fn hub_and_tool_errors_degrade_and_warn() {
         log: Mutex::new(Vec::new()),
         fail: true,
     };
-    let reply = run_tool_loop(&client, &user("榜"), &tools, BuiltinTools::OFF, 3, &hub)
+    let reply = reply_of(&client, &user("榜"), &tools, BuiltinTools::OFF, 3, &hub)
         .await
         .unwrap();
     assert_eq!(reply, ToolReply::Degraded(TOOL_FAIL_REPLY));
@@ -345,7 +345,7 @@ async fn hub_and_tool_errors_degrade_and_warn() {
     let base = spawn_app(script.clone()).await;
     let client = test_client(&base);
     let hub = Rec::default();
-    let reply = run_tool_loop(&client, &user("榜"), &tools, BuiltinTools::OFF, 3, &hub)
+    let reply = reply_of(&client, &user("榜"), &tools, BuiltinTools::OFF, 3, &hub)
         .await
         .unwrap();
     assert_eq!(reply, ToolReply::Degraded(TOOL_FAIL_REPLY));
@@ -357,7 +357,7 @@ async fn hub_and_tool_errors_degrade_and_warn() {
     let base = spawn_app(script.clone()).await;
     let client = test_client(&base);
     let hub = Rec::default();
-    let reply = run_tool_loop(&client, &user("榜"), &tools, BuiltinTools::OFF, 3, &hub)
+    let reply = reply_of(&client, &user("榜"), &tools, BuiltinTools::OFF, 3, &hub)
         .await
         .unwrap();
     assert_eq!(reply, ToolReply::Degraded(TOOL_FAIL_REPLY));
@@ -371,7 +371,7 @@ async fn empty_tools_call_complete_once() {
     let base = spawn_app(script.clone()).await;
     let client = test_client(&base);
     let hub = Rec::default();
-    let reply = run_tool_loop(&client, &user("在吗"), &[], BuiltinTools::OFF, 3, &hub)
+    let reply = reply_of(&client, &user("在吗"), &[], BuiltinTools::OFF, 3, &hub)
         .await
         .unwrap();
     assert_eq!(reply, ToolReply::Text("本周有两场".into()));
@@ -389,7 +389,7 @@ async fn missing_call_id_is_a_decode_error() {
     let client = test_client(&base);
     let tools = vec![ToolSpec::parse("rank.list", "当前榜", json!({})).unwrap()];
     let hub = Rec::default();
-    let err = run_tool_loop(&client, &user("榜"), &tools, BuiltinTools::OFF, 3, &hub)
+    let err = reply_of(&client, &user("榜"), &tools, BuiltinTools::OFF, 3, &hub)
         .await
         .unwrap_err();
     assert!(matches!(err, LlmError::Decode(_)), "{err}");
@@ -402,7 +402,7 @@ async fn builtin_rank_and_contest_calls_return_the_model_text() {
     let base = spawn_app(script.clone()).await;
     let client = test_client(&base);
     let hub = Rec::default();
-    let reply = run_tool_loop(
+    let reply = reply_of(
         &client,
         &user("今天有比赛吗，榜怎么样"),
         &[],
@@ -472,7 +472,7 @@ async fn builtin_contest_today_error_uses_the_degraded_reply() {
         log: Mutex::new(Vec::new()),
         fail: true,
     };
-    let reply = run_tool_loop(
+    let reply = reply_of(
         &client,
         &user("今天有比赛吗"),
         &[],
@@ -497,7 +497,7 @@ async fn builtin_rank_get_and_problem_today_round_trip() {
     let base = spawn_app(script.clone()).await;
     let client = test_client(&base);
     let hub = Rec::default();
-    let reply = run_tool_loop(
+    let reply = reply_of(
         &client,
         &user("tourist 多少分，今天的题是什么"),
         &[],
@@ -537,7 +537,7 @@ async fn builtin_problem_today_error_uses_the_degraded_reply() {
         log: Mutex::new(Vec::new()),
         fail: true,
     };
-    let reply = run_tool_loop(&client, &user("今天的题"), &[], BuiltinTools::ON, 3, &hub)
+    let reply = reply_of(&client, &user("今天的题"), &[], BuiltinTools::ON, 3, &hub)
         .await
         .unwrap();
     assert_eq!(reply, ToolReply::Degraded(TOOL_FAIL_REPLY));
@@ -556,7 +556,7 @@ async fn disabled_builtin_group_stays_out_of_the_request() {
     let client = test_client(&base);
     let hub = Rec::default();
     let extra = vec![ToolSpec::parse("memo.search", "查备忘", json!({})).unwrap()];
-    let reply = run_tool_loop(
+    let reply = reply_of(
         &client,
         &user("今天比赛"),
         &extra,
@@ -589,6 +589,42 @@ async fn disabled_builtin_group_stays_out_of_the_request() {
     assert!(hub.log.lock().unwrap().is_empty());
 }
 
+async fn reply_of(
+    client: &LlmClient,
+    messages: &[ChatMessage],
+    configured: &[ToolSpec],
+    builtins: BuiltinTools,
+    max_rounds: u32,
+    hub: &Rec,
+) -> Result<ToolReply, LlmError> {
+    run_tool_loop(client, messages, configured, builtins, max_rounds, hub)
+        .await
+        .reply
+}
+
+#[tokio::test]
+async fn spend_sums_token_rounds_and_still_counts_a_body_without_usage() {
+    let script = Script::new(Kind::Metered);
+    let base = spawn_app(script.clone()).await;
+    let client = test_client(&base);
+    let tools = vec![ToolSpec::parse("rank.list", "当前榜", json!({})).unwrap()];
+    let hub = Rec::default();
+    let turn = run_tool_loop(&client, &user("榜"), &tools, BuiltinTools::OFF, 3, &hub).await;
+    assert_eq!(turn.reply.unwrap(), ToolReply::Text("好".into()));
+    assert_eq!(turn.calls, 2);
+    assert_eq!(turn.in_tokens, 4);
+    assert_eq!(turn.out_tokens, 1);
+
+    let script = Script::new(Kind::MissingId);
+    let base = spawn_app(script).await;
+    let client = test_client(&base);
+    let turn = run_tool_loop(&client, &user("榜"), &tools, BuiltinTools::OFF, 3, &hub).await;
+    assert!(matches!(turn.reply, Err(LlmError::Decode(_))));
+    assert_eq!(turn.calls, 1);
+    assert_eq!(turn.in_tokens, 0);
+    assert_eq!(turn.out_tokens, 0);
+}
+
 fn user(text: &str) -> Vec<ChatMessage> {
     vec![ChatMessage {
         role: Role::User,
@@ -616,6 +652,7 @@ enum Kind {
     TodayCall,
     GetAndToday,
     ProblemCall,
+    Metered,
 }
 
 #[derive(Clone)]
@@ -671,6 +708,22 @@ async fn handle(State(script): State<Script>, Json(body): Json<Value>) -> Json<V
         Kind::GetAndToday if n == 0 => get_and_today(),
         Kind::GetAndToday => saying("tourist 是 3000。今天有一题。"),
         Kind::ProblemCall => one_call_with("call_problem", "problem_today", "{}"),
+        Kind::Metered if n == 0 => json!({
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_rank",
+                "name": "rank_list",
+                "arguments": "{}"
+            }],
+            "usage": {"input_tokens": 4, "output_tokens": 1, "total_tokens": 5}
+        }),
+        Kind::Metered => json!({
+            "output_text": "好",
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "好"}]
+            }]
+        }),
         Kind::MissingId => json!({
             "output": [{
                 "type": "function_call",

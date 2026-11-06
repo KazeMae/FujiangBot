@@ -55,6 +55,20 @@ pub async fn ensure_schema(pool: &SqlitePool) -> anyhow::Result<()> {
     .execute(pool)
     .await
     .context("create usage_events")?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS usage_daily (
+            day INTEGER NOT NULL,
+            session_key TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            calls INTEGER NOT NULL,
+            in_tokens INTEGER NOT NULL,
+            out_tokens INTEGER NOT NULL,
+            PRIMARY KEY (day, session_key, user_id)
+        )",
+    )
+    .execute(pool)
+    .await
+    .context("create usage_daily")?;
     Ok(())
 }
 
@@ -255,6 +269,103 @@ pub async fn take_slot(
     Ok(Slot::Taken)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DayUsage {
+    pub calls: i64,
+    pub in_tokens: i64,
+    pub out_tokens: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TodayUsage {
+    pub user: DayUsage,
+    pub session: DayUsage,
+}
+
+const SUM_USER: &str =
+    "SELECT COALESCE(SUM(calls), 0), COALESCE(SUM(in_tokens), 0), COALESCE(SUM(out_tokens), 0)
+    FROM usage_daily WHERE day = ?1 AND user_id = ?2";
+const SUM_SESSION: &str =
+    "SELECT COALESCE(SUM(calls), 0), COALESCE(SUM(in_tokens), 0), COALESCE(SUM(out_tokens), 0)
+    FROM usage_daily WHERE day = ?1 AND session_key = ?2";
+
+pub async fn record_daily(
+    pool: &SqlitePool,
+    session_key: &str,
+    user_id: i64,
+    now: i64,
+    calls: i64,
+    in_tokens: i64,
+    out_tokens: i64,
+) -> anyhow::Result<()> {
+    if calls <= 0 && in_tokens <= 0 && out_tokens <= 0 {
+        return Ok(());
+    }
+    let day = utc_day(now);
+    sqlx::query(
+        "INSERT INTO usage_daily (day, session_key, user_id, calls, in_tokens, out_tokens)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(day, session_key, user_id) DO UPDATE SET
+            calls = calls + excluded.calls,
+            in_tokens = in_tokens + excluded.in_tokens,
+            out_tokens = out_tokens + excluded.out_tokens",
+    )
+    .bind(day)
+    .bind(session_key)
+    .bind(user_id)
+    .bind(calls)
+    .bind(in_tokens)
+    .bind(out_tokens)
+    .execute(pool)
+    .await
+    .context("record usage_daily")?;
+    Ok(())
+}
+
+pub async fn today_usage(
+    pool: &SqlitePool,
+    session_key: &str,
+    user_id: i64,
+    now: i64,
+) -> anyhow::Result<TodayUsage> {
+    let day = utc_day(now);
+    let user = day_sum_user(pool, day, user_id).await?;
+    let session = day_sum_key(pool, day, session_key).await?;
+    Ok(TodayUsage { user, session })
+}
+
+async fn day_sum_user(pool: &SqlitePool, day: i64, user_id: i64) -> anyhow::Result<DayUsage> {
+    let row = sqlx::query(SUM_USER)
+        .bind(day)
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .context("sum usage_daily")?;
+    row_usage(&row)
+}
+
+async fn day_sum_key(pool: &SqlitePool, day: i64, session_key: &str) -> anyhow::Result<DayUsage> {
+    let row = sqlx::query(SUM_SESSION)
+        .bind(day)
+        .bind(session_key)
+        .fetch_one(pool)
+        .await
+        .context("sum usage_daily session")?;
+    row_usage(&row)
+}
+
+fn utc_day(now: i64) -> i64 {
+    now.div_euclid(86_400)
+}
+
+fn row_usage(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<DayUsage> {
+    Ok(DayUsage {
+        calls: sqlx::Row::try_get(row, 0)?,
+        in_tokens: sqlx::Row::try_get(row, 1)?,
+        out_tokens: sqlx::Row::try_get(row, 2)?,
+    })
+}
+
 pub async fn usage_counts(
     pool: &SqlitePool,
     session_key: &str,
@@ -306,7 +417,7 @@ mod tests {
         ensure_schema(&pool).await.unwrap();
         let names: Vec<String> = sqlx::query_scalar(
             "SELECT name FROM sqlite_master
-             WHERE name IN ('sessions', 'messages', 'messages_session', 'usage_events')
+             WHERE name IN ('sessions', 'messages', 'messages_session', 'usage_events', 'usage_daily')
              ORDER BY name",
         )
         .fetch_all(&pool)
@@ -318,6 +429,7 @@ mod tests {
                 "messages".to_string(),
                 "messages_session".to_string(),
                 "sessions".to_string(),
+                "usage_daily".to_string(),
                 "usage_events".to_string(),
             ]
         );
@@ -460,5 +572,72 @@ mod tests {
                 .await
                 .unwrap();
         assert!(updated >= 9);
+    }
+
+    #[tokio::test]
+    async fn daily_rows_add_within_one_utc_day_and_split_on_the_next() {
+        let pool = mem().await;
+        let day = 86_400 * 10;
+        record_daily(&pool, "group:7", 5, day + 10, 1, 4, 2)
+            .await
+            .unwrap();
+        record_daily(&pool, "group:7", 5, day + 20, 1, 0, 0)
+            .await
+            .unwrap();
+        record_daily(&pool, "private:5", 5, day + 30, 1, 10, 1)
+            .await
+            .unwrap();
+        record_daily(&pool, "group:7", 8, day + 40, 1, 7, 8)
+            .await
+            .unwrap();
+        record_daily(&pool, "group:7", 5, day, 0, 0, 0)
+            .await
+            .unwrap();
+
+        let today = today_usage(&pool, "group:7", 5, day + 50).await.unwrap();
+        assert_eq!(
+            today.user,
+            DayUsage {
+                calls: 3,
+                in_tokens: 14,
+                out_tokens: 3,
+            }
+        );
+        assert_eq!(
+            today.session,
+            DayUsage {
+                calls: 3,
+                in_tokens: 11,
+                out_tokens: 10,
+            }
+        );
+        let other = today_usage(&pool, "group:8", 9, day + 50).await.unwrap();
+        assert_eq!(
+            other,
+            TodayUsage {
+                user: DayUsage::default(),
+                session: DayUsage::default(),
+            }
+        );
+
+        record_daily(&pool, "group:7", 5, day + 86_400, 1, 3, 3)
+            .await
+            .unwrap();
+        let next = today_usage(&pool, "group:7", 5, day + 86_400 + 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            next.user,
+            DayUsage {
+                calls: 1,
+                in_tokens: 3,
+                out_tokens: 3,
+            }
+        );
+        assert_eq!(next.session, next.user);
+        clear_messages(&pool, "group:7").await.unwrap();
+        let kept = today_usage(&pool, "group:7", 5, day + 50).await.unwrap();
+        assert_eq!(kept.user.calls, 3);
+        assert_eq!(kept.session.calls, 3);
     }
 }

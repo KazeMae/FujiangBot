@@ -37,6 +37,18 @@ pub struct ChatMessage {
     pub(crate) images: Vec<ImagePart>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TokenUse {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    pub text: String,
+    pub usage: TokenUse,
+}
+
 #[derive(Debug, Error)]
 pub enum LlmError {
     #[error("missing API key in environment variable {env}")]
@@ -70,10 +82,13 @@ impl LlmClient {
         Ok(Self::new(cfg, http, api_key))
     }
 
-    pub async fn complete(&self, messages: &[ChatMessage]) -> Result<String, LlmError> {
+    pub async fn complete(&self, messages: &[ChatMessage]) -> Result<Completion, LlmError> {
         let request = responses_request(&self.model, self.temperature, messages, &[], &[]);
         let body = self.post_ok(&request).await?;
-        parse_responses(&body)
+        Ok(Completion {
+            text: parse_responses(&body)?,
+            usage: token_use(&body),
+        })
     }
 
     pub(crate) async fn complete_with_tools(
@@ -81,10 +96,10 @@ impl LlmClient {
         messages: &[ChatMessage],
         prior: &[PriorCall],
         tools: &[FunctionTool<'_>],
-    ) -> Result<ModelOutput, LlmError> {
+    ) -> Result<(ModelOutput, TokenUse), LlmError> {
         let request = responses_request(&self.model, self.temperature, messages, prior, tools);
         let body = self.post_ok(&request).await?;
-        parse_model_output(&body)
+        Ok((parse_model_output(&body)?, token_use(&body)))
     }
 
     pub(crate) fn new(cfg: &AgentConfig, http: reqwest::Client, api_key: String) -> Self {
@@ -352,6 +367,23 @@ fn error_message_or_snippet(body: &str) -> String {
     }
 }
 
+fn token_use(body: &str) -> TokenUse {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return TokenUse::default();
+    };
+    let Some(usage) = value.get("usage").filter(|item| item.is_object()) else {
+        return TokenUse::default();
+    };
+    TokenUse {
+        input_tokens: nonneg_token(usage.get("input_tokens")),
+        output_tokens: nonneg_token(usage.get("output_tokens")),
+    }
+}
+
+fn nonneg_token(value: Option<&Value>) -> i64 {
+    value.and_then(Value::as_i64).unwrap_or(0).max(0)
+}
+
 fn parse_responses(body: &str) -> Result<String, LlmError> {
     let value: Value =
         serde_json::from_str(body).map_err(|err| LlmError::Decode(err.to_string()))?;
@@ -533,7 +565,7 @@ mod tests {
                 Err(err) => panic!("{err}"),
             }
         };
-        let text = client
+        let done = client
             .complete(&[
                 ChatMessage {
                     role: Role::System,
@@ -563,7 +595,14 @@ mod tests {
             ])
             .await
             .unwrap();
-        assert_eq!(text, "福酱在");
+        assert_eq!(done.text, "福酱在");
+        assert_eq!(
+            done.usage,
+            TokenUse {
+                input_tokens: 3,
+                output_tokens: 2,
+            }
+        );
         let seen = rec.0.lock().unwrap().take().expect("request recorded");
         assert!(seen.path.ends_with("/responses"), "{}", seen.path);
         assert_eq!(seen.auth, "Bearer env-key-from-config");
@@ -620,8 +659,9 @@ mod tests {
             },
         ];
         crate::vision::give_images(&mut messages, vec![part.clone()]);
-        let text = client.complete(&messages).await.unwrap();
-        assert_eq!(text, "图里是一只猫");
+        let done = client.complete(&messages).await.unwrap();
+        assert_eq!(done.text, "图里是一只猫");
+        assert_eq!(done.usage, TokenUse::default());
         let seen = rec.0.lock().unwrap().take().expect("request recorded");
         assert_eq!(seen.body["instructions"], "be brief");
         assert_eq!(seen.body["input"][0]["content"], "之前");
@@ -729,7 +769,7 @@ mod tests {
         );
         let base = spawn_app(app).await;
         let client = test_client(&base, 60);
-        let text = client
+        let done = client
             .complete(&[ChatMessage {
                 role: Role::User,
                 content: "hi".into(),
@@ -737,7 +777,39 @@ mod tests {
             }])
             .await
             .unwrap();
-        assert_eq!(text, "AB");
+        assert_eq!(done.text, "AB");
+        assert_eq!(
+            done.usage,
+            TokenUse {
+                input_tokens: 4,
+                output_tokens: 2,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn bad_usage_fields_count_as_zero_tokens() {
+        let app = Router::new().route(
+            "/responses",
+            post(|| async {
+                Json(json!({
+                    "output_text": "好",
+                    "usage": {"input_tokens": -5, "output_tokens": "2", "total_tokens": 9}
+                }))
+            }),
+        );
+        let base = spawn_app(app).await;
+        let client = test_client(&base, 60);
+        let done = client
+            .complete(&[ChatMessage {
+                role: Role::User,
+                content: "hi".into(),
+                images: Vec::new(),
+            }])
+            .await
+            .unwrap();
+        assert_eq!(done.text, "好");
+        assert_eq!(done.usage, TokenUse::default());
     }
 
     async fn complete_err(app: Router) -> LlmError {
