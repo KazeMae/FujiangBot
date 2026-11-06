@@ -94,6 +94,7 @@ impl ToolHub for BotContext {
 pub(crate) struct BuiltinTools {
     pub rank: bool,
     pub contest: bool,
+    pub problem: bool,
 }
 
 #[cfg(test)]
@@ -101,10 +102,12 @@ impl BuiltinTools {
     const ON: Self = Self {
         rank: true,
         contest: true,
+        problem: true,
     };
     const OFF: Self = Self {
         rank: false,
         contest: false,
+        problem: false,
     };
 }
 
@@ -127,6 +130,14 @@ fn builtin_specs(builtins: BuiltinTools) -> Vec<ToolSpec> {
             "列出本群 Codeforces 榜上的队员，含 handle 和 rating。不需要参数。",
             default_parameters(),
         ));
+        specs.push(builtin_spec(
+            "rank.get",
+            "按 Codeforces handle 查一位已登记队员。可选字符串参数 handle。不传则这次查询失败。",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "handle": { "type": "string" } }
+            }),
+        ));
     }
     if builtins.contest {
         specs.push(builtin_spec(
@@ -140,6 +151,13 @@ fn builtin_specs(builtins: BuiltinTools) -> Vec<ToolSpec> {
         specs.push(builtin_spec(
             "contest.today",
             "列出今天开始的比赛。不需要参数。",
+            default_parameters(),
+        ));
+    }
+    if builtins.problem {
+        specs.push(builtin_spec(
+            "problem.today",
+            "返回当前每日一题里已经保存的题目。不需要参数。还没保存时是空数组。",
             default_parameters(),
         ));
     }

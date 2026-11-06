@@ -47,8 +47,9 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 | `max_history_turns` | `20` | 请求里带上的历史回合数。一回合是一条用户消息加上一条回复 |
 | `timeout_secs` | `60` | 单次请求的超时秒数。写成 `0` 时仍是 60 秒。工具循环里的每一次模型请求都用这个值 |
 | `max_tool_rounds` | `3` | 一轮发言里最多执行几次工具。到顶后模型还要调用工具时，回复一句中文并停下。`0` 表示一次都不执行 |
-| `enable_rank_tools` | `true` | 为 false 时，请求不带 `rank_list`。缺省或类型不对时仍是 true |
+| `enable_rank_tools` | `true` | 为 false 时，请求不带 `rank_list` 和 `rank_get`。缺省或类型不对时仍是 true |
 | `enable_contest_tools` | `true` | 为 false 时，请求不带 `contest_upcoming` 和 `contest_today`。缺省或类型不对时仍是 true |
+| `enable_problem_tools` | `true` | 为 false 时，请求不带 `problem_today`。缺省或类型不对时仍是 true |
 | `tools` | `[]` | 额外工具。每项有 `name`、`description`、`parameters`。和已启用内置工具的函数名相同时，这一项不发出去 |
 | `system_prompt` | `你是福酱，西南科技大学 ACM 群助手。` | `default` 人设的系统提示 |
 | `wake_words` | `["福酱"]` | 唤醒词。空数组表示没有唤醒词 |
@@ -85,19 +86,25 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
 适配层把 Responses 的 `function_call` 交给 ServiceHub。模型返回 `function_call` 时，插件按工具名调用 `ctx.call`。结果放进下一次请求的 `function_call_output`。模型返回文本后，这一轮结束。工具来回只留在这一轮的内存里。会话表仍只保存用户原文和最终回复，不新增表。
 
-工具名的格式是 `服务.方法`。第一个 `.` 之前是服务名，之后是方法名。`rank.list` 调用 rank 的 `list`。`contest.upcoming` 调用 contest 的 `upcoming`。Responses 要求函数名匹配 `^[a-zA-Z0-9_-]+$`，所以请求里的 `name` 把 `.` 换成 `_`。`rank.list` 发出去是 `rank_list`。
+工具名的格式是 `服务.方法`。第一个 `.` 之前是服务名，之后是方法名。`rank.list` 调用 rank 的 `list`。`rank.get` 调用 rank 的 `get`。`contest.upcoming` 调用 contest 的 `upcoming`。`problem.today` 调用 problem 的 `today`。Responses 要求函数名匹配 `^[a-zA-Z0-9_-]+$`，所以请求里的 `name` 把 `.` 换成 `_`。`rank.list` 发出去是 `rank_list`。`rank.get` 发出去是 `rank_get`。
 
-默认带三个内置工具。
+默认带五个内置工具。
 
 | 配置名 | 请求里的函数名 | 调用 | 参数 |
 |---|---|---|---|
 | `rank.list` | `rank_list` | rank 的 `list` | 无 |
+| `rank.get` | `rank_get` | rank 的 `get` | 可选字符串 `handle` |
 | `contest.upcoming` | `contest_upcoming` | contest 的 `upcoming` | 可选字符串 `oj` |
 | `contest.today` | `contest_today` | contest 的 `today` | 无 |
+| `problem.today` | `problem_today` | problem 的 `today` | 无 |
 
 `oj` 用来只看一个 OJ。例如 Codeforces、Atcoder、LuoGu、NowCoder 或 SCPC。不传则返回全部。
 
-`enable_rank_tools` 为 false 时，请求不带 `rank_list`。`enable_contest_tools` 为 false 时，请求不带 `contest_upcoming` 和 `contest_today`。字段缺省时按 true 处理。类型不是布尔值时也按 true 处理。
+`handle` 是已登记的 Codeforces 用户名。不传时 rank 的 `get` 报错。用户看到「我没查成，过一会儿再问我一次。」
+
+`problem.today` 返回数组。每项有 `date`、`band`、`contest_id`、`idx`、`url`。这一天还没有保存的题目时，数组是空的。日期和 `.每日一题` 用同一个规则。过了 `daily_reset_hour` 才换下一天。这个方法只读。调用 `problem.today` 不会抽新题。
+
+`enable_rank_tools` 为 false 时，请求不带 `rank_list` 和 `rank_get`。`enable_contest_tools` 为 false 时，请求不带 `contest_upcoming` 和 `contest_today`。`enable_problem_tools` 为 false 时，请求不带 `problem_today`。字段缺省时按 true 处理。类型不是布尔值时也按 true 处理。
 
 `[[plugins.configs.agent.tools]]` 可以再追加别的 `服务.方法`。配置项的函数名和某个已启用内置工具相同，就留下内置的那一项。这个内置工具的开关为 false 时，同名配置项会发出去。
 

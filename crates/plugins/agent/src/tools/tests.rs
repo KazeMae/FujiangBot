@@ -53,11 +53,17 @@ fn parses_service_method_and_rejects_a_bad_name() {
 }
 
 #[test]
-fn builtin_tools_follow_the_two_switches() {
+fn builtin_tools_follow_the_switches() {
     let on = assemble_tools(&[], BuiltinTools::ON);
     assert_eq!(
         on.iter().map(ToolSpec::wire_name).collect::<Vec<_>>(),
-        vec!["rank_list", "contest_upcoming", "contest_today"]
+        vec![
+            "rank_list",
+            "rank_get",
+            "contest_upcoming",
+            "contest_today",
+            "problem_today"
+        ]
     );
     assert_eq!(on[0].service(), "rank");
     assert_eq!(on[0].method(), "list");
@@ -66,29 +72,53 @@ fn builtin_tools_follow_the_two_switches() {
         "列出本群 Codeforces 榜上的队员，含 handle 和 rating。不需要参数。"
     );
     assert_eq!(on[0].parameters(), &default_parameters());
-    assert_eq!(on[1].service(), "contest");
-    assert_eq!(on[1].method(), "upcoming");
+    assert_eq!(on[1].service(), "rank");
+    assert_eq!(on[1].method(), "get");
+    assert_eq!(on[1].wire_name(), "rank_get");
     assert_eq!(
         on[1].description(),
-        "列出即将开始的比赛。可选字符串参数 oj，例如 Codeforces 或 Atcoder。不传则返回全部。"
+        "按 Codeforces handle 查一位已登记队员。可选字符串参数 handle。不传则这次查询失败。"
     );
     assert_eq!(
         on[1].parameters(),
         &json!({
             "type": "object",
-            "properties": { "oj": { "type": "string" } }
+            "properties": { "handle": { "type": "string" } }
         })
     );
     assert!(on[1].parameters().get("required").is_none());
-    assert_eq!(on[2].method(), "today");
-    assert_eq!(on[2].description(), "列出今天开始的比赛。不需要参数。");
-    assert_eq!(on[2].parameters(), &default_parameters());
+    assert_eq!(on[2].service(), "contest");
+    assert_eq!(on[2].method(), "upcoming");
+    assert_eq!(
+        on[2].description(),
+        "列出即将开始的比赛。可选字符串参数 oj，例如 Codeforces 或 Atcoder。不传则返回全部。"
+    );
+    assert_eq!(
+        on[2].parameters(),
+        &json!({
+            "type": "object",
+            "properties": { "oj": { "type": "string" } }
+        })
+    );
+    assert!(on[2].parameters().get("required").is_none());
+    assert_eq!(on[3].method(), "today");
+    assert_eq!(on[3].description(), "列出今天开始的比赛。不需要参数。");
+    assert_eq!(on[3].parameters(), &default_parameters());
+    assert_eq!(on[4].service(), "problem");
+    assert_eq!(on[4].method(), "today");
+    assert_eq!(on[4].wire_name(), "problem_today");
+    assert_eq!(
+        on[4].description(),
+        "返回当前每日一题里已经保存的题目。不需要参数。还没保存时是空数组。"
+    );
+    assert_eq!(on[4].parameters(), &default_parameters());
 
     let rank_only = assemble_tools(
         &[],
         BuiltinTools {
             rank: true,
             contest: false,
+            problem: false,
         },
     );
     assert_eq!(
@@ -96,13 +126,14 @@ fn builtin_tools_follow_the_two_switches() {
             .iter()
             .map(ToolSpec::wire_name)
             .collect::<Vec<_>>(),
-        vec!["rank_list"]
+        vec!["rank_list", "rank_get"]
     );
     let contest_only = assemble_tools(
         &[],
         BuiltinTools {
             rank: false,
             contest: true,
+            problem: false,
         },
     );
     assert_eq!(
@@ -112,12 +143,27 @@ fn builtin_tools_follow_the_two_switches() {
             .collect::<Vec<_>>(),
         vec!["contest_upcoming", "contest_today"]
     );
+    let problem_only = assemble_tools(
+        &[],
+        BuiltinTools {
+            rank: false,
+            contest: false,
+            problem: true,
+        },
+    );
+    assert_eq!(
+        problem_only
+            .iter()
+            .map(ToolSpec::wire_name)
+            .collect::<Vec<_>>(),
+        vec!["problem_today"]
+    );
     assert!(assemble_tools(&[], BuiltinTools::OFF).is_empty());
 
     let extra = ToolSpec::parse("memo.search", "查备忘", json!({})).unwrap();
     let with_extra = assemble_tools(&[extra], BuiltinTools::ON);
-    assert_eq!(with_extra[3].name(), "memo.search");
-    assert_eq!(with_extra[3].wire_name(), "memo_search");
+    assert_eq!(with_extra[5].name(), "memo.search");
+    assert_eq!(with_extra[5].wire_name(), "memo_search");
 
     let configured = ToolSpec::parse(
         "rank.list",
@@ -126,7 +172,7 @@ fn builtin_tools_follow_the_two_switches() {
     )
     .unwrap();
     let kept_builtin = assemble_tools(std::slice::from_ref(&configured), BuiltinTools::ON);
-    assert_eq!(kept_builtin.len(), 3);
+    assert_eq!(kept_builtin.len(), 5);
     assert_eq!(kept_builtin[0].description(), on[0].description());
     assert_eq!(kept_builtin[0].parameters(), on[0].parameters());
 
@@ -350,7 +396,13 @@ async fn builtin_rank_and_contest_calls_return_the_model_text() {
         .collect();
     assert_eq!(
         names,
-        vec!["rank_list", "contest_upcoming", "contest_today"]
+        vec![
+            "rank_list",
+            "rank_get",
+            "contest_upcoming",
+            "contest_today",
+            "problem_today"
+        ]
     );
     assert_eq!(
         bodies[0]["tools"][0]["description"],
@@ -398,6 +450,64 @@ async fn builtin_contest_today_error_uses_the_degraded_reply() {
 }
 
 #[tokio::test]
+async fn builtin_rank_get_and_problem_today_round_trip() {
+    let script = Script::new(Kind::GetAndToday);
+    let base = spawn_app(script.clone()).await;
+    let client = test_client(&base);
+    let hub = Rec::default();
+    let reply = run_tool_loop(
+        &client,
+        &user("tourist 多少分，今天的题是什么"),
+        &[],
+        BuiltinTools::ON,
+        3,
+        &hub,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reply,
+        ToolReply::Text("tourist 是 3000。今天有一题。".into())
+    );
+    assert_eq!(
+        hub.log.lock().unwrap().clone(),
+        vec![
+            ("rank".into(), "get".into(), json!({"handle": "tourist"})),
+            ("problem".into(), "today".into(), json!({})),
+        ]
+    );
+    let bodies = script.bodies.lock().unwrap().clone();
+    assert_eq!(bodies[1]["input"][2]["output"], r#"{"via":"rank.get"}"#);
+    assert_eq!(
+        bodies[1]["input"][4]["output"],
+        r#"{"via":"problem.today"}"#
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn builtin_problem_today_error_uses_the_degraded_reply() {
+    let catch = Catch::default();
+    let _guard = tracing::subscriber::set_default(catch.clone());
+    let script = Script::new(Kind::ProblemCall);
+    let base = spawn_app(script.clone()).await;
+    let client = test_client(&base);
+    let hub = Rec {
+        log: Mutex::new(Vec::new()),
+        fail: true,
+    };
+    let reply = run_tool_loop(&client, &user("今天的题"), &[], BuiltinTools::ON, 3, &hub)
+        .await
+        .unwrap();
+    assert_eq!(reply, ToolReply::Degraded(TOOL_FAIL_REPLY));
+    let log = hub.log.lock().unwrap().clone();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].0, "problem");
+    assert_eq!(log[0].1, "today");
+    assert_eq!(script.hits.load(Ordering::SeqCst), 1);
+    assert!(catch.has("agent tool"));
+}
+
+#[tokio::test]
 async fn disabled_builtin_group_stays_out_of_the_request() {
     let script = Script::new(Kind::Text);
     let base = spawn_app(script.clone()).await;
@@ -411,6 +521,7 @@ async fn disabled_builtin_group_stays_out_of_the_request() {
         BuiltinTools {
             rank: false,
             contest: true,
+            problem: false,
         },
         3,
         &hub,
@@ -461,6 +572,8 @@ enum Kind {
     MissingId,
     ThreeThenText,
     TodayCall,
+    GetAndToday,
+    ProblemCall,
 }
 
 #[derive(Clone)]
@@ -513,6 +626,9 @@ async fn handle(State(script): State<Script>, Json(body): Json<Value>) -> Json<V
         Kind::ThreeThenText if n == 0 => three_calls(),
         Kind::ThreeThenText => saying("今天 Codeforces 一场。榜上 12 人。"),
         Kind::TodayCall => one_call_with("call_today", "contest_today", "{}"),
+        Kind::GetAndToday if n == 0 => get_and_today(),
+        Kind::GetAndToday => saying("tourist 是 3000。今天有一题。"),
+        Kind::ProblemCall => one_call_with("call_problem", "problem_today", "{}"),
         Kind::MissingId => json!({
             "output": [{
                 "type": "function_call",
@@ -556,6 +672,25 @@ fn three_calls() -> Value {
                 "type": "function_call",
                 "call_id": "call_today",
                 "name": "contest_today",
+                "arguments": "{}"
+            }
+        ]
+    })
+}
+
+fn get_and_today() -> Value {
+    json!({
+        "output": [
+            {
+                "type": "function_call",
+                "call_id": "call_get",
+                "name": "rank_get",
+                "arguments": "{\"handle\":\"tourist\"}"
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_problem",
+                "name": "problem_today",
                 "arguments": "{}"
             }
         ]
