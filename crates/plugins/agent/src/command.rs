@@ -11,7 +11,9 @@ pub(crate) const HELP: &str =
     "对话。@我、消息里带唤醒词（默认「福酱」），或回复我的消息，我会接话。\n\
 同一群共用一份上下文，私聊各自一份。\n\
 .agent              本说明\n\
-.agent reset        清空当前群或私聊的对话记录，人设保留\n\
+.agent reset        清空当前群或私聊的对话记录和摘要，人设保留\n\
+.agent memory       查看当前会话的摘要\n\
+.agent forget       只清空摘要，对话记录和人设保留\n\
 .agent persona      查看当前人设\n\
 .agent persona <名> 切换到配置里的人设\n\
 .agent status       当前人设、这一小时还剩几次，以及今日调用和 token\n\
@@ -22,6 +24,8 @@ require_at 为 true 时，只认 @我或回复我，单独的唤醒词不算。"
 pub(crate) enum AgentCmd {
     Help,
     Reset,
+    Memory,
+    Forget,
     Status,
     Tools,
     ShowPersona,
@@ -39,6 +43,20 @@ pub(crate) fn parse_agent_cmd(rest: &str) -> AgentCmd {
                 AgentCmd::Unknown
             } else {
                 AgentCmd::Reset
+            }
+        }
+        "memory" => {
+            if parts.next().is_some() {
+                AgentCmd::Unknown
+            } else {
+                AgentCmd::Memory
+            }
+        }
+        "forget" => {
+            if parts.next().is_some() {
+                AgentCmd::Unknown
+            } else {
+                AgentCmd::Forget
             }
         }
         "status" => {
@@ -81,10 +99,32 @@ pub(crate) async fn apply_command(
         }
         AgentCmd::Reset => {
             let n = session::clear_messages(pool, session_key).await?;
-            if n == 0 {
+            let cleared = session::clear_summary(pool, session_key).await?;
+            if n == 0 && !cleared {
                 Ok("当前会话没有对话记录。".to_string())
             } else {
                 Ok("已清空当前会话的对话记录。".to_string())
+            }
+        }
+        AgentCmd::Memory => {
+            if !cfg.memory_enabled {
+                return Ok("会话记忆已关闭。".to_string());
+            }
+            let summary = session::summary_of(pool, session_key).await?;
+            if summary.is_empty() {
+                Ok("暂无摘要".to_string())
+            } else {
+                Ok(fit_reply(&summary))
+            }
+        }
+        AgentCmd::Forget => {
+            if !cfg.memory_enabled {
+                return Ok("会话记忆已关闭。".to_string());
+            }
+            if session::clear_summary(pool, session_key).await? {
+                Ok("已清空会话摘要。".to_string())
+            } else {
+                Ok("暂无摘要".to_string())
             }
         }
         AgentCmd::ShowPersona => {

@@ -29,6 +29,7 @@ pub struct AgentConfig {
     pub api_key_env: String,
     pub temperature: f64,
     pub max_history_turns: u32,
+    pub memory_enabled: bool,
     /// Body of the `default` persona.
     pub system_prompt: String,
     /// Named personas other than `default`. The default body is `system_prompt`.
@@ -64,6 +65,7 @@ impl AgentConfig {
             api_key_env: string_field(v, "api_key_env", DEFAULT_API_KEY_ENV),
             temperature: temperature_from(v),
             max_history_turns: u32_field(v, "max_history_turns", DEFAULT_MAX_HISTORY_TURNS),
+            memory_enabled: memory_enabled_from(v),
             system_prompt,
             personas,
             wake_words: wake_words_from(v),
@@ -174,6 +176,13 @@ fn bool_field(v: &Value, key: &str, default: bool) -> bool {
     v.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
 
+fn memory_enabled_from(v: &Value) -> bool {
+    v.get("memory")
+        .and_then(|memory| memory.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
 fn wake_words_from(v: &Value) -> Vec<String> {
     match v.get("wake_words") {
         Some(Value::Array(items)) => items
@@ -275,6 +284,7 @@ mod tests {
         assert_eq!(cfg.api_key_env, "FUJIANG_LLM_KEY");
         assert_eq!(cfg.temperature, 0.7);
         assert_eq!(cfg.max_history_turns, 20);
+        assert!(cfg.memory_enabled);
         assert_eq!(cfg.system_prompt, "你是福酱，西南科技大学 ACM 群助手。");
         assert!(cfg.personas.is_empty());
         assert_eq!(cfg.persona_names(), vec!["default"]);
@@ -370,9 +380,20 @@ mod tests {
             "vision_enabled": "yes",
             "max_image_bytes": "big",
             "blacklist": "nope",
-            "admins": 1
+            "admins": 1,
+            "memory": { "enabled": "no" }
         }));
         assert_defaults(&cfg);
+    }
+
+    #[test]
+    fn memory_stays_on_unless_the_flag_is_false() {
+        let off = AgentConfig::from_value(&json!({ "memory": { "enabled": false } }));
+        assert!(!off.memory_enabled);
+        let on = AgentConfig::from_value(&json!({ "memory": { "enabled": true } }));
+        assert!(on.memory_enabled);
+        let blank = AgentConfig::from_value(&json!({ "memory": {} }));
+        assert!(blank.memory_enabled);
     }
 
     #[test]

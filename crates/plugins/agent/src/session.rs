@@ -20,13 +20,15 @@ pub async fn ensure_schema(pool: &SqlitePool) -> anyhow::Result<()> {
         "CREATE TABLE IF NOT EXISTS sessions (
             session_key TEXT PRIMARY KEY,
             updated_at INTEGER NOT NULL,
-            persona TEXT
+            persona TEXT,
+            summary TEXT
         )",
     )
     .execute(pool)
     .await
     .context("create sessions")?;
     ensure_persona_column(pool).await?;
+    ensure_summary_column(pool).await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,6 +86,21 @@ async fn ensure_persona_column(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await
         .context("add sessions.persona")?;
+    Ok(())
+}
+
+async fn ensure_summary_column(pool: &SqlitePool) -> anyhow::Result<()> {
+    let names: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('sessions')")
+        .fetch_all(pool)
+        .await
+        .context("sessions columns")?;
+    if names.iter().any(|name| name == "summary") {
+        return Ok(());
+    }
+    sqlx::query("ALTER TABLE sessions ADD COLUMN summary TEXT")
+        .execute(pool)
+        .await
+        .context("add sessions.summary")?;
     Ok(())
 }
 
@@ -204,6 +221,145 @@ pub async fn clear_messages(pool: &SqlitePool, session_key: &str) -> anyhow::Res
         .await
         .context("clear messages")?;
     Ok(result.rows_affected())
+}
+
+pub async fn summary_of(pool: &SqlitePool, session_key: &str) -> anyhow::Result<String> {
+    stored_summary(pool, session_key).await
+}
+
+pub async fn clear_summary(pool: &SqlitePool, session_key: &str) -> anyhow::Result<bool> {
+    let current = stored_summary(pool, session_key).await?;
+    if current.is_empty() {
+        return Ok(false);
+    }
+    sqlx::query("UPDATE sessions SET summary = NULL WHERE session_key = ?1")
+        .bind(session_key)
+        .execute(pool)
+        .await
+        .context("clear summary")?;
+    Ok(true)
+}
+
+pub async fn fold_overflow(
+    pool: &SqlitePool,
+    session_key: &str,
+    max_turns: u32,
+) -> anyhow::Result<String> {
+    let mut tx = pool.begin().await.context("fold tx")?;
+    let rows = sqlx::query(
+        "SELECT role, content FROM messages
+         WHERE session_key = ?1 AND role IN ('user', 'assistant')
+         ORDER BY id ASC",
+    )
+    .bind(session_key)
+    .fetch_all(&mut *tx)
+    .await
+    .context("load fold rows")?;
+    let keep = usize::try_from(max_turns.saturating_mul(2)).unwrap_or(usize::MAX);
+    let overflow = rows.len().saturating_sub(keep);
+    let existing = stored_summary(&mut *tx, session_key).await?;
+    if overflow == 0 {
+        return Ok(existing);
+    }
+    let lines = rows
+        .iter()
+        .take(overflow)
+        .map(|row| {
+            let role: String = sqlx::Row::try_get(row, 0)?;
+            let content: String = sqlx::Row::try_get(row, 1)?;
+            Ok(excerpt_line(&role, &content))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let summary = append_excerpt(&existing, &lines);
+    sqlx::query(
+        "INSERT INTO sessions (session_key, updated_at, summary) VALUES (?1, ?2, ?3)
+         ON CONFLICT(session_key) DO UPDATE SET
+            updated_at = excluded.updated_at,
+            summary = excluded.summary",
+    )
+    .bind(session_key)
+    .bind(unix_now())
+    .bind(&summary)
+    .execute(&mut *tx)
+    .await
+    .context("store summary")?;
+    let limit = i64::try_from(overflow).unwrap_or(i64::MAX);
+    sqlx::query(
+        "DELETE FROM messages
+         WHERE id IN (
+            SELECT id FROM messages
+            WHERE session_key = ?1 AND role IN ('user', 'assistant')
+            ORDER BY id ASC
+            LIMIT ?2
+         )",
+    )
+    .bind(session_key)
+    .bind(limit)
+    .execute(&mut *tx)
+    .await
+    .context("drop folded messages")?;
+    tx.commit().await.context("commit fold")?;
+    Ok(summary)
+}
+
+const SUMMARY_MAX_CHARS: usize = 2000;
+const EXCERPT_CHARS: usize = 80;
+
+async fn stored_summary<'a, E>(executor: E, session_key: &str) -> anyhow::Result<String>
+where
+    E: sqlx::Executor<'a, Database = sqlx::Sqlite>,
+{
+    let row: Option<Option<String>> =
+        sqlx::query_scalar("SELECT summary FROM sessions WHERE session_key = ?1")
+            .bind(session_key)
+            .fetch_optional(executor)
+            .await
+            .context("load summary")?;
+    Ok(row.flatten().unwrap_or_default().trim().to_string())
+}
+
+fn excerpt_line(role: &str, content: &str) -> String {
+    let label = if role == "assistant" {
+        "助手"
+    } else {
+        "用户"
+    };
+    let flat = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let count = flat.chars().count();
+    if count <= EXCERPT_CHARS {
+        return format!("{label}：{flat}");
+    }
+    let body: String = flat.chars().take(EXCERPT_CHARS).collect();
+    format!("{label}：{body}…")
+}
+
+fn append_excerpt(existing: &str, lines: &[String]) -> String {
+    let mut text = existing.trim().to_string();
+    for line in lines {
+        if text.is_empty() {
+            text = line.clone();
+        } else {
+            text.push('\n');
+            text.push_str(line);
+        }
+    }
+    shrink_summary(text)
+}
+
+fn shrink_summary(text: String) -> String {
+    if text.chars().count() <= SUMMARY_MAX_CHARS {
+        return text;
+    }
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    while lines.len() > 1 && lines.join("\n").chars().count() > SUMMARY_MAX_CHARS {
+        lines.remove(0);
+    }
+    let out = lines.join("\n");
+    let extra = out.chars().count().saturating_sub(SUMMARY_MAX_CHARS);
+    if extra == 0 {
+        return out;
+    }
+    out.chars().skip(extra).collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -443,6 +599,7 @@ mod tests {
             vec![
                 "persona".to_string(),
                 "session_key".to_string(),
+                "summary".to_string(),
                 "updated_at".to_string(),
             ]
         );
@@ -558,6 +715,12 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(persona, None);
+        let summary: Option<String> =
+            sqlx::query_scalar("SELECT summary FROM sessions WHERE session_key = 'group:1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(summary, None);
         set_persona(&pool, "group:1", "strict", 9).await.unwrap();
         save_exchange(&pool, "group:1", 3, "hi", "yo")
             .await
@@ -639,5 +802,81 @@ mod tests {
         let kept = today_usage(&pool, "group:7", 5, day + 50).await.unwrap();
         assert_eq!(kept.user.calls, 3);
         assert_eq!(kept.session.calls, 3);
+    }
+
+    #[tokio::test]
+    async fn fold_keeps_the_newest_turns_and_the_persona() {
+        let pool = mem().await;
+        let key = "group:7";
+        set_persona(&pool, key, "strict", 1).await.unwrap();
+        save_exchange(&pool, key, 1, "u1\nline", "a1")
+            .await
+            .unwrap();
+        save_exchange(&pool, key, 1, &"啊".repeat(120), "a2")
+            .await
+            .unwrap();
+        save_exchange(&pool, key, 1, "u3", "a3").await.unwrap();
+
+        let summary = fold_overflow(&pool, key, 1).await.unwrap();
+        assert_eq!(
+            summary,
+            format!(
+                "用户：u1 line\n助手：a1\n用户：{}…\n助手：a2",
+                "啊".repeat(80)
+            )
+        );
+        assert_eq!(summary_of(&pool, key).await.unwrap(), summary);
+        let left = recent_turns(&pool, key, 20).await.unwrap();
+        assert_eq!(left.len(), 2);
+        assert_eq!(left[0].content, "u3");
+        assert_eq!(left[1].content, "a3");
+        assert_eq!(
+            persona_of(&pool, key).await.unwrap().as_deref(),
+            Some("strict")
+        );
+
+        let again = fold_overflow(&pool, key, 1).await.unwrap();
+        assert_eq!(again, summary);
+        save_exchange(&pool, key, 1, "u4", "a4").await.unwrap();
+        set_persona(&pool, key, "strict", 2).await.unwrap();
+        assert_eq!(summary_of(&pool, key).await.unwrap(), summary);
+        assert_eq!(
+            persona_of(&pool, key).await.unwrap().as_deref(),
+            Some("strict")
+        );
+    }
+
+    #[tokio::test]
+    async fn fold_drops_the_oldest_lines_past_two_thousand_chars() {
+        let pool = mem().await;
+        let key = "group:9";
+        set_persona(&pool, key, "strict", 1).await.unwrap();
+        for n in 0..30 {
+            let user = format!("U{n:02}{}", "甲".repeat(80));
+            let assistant = format!("A{n:02}{}", "乙".repeat(80));
+            save_exchange(&pool, key, 1, &user, &assistant)
+                .await
+                .unwrap();
+        }
+        let summary = fold_overflow(&pool, key, 0).await.unwrap();
+        assert!(summary.chars().count() <= SUMMARY_MAX_CHARS);
+        assert!(!summary.contains("U00"));
+        assert!(summary.contains("A29"));
+        assert!(recent_turns(&pool, key, 20).await.unwrap().is_empty());
+        assert_eq!(
+            persona_of(&pool, key).await.unwrap().as_deref(),
+            Some("strict")
+        );
+        clear_summary(&pool, key).await.unwrap();
+        assert_eq!(summary_of(&pool, key).await.unwrap(), "");
+    }
+
+    #[test]
+    fn shrink_drops_oldest_chars_when_one_line_is_over_the_cap() {
+        let huge = "字".repeat(SUMMARY_MAX_CHARS + 25);
+        let out = shrink_summary(huge);
+        assert_eq!(out.chars().count(), SUMMARY_MAX_CHARS);
+        assert!(out.starts_with('字'));
+        assert!(!out.contains('\n'));
     }
 }

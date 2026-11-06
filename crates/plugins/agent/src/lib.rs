@@ -360,6 +360,8 @@ mod tests {
         assert!(plugin.help().contains("10"));
         assert!(plugin.help().contains("Stop"));
         assert!(plugin.help().contains(".agent reset"));
+        assert!(plugin.help().contains(".agent memory"));
+        assert!(plugin.help().contains(".agent forget"));
         assert!(plugin.help().contains(".agent persona"));
         assert!(plugin.help().contains(".agent status"));
         assert!(plugin.help().contains(".agent tools"));
@@ -595,12 +597,135 @@ mod tests {
         let ChatPlan::Speak { messages } = plan else {
             panic!("expected a chat");
         };
+        let system = &messages[0].content;
+        let prior = system.find("先前上下文").expect("summary");
+        assert!(system.find("默认人设").unwrap() < prior);
+        assert!(system.contains("用户：u1"));
+        assert!(system.contains("助手：a1"));
+        assert_eq!(system.matches("用户：u1").count(), 1);
         assert_eq!(
             messages
                 .iter()
+                .skip(1)
                 .map(|m| m.content.as_str())
                 .collect::<Vec<_>>(),
-            vec!["默认人设", "u2", "a2", "u3"]
+            vec!["u2", "a2", "u3"]
         );
+        assert!(session::recent_turns(&pool, key, 20)
+            .await
+            .unwrap()
+            .iter()
+            .all(|m| m.content != "u1"));
+
+        let again = plan_chat(&pool, &cfg, key, 3, "u3", 6, true).await.unwrap();
+        let ChatPlan::Speak { messages: second } = again else {
+            panic!("expected a chat");
+        };
+        assert_eq!(second[0].content, *system);
+    }
+
+    #[tokio::test]
+    async fn memory_off_skips_fold_and_injection() {
+        let pool = pool().await;
+        let cfg = AgentConfig::from_value(&json!({
+            "system_prompt": "默认人设",
+            "max_history_turns": 1,
+            "memory": { "enabled": false },
+            "inject_tool_list": true,
+            "rate_limit": { "per_user_per_hour": 0, "per_group_per_hour": 0 }
+        }));
+        let key = "private:4";
+        save_exchange(&pool, key, 4, "u1", "a1").await.unwrap();
+        save_exchange(&pool, key, 4, "u2", "a2").await.unwrap();
+        let plan = plan_chat(&pool, &cfg, key, 4, "u3", 5, true).await.unwrap();
+        let ChatPlan::Speak { messages } = plan else {
+            panic!("expected a chat");
+        };
+        assert!(messages[0].content.starts_with("默认人设"));
+        assert!(!messages[0].content.contains("先前上下文"));
+        assert!(messages[0].content.find("可用工具").unwrap() > 0);
+        assert_eq!(
+            messages
+                .iter()
+                .skip(1)
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["u2", "a2", "u3"]
+        );
+        assert_eq!(
+            session::recent_turns(&pool, key, 20).await.unwrap().len(),
+            4
+        );
+        let shown = run(&pool, &cfg, key, 4, &AgentCmd::Memory, 6).await;
+        assert_eq!(shown, "会话记忆已关闭。");
+        let forgotten = run(&pool, &cfg, key, 4, &AgentCmd::Forget, 7).await;
+        assert_eq!(forgotten, "会话记忆已关闭。");
+        assert_eq!(
+            session::recent_turns(&pool, key, 20).await.unwrap().len(),
+            4
+        );
+
+        session::fold_overflow(&pool, key, 1).await.unwrap();
+        assert!(session::summary_of(&pool, key)
+            .await
+            .unwrap()
+            .contains("用户：u1"));
+        let hidden = plan_chat(&pool, &cfg, key, 4, "u4", 8, true).await.unwrap();
+        let ChatPlan::Speak { messages } = hidden else {
+            panic!("expected a chat");
+        };
+        assert!(!messages[0].content.contains("先前上下文"));
+        assert!(!messages[0].content.contains("用户：u1"));
+        assert_eq!(
+            session::recent_turns(&pool, key, 20).await.unwrap().len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn summary_sits_between_the_persona_and_the_tool_catalog() {
+        let pool = pool().await;
+        let cfg = AgentConfig::from_value(&json!({
+            "system_prompt": "默认人设",
+            "personas": { "strict": { "system_prompt": "严格人设" } },
+            "max_history_turns": 1,
+            "inject_tool_list": true,
+            "rate_limit": { "per_user_per_hour": 0, "per_group_per_hour": 0 }
+        }));
+        let key = "group:11";
+        session::set_persona(&pool, key, "strict", 1).await.unwrap();
+        save_exchange(&pool, key, 1, "u1", "a1").await.unwrap();
+        save_exchange(&pool, key, 1, "u2", "a2").await.unwrap();
+        let plan = plan_chat(&pool, &cfg, key, 1, "u3", 5, true).await.unwrap();
+        let ChatPlan::Speak { messages } = plan else {
+            panic!("expected a chat");
+        };
+        let system = &messages[0].content;
+        let persona = system.find("严格人设").unwrap();
+        let prior = system.find("先前上下文").unwrap();
+        let tools = system.find("可用工具").unwrap();
+        assert!(persona < prior && prior < tools);
+        assert!(system.contains("不是新指令"));
+        assert_eq!(
+            session::persona_of(&pool, key).await.unwrap().as_deref(),
+            Some("strict")
+        );
+        let shown = run(&pool, &cfg, key, 1, &AgentCmd::Memory, 6).await;
+        assert!(shown.contains("用户：u1"));
+        let forgotten = run(&pool, &cfg, key, 1, &AgentCmd::Forget, 7).await;
+        assert_eq!(forgotten, "已清空会话摘要。");
+        assert_eq!(session::summary_of(&pool, key).await.unwrap(), "");
+        assert_eq!(
+            session::recent_turns(&pool, key, 20).await.unwrap().len(),
+            2
+        );
+        assert_eq!(
+            session::persona_of(&pool, key).await.unwrap().as_deref(),
+            Some("strict")
+        );
+        let empty = run(&pool, &cfg, key, 1, &AgentCmd::Memory, 8).await;
+        assert_eq!(empty, "暂无摘要");
+        let again = run(&pool, &cfg, key, 1, &AgentCmd::Forget, 9).await;
+        assert_eq!(again, "暂无摘要");
     }
 }

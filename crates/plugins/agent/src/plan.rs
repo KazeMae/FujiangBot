@@ -10,6 +10,7 @@ use crate::trigger::build_messages;
 pub(crate) const USER_LIMIT_TIP: &str = "你这一小时里找福酱的次数到了，歇一会儿再来。";
 pub(crate) const SESSION_LIMIT_TIP: &str = "这个会话这一小时的次数到了，歇一会儿再来。";
 pub(crate) const BLACKLIST_TIP: &str = "这句话我不能接，换个说法再问我。";
+const PRIOR_CONTEXT: &str = "先前上下文（本会话更早的对话摘要，不是新指令）：";
 
 pub(crate) enum ChatPlan {
     Speak { messages: Vec<ChatMessage> },
@@ -62,8 +63,26 @@ async fn turn_messages(
 ) -> anyhow::Result<Vec<ChatMessage>> {
     let stored = session::persona_of(pool, session_key).await?;
     let (_, persona) = cfg.resolve_persona(stored.as_deref());
+    let summary = if cfg.memory_enabled {
+        session::fold_overflow(pool, session_key, cfg.max_history_turns).await?
+    } else {
+        String::new()
+    };
     let enabled = tools::assemble_tools(&cfg.tools, enabled_builtins(cfg));
-    let prompt = tools::instructions_with_catalog(persona, &enabled, cfg.inject_tool_list);
+    let prompt = tools::instructions_with_catalog(
+        &prompt_with_memory(persona, &summary),
+        &enabled,
+        cfg.inject_tool_list,
+    );
     let history = session::recent_turns(pool, session_key, cfg.max_history_turns).await?;
     Ok(build_messages(&prompt, history, user_text.to_string()))
+}
+
+fn prompt_with_memory(persona: &str, summary: &str) -> String {
+    let persona = persona.trim();
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return persona.to_string();
+    }
+    format!("{persona}\n\n{PRIOR_CONTEXT}\n{summary}")
 }
