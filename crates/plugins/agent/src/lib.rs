@@ -428,6 +428,7 @@ fn enabled_builtins(cfg: &AgentConfig) -> tools::BuiltinTools {
         problem: cfg.enable_problem_tools,
         memo: cfg.enable_memo_tools,
         memo_write: cfg.enable_memo_write_tools,
+        fun: cfg.enable_fun_tools,
     }
 }
 
@@ -725,7 +726,8 @@ mod tests {
             "enable_rank_tools": false,
             "enable_contest_tools": false,
             "enable_problem_tools": false,
-            "enable_memo_tools": false
+            "enable_memo_tools": false,
+            "enable_fun_tools": false
         }));
         let empty = run(&pool, &off, &key, 1, &AgentCmd::Tools, 1).await;
         assert_eq!(empty, "当前没有可用工具。");
@@ -736,6 +738,7 @@ mod tests {
             "enable_contest_tools": false,
             "enable_problem_tools": false,
             "enable_memo_tools": false,
+            "enable_fun_tools": false,
             "tools": [{
                 "name": "memo.list",
                 "description": "列出备忘",
@@ -761,6 +764,7 @@ mod tests {
             "enable_contest_tools": false,
             "enable_problem_tools": false,
             "enable_memo_tools": false,
+            "enable_fun_tools": false,
             "rate_limit": { "per_user_per_hour": 0, "per_group_per_hour": 0 },
             "tools": [{
                 "name": "memo.list",
@@ -795,14 +799,18 @@ mod tests {
         assert!(!rank.contains("别的说明"));
         assert!(!rank.contains("contest.upcoming"));
         assert!(rank.contains("memo.list："));
+        assert!(rank.contains("fun.tags："));
+        assert!(rank.contains("fun.search："));
         assert!(!rank.contains("memo.add"));
+        assert!(!rank.contains("fun.delete"));
         assert!(!rank.contains('_'));
 
         let write = AgentConfig::from_value(&json!({
             "enable_rank_tools": false,
             "enable_contest_tools": false,
             "enable_problem_tools": false,
-            "enable_memo_write_tools": true
+            "enable_memo_write_tools": true,
+            "enable_fun_tools": false
         }));
         let both = run(&pool, &write, &key, 1, &AgentCmd::Tools, 6).await;
         assert!(both.contains("memo.list："));

@@ -45,6 +45,7 @@ pub struct AgentConfig {
     pub enable_problem_tools: bool,
     pub enable_memo_tools: bool,
     pub enable_memo_write_tools: bool,
+    pub enable_fun_tools: bool,
     pub inject_tool_list: bool,
     pub tools: Vec<ToolSpec>,
     pub vision_enabled: bool,
@@ -75,6 +76,7 @@ impl AgentConfig {
             enable_problem_tools: bool_field(v, "enable_problem_tools", true),
             enable_memo_tools: bool_field(v, "enable_memo_tools", true),
             enable_memo_write_tools: bool_field(v, "enable_memo_write_tools", false),
+            enable_fun_tools: bool_field(v, "enable_fun_tools", true),
             inject_tool_list: bool_field(v, "inject_tool_list", false),
             tools: tools_from(v),
             vision_enabled: bool_field(v, "vision_enabled", false),
@@ -292,6 +294,7 @@ mod tests {
         assert!(cfg.enable_problem_tools);
         assert!(cfg.enable_memo_tools);
         assert!(!cfg.enable_memo_write_tools);
+        assert!(cfg.enable_fun_tools);
         assert!(!cfg.inject_tool_list);
         assert!(cfg.tools.is_empty());
         assert!(!cfg.vision_enabled);
@@ -361,6 +364,7 @@ mod tests {
             "enable_problem_tools": "no",
             "enable_memo_tools": "no",
             "enable_memo_write_tools": "yes",
+            "enable_fun_tools": "no",
             "inject_tool_list": "yes",
             "tools": "nope",
             "vision_enabled": "yes",
@@ -450,13 +454,15 @@ mod tests {
             "enable_rank_tools": false,
             "enable_contest_tools": false,
             "enable_problem_tools": false,
-            "enable_memo_tools": false
+            "enable_memo_tools": false,
+            "enable_fun_tools": false
         }));
         assert!(!off.enable_rank_tools);
         assert!(!off.enable_contest_tools);
         assert!(!off.enable_problem_tools);
         assert!(!off.enable_memo_tools);
         assert!(!off.enable_memo_write_tools);
+        assert!(!off.enable_fun_tools);
 
         let rank_only = AgentConfig::from_value(&json!({
             "enable_contest_tools": false,
@@ -467,6 +473,7 @@ mod tests {
         assert!(!rank_only.enable_contest_tools);
         assert!(!rank_only.enable_problem_tools);
         assert!(!rank_only.enable_memo_tools);
+        assert!(rank_only.enable_fun_tools);
 
         let write = AgentConfig::from_value(&json!({
             "enable_memo_write_tools": true

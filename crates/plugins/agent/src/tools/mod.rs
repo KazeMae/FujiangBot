@@ -107,6 +107,7 @@ pub(crate) struct BuiltinTools {
     pub problem: bool,
     pub memo: bool,
     pub memo_write: bool,
+    pub fun: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,6 +156,7 @@ impl BuiltinTools {
         problem: true,
         memo: true,
         memo_write: false,
+        fun: true,
     };
     const OFF: Self = Self {
         rank: false,
@@ -162,6 +164,7 @@ impl BuiltinTools {
         problem: false,
         memo: false,
         memo_write: false,
+        fun: false,
     };
 }
 
@@ -272,6 +275,34 @@ fn builtin_specs(builtins: BuiltinTools) -> Vec<ToolSpec> {
             }),
         ));
     }
+    if builtins.fun {
+        specs.push(builtin_spec(
+            "fun.tags",
+            "列出图库的 tag，含条数和别名。旧专辑也在这份清单里。不需要参数。还没有 tag 时是空数组。",
+            default_parameters(),
+        ));
+        specs.push(builtin_spec(
+            "fun.stars",
+            "列出收藏夹的名称和链接。不需要参数。还没有收藏时是空数组。",
+            default_parameters(),
+        ));
+        specs.push(builtin_spec(
+            "fun.learn",
+            "列出当前会话的学话。可选字符串 trigger，只返回这个触发词。群里看本群，私聊看全局。还没有时是空数组。",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "trigger": { "type": "string" } }
+            }),
+        ));
+        specs.push(builtin_spec(
+            "fun.search",
+            "在 tag、收藏和当前会话的学话里按原文查找。字符串参数 q。q 为空时这次调用失败。",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "q": { "type": "string" } }
+            }),
+        ));
+    }
     specs
 }
 
@@ -358,6 +389,7 @@ pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
                         }
                     };
                     let args = bind_memo_scope(spec.service(), pass.scope, args);
+                    let args = bind_fun_scope(spec.service(), spec.method(), pass.scope, args);
                     let value = match hub.invoke(spec.service(), spec.method(), args).await {
                         Ok(value) => value,
                         Err(err) => {
@@ -423,6 +455,30 @@ fn wire_name_ok(name: &str) -> bool {
 
 fn default_parameters() -> Value {
     serde_json::json!({"type": "object", "properties": {}})
+}
+
+fn bind_fun_scope(
+    service: &str,
+    method: &str,
+    scope: Option<&MemoCallScope>,
+    args: Value,
+) -> Value {
+    if service != "fun" || (method != "learn" && method != "search") {
+        return args;
+    }
+    let Some(scope) = scope else {
+        return args;
+    };
+    let mut obj = match args {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+    if scope.source_kind == "group" {
+        obj.insert("group_id".to_string(), Value::from(scope.source_id));
+    } else {
+        obj.remove("group_id");
+    }
+    Value::Object(obj)
 }
 
 fn bind_memo_scope(service: &str, scope: Option<&MemoCallScope>, args: Value) -> Value {

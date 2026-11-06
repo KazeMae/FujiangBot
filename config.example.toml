@@ -100,13 +100,16 @@ enabled = true
 # enable_problem_tools = true
 # enable_memo_tools = true
 # enable_memo_write_tools = false
+# enable_fun_tools = true
 # inject_tool_list = false
-# # rank、contest、problem、memo 的读工具默认都开。写成 false 就从请求里拿掉对应的内置工具。
+# # rank、contest、problem、memo、fun 的读工具默认都开。写成 false 就从请求里拿掉对应的内置工具。
 # # enable_memo_write_tools 默认 false。改成 true 之后才带 memo_add。enable_memo_tools 为 false 时，memo_add 也不带。
+# # fun 没有写工具开关。enable_fun_tools 为 false 时，fun_tags、fun_stars、fun_learn、fun_search 都不带。
 # # inject_tool_list 默认 false。改成 true 后，当前启用工具的短清单会追加到系统提示。`.agent tools` 始终列出同一份清单。
 # # 工具名写成「服务.方法」。请求里的函数名把点换成下划线。
-# # 内置工具默认已有 rank.list、rank.get、contest.upcoming、contest.today、problem.today、memo.list。
+# # 内置工具默认已有 rank.list、rank.get、contest.upcoming、contest.today、problem.today、memo.list、fun.tags、fun.stars、fun.learn、fun.search。
 # # memo.add 要等 enable_memo_write_tools = true。memo 插件以 .so 加载后才提供 memo 服务。
+# # fun 随 fujiang 启动。这次不注册删除图库、改学话、改收藏、改 tag 的工具。
 # # 下面这项和已启用的 rank_list 函数名相同，所以不会发出去。关掉 enable_rank_tools 之后才会。
 # [[plugins.configs.agent.tools]]
 # name = "rank.list"

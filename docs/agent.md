@@ -53,6 +53,7 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 | `enable_problem_tools` | `true` | 为 false 时，请求不带 `problem_today`。缺省或类型不对时仍是 true |
 | `enable_memo_tools` | `true` | 为 false 时，请求不带 `memo_list`，也不带 `memo_add`。缺省或类型不对时仍是 true |
 | `enable_memo_write_tools` | `false` | 为 true 且 `enable_memo_tools` 为 true 时，请求才带 `memo_add`。缺省或类型不对时是 false |
+| `enable_fun_tools` | `true` | 为 false 时，请求不带 `fun_tags`、`fun_stars`、`fun_learn`、`fun_search`。缺省或类型不对时仍是 true |
 | `inject_tool_list` | `false` | 为 true 时，把当前启用工具的短清单追加到系统提示。缺省或类型不对时是 false |
 | `tools` | `[]` | 额外工具。每项有 `name`、`description`、`parameters`。和已启用内置工具的函数名相同时，这一项不发出去 |
 | `system_prompt` | `你是福酱，西南科技大学 ACM 群助手。` | `default` 人设的系统提示 |
@@ -96,7 +97,7 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
 工具名的格式是 `服务.方法`。第一个 `.` 之前是服务名，之后是方法名。`rank.list` 调用 rank 的 `list`。`rank.get` 调用 rank 的 `get`。`contest.upcoming` 调用 contest 的 `upcoming`。`problem.today` 调用 problem 的 `today`。Responses 要求函数名匹配 `^[a-zA-Z0-9_-]+$`，所以请求里的 `name` 把 `.` 换成 `_`。`rank.list` 发出去是 `rank_list`。`rank.get` 发出去是 `rank_get`。
 
-默认带六个内置工具。`memo.add` 默认不带。
+默认带十个内置工具。`memo.add` 默认不带。fun 不注册写工具，也没有删除图库的方法。
 
 | 配置名 | 请求里的函数名 | 调用 | 参数 |
 |---|---|---|---|
@@ -107,6 +108,10 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 | `problem.today` | `problem_today` | problem 的 `today` | 无 |
 | `memo.list` | `memo_list` | memo 的 `list` | 无。宿主写入当前会话 |
 | `memo.add` | `memo_add` | memo 的 `add` | 字符串 `body`。默认不注册 |
+| `fun.tags` | `fun_tags` | fun 的 `tags` | 无 |
+| `fun.stars` | `fun_stars` | fun 的 `stars` | 无 |
+| `fun.learn` | `fun_learn` | fun 的 `learn` | 可选字符串 `trigger`。宿主写入当前群 |
+| `fun.search` | `fun_search` | fun 的 `search` | 字符串 `q`。宿主写入当前群 |
 
 `oj` 用来只看一个 OJ。例如 Codeforces、Atcoder、LuoGu、NowCoder 或 SCPC。不传则返回全部。
 
@@ -118,11 +123,19 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
 `enable_memo_tools` 同样默认 true。为 false 时，请求不带 `memo_list` 和 `memo_add`。`enable_memo_write_tools` 默认 false。只有它和 `enable_memo_tools` 都是 true 时，请求才带 `memo_add`。
 
+`enable_fun_tools` 默认 true。为 false 时，请求不带 `fun_tags`、`fun_stars`、`fun_learn`、`fun_search`。缺省或类型不对时仍是 true。没有 `enable_fun_write_tools`。fun 服务只有这四个读方法。`delete`、`retire`、`add` 这类名字会报错，图库行还在。
+
 `memo.list` 返回数组。每项有 `id`、`user_id`、`body`。顺序是新的在前，最多 20 条。这个对话还没有备忘时，数组是空的。模型不传来源。宿主按当前消息写入 `source_kind`、`source_id`、`session`、`user_id`。群是 `group` 和 `group:<id>`。私聊是 `friend` 和 `private:<id>`。这和 `.memo list` 用的是同一张表、同一次会话。直接 `ctx.call("memo", "list", …)` 时可以自己传 `source_kind` 加 `source_id`，或传 `session`。
 
 `memo.add` 的 `body` 是要记下的正文。宿主同样写上来源。正文是空白，或这个对话已经达到 `max_per_source` 时，服务返回错误，用户看到「我没查成，过一会儿再问我一次。」
 
 memo 是动态插件，编成 `libfujiang_plugin_memo.so`（macOS 上是 `.dylib`）后由宿主加载。服务写在 memo crate 里。加载成功时 `on_start` 执行 `ctx.provide("memo", …)`。agent 编进 fujiang，不链接 memo。memo 没加载，或服务调用失败时，`memo_list` 走上面的失败回复。数据仍在插件自己的 SQLite，不进 `fujiang.db`。
+
+fun 编进 fujiang。`on_start` 执行 `ctx.provide("fun", …)`。四个读方法和现有命令读的是同一份数据。`fun.tags` 就是 `.tag list`、`.album`、`.idea`。旧专辑已经并进 tag，所以没有单独的专辑列表。每项有 `name`、`count`、`aliases`。还没有 tag 时是空数组。`fun.stars` 就是不带子命令的 `.star`。每项有 `name`、`url`。还没有收藏时是空数组。
+
+`fun.learn` 就是 `.learn list`。可选字符串 `trigger`，按触发词精确匹配。空白或不传则列出全部。群里只看本群。私聊只看全局词库，也就是 `group_id` 为空的那些行。宿主盖掉模型传来的 `group_id`。直接 `ctx.call("fun", "learn", …)` 时可以自己传整数 `group_id`。还没有学话时是空数组。
+
+`fun.search` 在 tag 的名字和别名、收藏的名称和链接、以及当前会话的学话里做包含匹配。匹配按原文，`cat` 对不上 `Cat`。学话的范围和 `fun.learn` 相同。返回对象有 `tags`、`stars`、`learn` 三个数组，形状和上面三个方法一样。`q` 缺失或空白时，服务返回错误，用户看到「我没查成，过一会儿再问我一次。」查不到时三个数组都是空的，这不是错误。
 
 `[[plugins.configs.agent.tools]]` 可以再追加别的 `服务.方法`。配置项的函数名和某个已启用内置工具相同，就留下内置的那一项。这个内置工具的开关为 false 时，同名配置项会发出去。
 

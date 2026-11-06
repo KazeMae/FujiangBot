@@ -63,7 +63,11 @@ fn builtin_tools_follow_the_switches() {
             "contest_upcoming",
             "contest_today",
             "problem_today",
-            "memo_list"
+            "memo_list",
+            "fun_tags",
+            "fun_stars",
+            "fun_learn",
+            "fun_search"
         ]
     );
     assert_eq!(on[0].service(), "rank");
@@ -131,6 +135,7 @@ fn builtin_tools_follow_the_switches() {
             problem: false,
             memo: false,
             memo_write: false,
+            fun: false,
         },
     );
     assert_eq!(
@@ -148,6 +153,7 @@ fn builtin_tools_follow_the_switches() {
             problem: false,
             memo: false,
             memo_write: false,
+            fun: false,
         },
     );
     assert_eq!(
@@ -165,6 +171,7 @@ fn builtin_tools_follow_the_switches() {
             problem: true,
             memo: false,
             memo_write: false,
+            fun: false,
         },
     );
     assert_eq!(
@@ -178,8 +185,8 @@ fn builtin_tools_follow_the_switches() {
 
     let extra = ToolSpec::parse("memo.search", "查备忘", json!({})).unwrap();
     let with_extra = assemble_tools(&[extra], BuiltinTools::ON);
-    assert_eq!(with_extra[6].name(), "memo.search");
-    assert_eq!(with_extra[6].wire_name(), "memo_search");
+    assert_eq!(with_extra[10].name(), "memo.search");
+    assert_eq!(with_extra[10].wire_name(), "memo_search");
 
     let write = assemble_tools(
         &[],
@@ -189,6 +196,7 @@ fn builtin_tools_follow_the_switches() {
             problem: false,
             memo: true,
             memo_write: true,
+            fun: false,
         },
     );
     assert_eq!(
@@ -212,6 +220,7 @@ fn builtin_tools_follow_the_switches() {
             problem: false,
             memo: false,
             memo_write: true,
+            fun: false,
         },
     );
     assert!(list_only.is_empty());
@@ -223,7 +232,7 @@ fn builtin_tools_follow_the_switches() {
     )
     .unwrap();
     let kept_builtin = assemble_tools(std::slice::from_ref(&configured), BuiltinTools::ON);
-    assert_eq!(kept_builtin.len(), 6);
+    assert_eq!(kept_builtin.len(), 10);
     assert_eq!(kept_builtin[0].description(), on[0].description());
     assert_eq!(kept_builtin[0].parameters(), on[0].parameters());
 
@@ -246,7 +255,11 @@ rank.get：按 Codeforces handle 查一位已登记队员。可选字符串参�
 contest.upcoming：列出即将开始的比赛。可选字符串参数 oj，例如 Codeforces 或 Atcoder。不传则返回全部。\n\
 contest.today：列出今天开始的比赛。不需要参数。\n\
 problem.today：返回当前每日一题里已经保存的题目。不需要参数。还没保存时是空数组。\n\
-memo.list：列出当前对话已经记下的备忘。不需要参数。还没有备忘时是空数组。"
+memo.list：列出当前对话已经记下的备忘。不需要参数。还没有备忘时是空数组。\n\
+fun.tags：列出图库的 tag，含条数和别名。旧专辑也在这份清单里。不需要参数。还没有 tag 时是空数组。\n\
+fun.stars：列出收藏夹的名称和链接。不需要参数。还没有收藏时是空数组。\n\
+fun.learn：列出当前会话的学话。可选字符串 trigger，只返回这个触发词。群里看本群，私聊看全局。还没有时是空数组。\n\
+fun.search：在 tag、收藏和当前会话的学话里按原文查找。字符串参数 q。q 为空时这次调用失败。"
     );
     assert!(!text.contains('_'));
     assert_eq!(tools_command_text(&[]), "当前没有可用工具。");
@@ -496,7 +509,11 @@ async fn builtin_rank_and_contest_calls_return_the_model_text() {
             "contest_upcoming",
             "contest_today",
             "problem_today",
-            "memo_list"
+            "memo_list",
+            "fun_tags",
+            "fun_stars",
+            "fun_learn",
+            "fun_search"
         ]
     );
     assert_eq!(
@@ -619,6 +636,7 @@ async fn disabled_builtin_group_stays_out_of_the_request() {
             problem: false,
             memo: false,
             memo_write: false,
+            fun: false,
         },
         3,
         &hub,
@@ -712,6 +730,7 @@ enum Kind {
     ProblemCall,
     Metered,
     MemoList,
+    FunLearn,
 }
 
 #[derive(Clone)]
@@ -785,6 +804,10 @@ async fn handle(State(script): State<Script>, Json(body): Json<Value>) -> Json<V
         }),
         Kind::MemoList if n == 0 => one_call_with("call_memo", "memo_list", "{}"),
         Kind::MemoList => saying("这个对话有一条备忘。"),
+        Kind::FunLearn if n == 0 => {
+            one_call_with("call_fun", "fun_learn", r#"{"group_id":99,"trigger":"猫"}"#)
+        }
+        Kind::FunLearn => saying("学话里有一条。"),
         Kind::MissingId => json!({
             "output": [{
                 "type": "function_call",
@@ -955,5 +978,7 @@ impl Subscriber for Catch {
     fn exit(&self, _: &Id) {}
 }
 
+#[path = "fun_tests.rs"]
+mod fun_tests;
 #[path = "memo_tests.rs"]
 mod memo_tests;
