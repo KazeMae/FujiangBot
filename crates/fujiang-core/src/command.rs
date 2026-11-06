@@ -19,7 +19,7 @@ pub fn expand(declared: &str, bot_prefix: &str) -> String {
 }
 
 pub fn first_token(line: &str) -> &str {
-    line.trim().split_whitespace().next().unwrap_or("")
+    line.split_whitespace().next().unwrap_or("")
 }
 
 /// Exact first-token match (`.luck 10` with prefix `!` matches `!luck`).
@@ -82,7 +82,7 @@ pub fn rewrite_help(help: &str, declared: &[&str], bot_prefix: &str) -> String {
 }
 
 pub fn plugin_help(plugin: &dyn Plugin, bot_prefix: &str) -> String {
-    let mut declared: Vec<&str> = plugin.commands().iter().copied().collect();
+    let mut declared: Vec<&str> = plugin.commands().to_vec();
     declared.extend(plugin.command_prefixes().iter().copied());
     rewrite_help(plugin.help(), &declared, bot_prefix)
 }

@@ -3,10 +3,10 @@
 //! A tool name is `service.method` (split on the first `.`). Responses function
 //! names match `^[a-zA-Z0-9_-]+$`, so the request sends `.` as `_`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use async_trait::async_trait;
-use fujiang_core::{BotContext, Source};
+use fujiang_core::{BotContext, Messenger, Source};
 use serde_json::{Map, Value};
 use tracing::warn;
 
@@ -16,6 +16,7 @@ use crate::client::{
     ChatMessage, FunctionCall, FunctionTool, LlmClient, LlmError, ModelOutput, PriorCall,
 };
 
+mod qq_read;
 mod skills;
 
 pub(crate) use skills::resident_tools;
@@ -99,12 +100,21 @@ pub(crate) struct ToolTurn {
 #[async_trait]
 pub(crate) trait ToolHub: Send + Sync {
     async fn invoke(&self, service: &str, method: &str, args: Value) -> anyhow::Result<Value>;
+
+    async fn onebot(&self, _action: &str, _params: Value) -> anyhow::Result<Value> {
+        anyhow::bail!("onebot call is not available")
+    }
 }
 
 #[async_trait]
 impl ToolHub for BotContext {
     async fn invoke(&self, service: &str, method: &str, args: Value) -> anyhow::Result<Value> {
         self.call(service, method, args).await
+    }
+
+    async fn onebot(&self, action: &str, params: Value) -> anyhow::Result<Value> {
+        let messenger = self.messenger().await;
+        Messenger::onebot(messenger.as_ref(), action, params).await
     }
 }
 
@@ -414,6 +424,7 @@ where
 {
     let max_rounds = pass.max_rounds;
     let mut opened = BTreeSet::new();
+    let mut members = HashMap::new();
     let mut prior = Vec::new();
     let mut used = 0u32;
     let mut calls = 0i64;
@@ -475,13 +486,12 @@ where
                             );
                         }
                     };
-                    if let Some(result) = skills::exec(&call.name, &args, &opened_now, &mut opened)
-                    {
-                        match result {
-                            Ok(value) => {
+                    if let Some(step) = skills::exec(&call.name, &args, &opened_now, &mut opened) {
+                        match step {
+                            skills::SkillOut::Ready(Ok(value)) => {
                                 prior.push(prior_call(call, value));
                             }
-                            Err(tag) => {
+                            skills::SkillOut::Ready(Err(tag)) => {
                                 warn!(tool = %call.name, "{tag}");
                                 return tool_turn(
                                     Ok(ToolReply::Degraded(TOOL_FAIL_REPLY)),
@@ -489,6 +499,37 @@ where
                                     in_tokens,
                                     out_tokens,
                                 );
+                            }
+                            skills::SkillOut::Qq => {
+                                match qq_read::handle(
+                                    hub,
+                                    pass.scope,
+                                    &call.name,
+                                    &args,
+                                    &mut members,
+                                )
+                                .await
+                                {
+                                    Ok(value) => prior.push(prior_call(call, value)),
+                                    Err(qq_read::QqFail::Denied) => {
+                                        warn!(tool = %call.name, "{}", qq_read::DENIED);
+                                        return tool_turn(
+                                            Ok(ToolReply::Degraded(TOOL_FAIL_REPLY)),
+                                            calls,
+                                            in_tokens,
+                                            out_tokens,
+                                        );
+                                    }
+                                    Err(qq_read::QqFail::Down(err)) => {
+                                        warn!(error = %err, tool = %call.name, "agent tool");
+                                        return tool_turn(
+                                            Ok(ToolReply::Degraded(TOOL_FAIL_REPLY)),
+                                            calls,
+                                            in_tokens,
+                                            out_tokens,
+                                        );
+                                    }
+                                }
                             }
                         }
                         continue;

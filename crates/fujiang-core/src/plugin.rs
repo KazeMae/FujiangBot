@@ -36,6 +36,7 @@ pub trait Messenger: Send + Sync {
     async fn get_message(&self, id: i64) -> anyhow::Result<MessageEvent>;
     async fn get_image(&self, file: &str) -> anyhow::Result<std::path::PathBuf>;
     async fn get_file(&self, file_id: &str) -> anyhow::Result<std::path::PathBuf>;
+    async fn onebot(&self, action: &str, params: Value) -> anyhow::Result<Value>;
 }
 
 #[async_trait]

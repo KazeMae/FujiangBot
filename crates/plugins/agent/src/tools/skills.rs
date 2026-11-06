@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use serde_json::{json, Value};
 
+use super::qq_read;
 use super::{assemble_tools, default_parameters, BuiltinTools, ToolSpec};
 
 pub(crate) const UNKNOWN_SKILL: &str = "agent skill unknown";
@@ -60,7 +61,20 @@ pub(crate) fn round_tools(
             push_new(&mut tools, spec);
         }
     }
+    if opened.contains(qq_read::PACK) {
+        for tool in qq_read::read_tools() {
+            let spec = ToolSpec::parse(tool.name, tool.description, qq_read::parameters(tool.wire))
+                .expect(tool.name);
+            push_new(&mut tools, spec);
+        }
+    }
     tools
+}
+
+#[derive(Debug)]
+pub(crate) enum SkillOut {
+    Ready(Result<Value, &'static str>),
+    Qq,
 }
 
 pub(crate) fn exec(
@@ -68,27 +82,33 @@ pub(crate) fn exec(
     args: &Value,
     opened_now: &BTreeSet<String>,
     opened: &mut BTreeSet<String>,
-) -> Option<Result<Value, &'static str>> {
+) -> Option<SkillOut> {
     if wire == "skills_list" {
-        return Some(Ok(list_value()));
+        return Some(SkillOut::Ready(Ok(list_value())));
     }
     if wire == "skills_open" {
-        return Some(open_value(args, opened));
+        return Some(SkillOut::Ready(open_value(args, opened)));
     }
     let pack = pack_of(wire)?;
     if !opened_now.contains(pack) {
-        return Some(Err(CLOSED_SKILL));
+        return Some(SkillOut::Ready(Err(CLOSED_SKILL)));
     }
-    Some(invoke(wire))
+    if pack == qq_read::PACK {
+        return Some(SkillOut::Qq);
+    }
+    Some(SkillOut::Ready(invoke(wire)))
 }
 
 fn list_value() -> Value {
-    Value::Array(
-        PACKS
-            .iter()
-            .map(|pack| json!({"name": pack.name, "description": pack.description}))
-            .collect(),
-    )
+    let mut rows: Vec<Value> = PACKS
+        .iter()
+        .map(|pack| json!({"name": pack.name, "description": pack.description}))
+        .collect();
+    rows.push(json!({
+        "name": qq_read::PACK,
+        "description": qq_read::PACK_DESC
+    }));
+    Value::Array(rows)
 }
 
 fn open_value(args: &Value, opened: &mut BTreeSet<String>) -> Result<Value, &'static str> {
@@ -97,7 +117,7 @@ fn open_value(args: &Value, opened: &mut BTreeSet<String>) -> Result<Value, &'st
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim();
-    if !PACKS.iter().any(|pack| pack.name == name) {
+    if !PACKS.iter().any(|pack| pack.name == name) && name != qq_read::PACK {
         return Err(UNKNOWN_SKILL);
     }
     opened.insert(name.to_string());
@@ -131,6 +151,9 @@ fn reserved_wire(wire: &str) -> bool {
 }
 
 fn pack_of(wire: &str) -> Option<&'static str> {
+    if qq_read::is_read_tool(wire) {
+        return Some(qq_read::PACK);
+    }
     PACKS.iter().find_map(|pack| {
         pack.tools
             .iter()

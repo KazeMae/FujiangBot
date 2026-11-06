@@ -34,6 +34,14 @@ fn outputs(body: &Value) -> Vec<String> {
         .collect()
 }
 
+fn ready(step: Option<skills::SkillOut>) -> Result<Value, &'static str> {
+    match step {
+        Some(skills::SkillOut::Ready(result)) => result,
+        Some(skills::SkillOut::Qq) => panic!("qq"),
+        None => panic!("none"),
+    }
+}
+
 fn script_of(steps: Vec<Value>) -> Script {
     let mut script = Script::new(Kind::Text);
     script.steps = Arc::new(steps);
@@ -106,9 +114,7 @@ fn resident_meta_tools_stay_on_and_pack_tools_stay_closed() {
 fn list_open_unknown_and_closed_dispatch() {
     let mut opened = BTreeSet::new();
     let now = opened.clone();
-    let listed = skills::exec("skills_list", &json!({}), &now, &mut opened)
-        .unwrap()
-        .unwrap();
+    let listed = ready(skills::exec("skills_list", &json!({}), &now, &mut opened)).unwrap();
     assert!(opened.is_empty());
     let row = &listed[0];
     assert_eq!(row["name"], "ping");
@@ -130,29 +136,33 @@ fn list_open_unknown_and_closed_dispatch() {
         json!(null),
     ] {
         let now = opened.clone();
-        let err = skills::exec("skills_open", &bad, &now, &mut opened)
-            .unwrap()
-            .unwrap_err();
+        let err = ready(skills::exec("skills_open", &bad, &now, &mut opened)).unwrap_err();
         assert_eq!(err, UNKNOWN_SKILL);
         assert!(opened.is_empty());
     }
 
     let now = opened.clone();
-    let closed = skills::exec("ping_pong", &json!({}), &now, &mut opened)
-        .unwrap()
-        .unwrap_err();
+    let closed = ready(skills::exec("ping_pong", &json!({}), &now, &mut opened)).unwrap_err();
     assert_eq!(closed, CLOSED_SKILL);
     assert!(opened.is_empty());
 
     let now = opened.clone();
-    let opened_ok = skills::exec("skills_open", &json!({"name": " ping "}), &now, &mut opened)
-        .unwrap()
-        .unwrap();
+    let opened_ok = ready(skills::exec(
+        "skills_open",
+        &json!({"name": " ping "}),
+        &now,
+        &mut opened,
+    ))
+    .unwrap();
     assert_eq!(opened_ok, json!({"name": "ping", "opened": true}));
     let now = opened.clone();
-    let again = skills::exec("skills_open", &json!({"name": "ping"}), &now, &mut opened)
-        .unwrap()
-        .unwrap();
+    let again = ready(skills::exec(
+        "skills_open",
+        &json!({"name": "ping"}),
+        &now,
+        &mut opened,
+    ))
+    .unwrap();
     assert_eq!(again, opened_ok);
     assert_eq!(
         opened.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -160,9 +170,7 @@ fn list_open_unknown_and_closed_dispatch() {
     );
 
     let now = opened.clone();
-    let pong = skills::exec("ping_pong", &json!({}), &now, &mut opened)
-        .unwrap()
-        .unwrap();
+    let pong = ready(skills::exec("ping_pong", &json!({}), &now, &mut opened)).unwrap();
     assert_eq!(pong, json!({"pong": true}));
 
     let mut sink = BTreeSet::new();

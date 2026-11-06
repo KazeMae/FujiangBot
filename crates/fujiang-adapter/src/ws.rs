@@ -122,4 +122,12 @@ impl Messenger for WsAdapter {
             .map(std::path::PathBuf::from)
             .ok_or_else(|| anyhow::anyhow!("get_file: empty path"))
     }
+
+    async fn onebot(
+        &self,
+        action: &str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        Ok(self.client.send_value(action, params).await?)
+    }
 }

@@ -520,7 +520,8 @@ impl Dispatcher {
             .map(|s| (s.id.clone(), s.plugin.clone(), s.scope.clone()))
             .collect();
 
-        let mut prepared: Vec<(i64, usize, Arc<dyn Plugin>, Arc<PluginScope>)> = Vec::new();
+        type Prepared = (i64, usize, Arc<dyn Plugin>, Arc<PluginScope>);
+        let mut prepared: Vec<Prepared> = Vec::new();
         for (idx, (id, p, scope)) in slots.into_iter().enumerate() {
             let cfg = slot_config(ctx, &id, p.name()).await;
             if !plugin_sees(&cfg, ev) {
@@ -914,6 +915,13 @@ mod tests {
             anyhow::bail!("no")
         }
         async fn get_file(&self, _file_id: &str) -> anyhow::Result<std::path::PathBuf> {
+            anyhow::bail!("no")
+        }
+        async fn onebot(
+            &self,
+            _action: &str,
+            _params: serde_json::Value,
+        ) -> anyhow::Result<serde_json::Value> {
             anyhow::bail!("no")
         }
     }

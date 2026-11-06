@@ -132,4 +132,44 @@ impl Messenger for HttpAdapter {
             .map(std::path::PathBuf::from)
             .ok_or_else(|| anyhow::anyhow!("get_file: empty path"))
     }
+
+    async fn onebot(&self, action: &str, params: Value) -> anyhow::Result<Value> {
+        Ok(self.api.send_value(action, params).await?)
+    }
+}
+
+#[cfg(test)]
+mod onebot_tests {
+    use super::*;
+    use fujiang_core::Messenger;
+    use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn onebot_uses_the_existing_http_client() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = s.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]);
+            assert!(req.contains("POST /get_group_info "));
+            assert!(req.contains("Bearer secret"));
+            assert!(req.contains("\"group_id\":7"));
+            let body = r#"{"status":"ok","retcode":0,"data":{"group_id":7,"group_name":"g"}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            s.write_all(resp.as_bytes()).await.unwrap();
+        });
+        let adapter = HttpAdapter::new(format!("http://{addr}"), "127.0.0.1:9", "secret").unwrap();
+        let got = adapter
+            .onebot("get_group_info", json!({"group_id": 7}))
+            .await
+            .unwrap();
+        assert_eq!(got["group_name"], "g");
+    }
 }
