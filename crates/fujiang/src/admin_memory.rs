@@ -112,7 +112,6 @@ pub(crate) async fn put_memory(
     State(state): State<Arc<AppState>>,
     Json(body): Json<Value>,
 ) -> Response {
-    // 运维口：按请求里的 scope 写入，不走 agent 工具的宿主注入。
     let write = match upsert_from_json(&body) {
         Ok(write) => write,
         Err(error) => return bad(error),
