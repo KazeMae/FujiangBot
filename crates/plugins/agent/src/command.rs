@@ -12,8 +12,8 @@ pub(crate) const HELP: &str =
 同一群共用一份上下文，私聊各自一份。\n\
 .agent              本说明\n\
 .agent reset        清空当前群或私聊的对话记录和摘要，人设保留\n\
-.agent memory       查看当前会话的摘要\n\
-.agent forget       只清空摘要，对话记录和人设保留\n\
+.agent memory       查看当前会话的摘要。这是会话摘要，不是分层记忆\n\
+.agent forget       只清空摘要。这是会话摘要，不是分层记忆。对话记录和人设保留\n\
 .agent persona      查看当前人设\n\
 .agent persona <名> 切换到配置里的人设\n\
 .agent status       当前人设、这一小时还剩几次，以及今日调用和 token\n\
@@ -171,6 +171,8 @@ pub(crate) fn enabled_builtins(cfg: &AgentConfig) -> tools::BuiltinTools {
         memo: cfg.enable_memo_tools,
         memo_write: cfg.enable_memo_write_tools,
         fun: cfg.enable_fun_tools,
+        memory: cfg.enable_memory_tools,
+        memory_write: cfg.enable_memory_write_tools,
     }
 }
 

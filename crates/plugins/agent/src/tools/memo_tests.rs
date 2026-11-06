@@ -52,14 +52,11 @@ async fn memo_list_fills_the_current_chat_and_a_missing_service_degrades() {
     let pass = ToolPass {
         max_rounds: 3,
         scope: Some(&scope),
+        memory: None,
     };
     let memo_only = BuiltinTools {
-        rank: false,
-        contest: false,
-        problem: false,
         memo: true,
-        memo_write: false,
-        fun: false,
+        ..BuiltinTools::OFF
     };
     let reply = run_tool_loop(&client, &user("备忘里有什么"), &[], memo_only, &pass, &hub)
         .await

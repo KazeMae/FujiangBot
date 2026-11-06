@@ -28,9 +28,17 @@ fn fun_reads_register_and_writes_stay_out() {
             "fun.stars",
             "fun.learn",
             "fun.search",
+            "memory.list",
+            "memory.get",
+            "memory.upsert",
+            "memory.forget",
         ]
     );
-    for name in on.iter().map(ToolSpec::wire_name) {
+    for name in on
+        .iter()
+        .filter(|spec| spec.service() == "fun")
+        .map(ToolSpec::wire_name)
+    {
         for banned in WRITE_NAMES {
             assert!(!name.contains(banned), "{name} contains {banned}");
         }
@@ -58,12 +66,9 @@ fn fun_reads_register_and_writes_stay_out() {
     let write_flag_only = assemble_tools(
         &[],
         BuiltinTools {
-            rank: false,
-            contest: false,
-            problem: false,
-            memo: false,
             memo_write: true,
             fun: true,
+            ..BuiltinTools::OFF
         },
     );
     assert_eq!(
@@ -125,14 +130,11 @@ async fn fun_learn_fills_the_current_group() {
     let pass = ToolPass {
         max_rounds: 3,
         scope: Some(&scope),
+        memory: None,
     };
     let fun_only = BuiltinTools {
-        rank: false,
-        contest: false,
-        problem: false,
-        memo: false,
-        memo_write: false,
         fun: true,
+        ..BuiltinTools::OFF
     };
     let reply = run_tool_loop(&client, &user("学话里有什么"), &[], fun_only, &pass, &hub)
         .await
