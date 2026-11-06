@@ -1,7 +1,9 @@
 //! Chat plugin. `.agent` edits the session. A wake calls the LLM and returns [`Flow::Stop`].
 
 mod client;
+mod command;
 mod config;
+mod plan;
 mod session;
 mod tools;
 mod trigger;
@@ -17,45 +19,22 @@ pub use tools::ToolSpec;
 
 use async_trait::async_trait;
 use fujiang_core::{
-    command, declare_plugin, BotContext, Event, Flow, Interest, MessageEvent, Plugin, PluginMeta,
-    PluginScope,
+    command::strip_token, declare_plugin, BotContext, Event, Flow, Interest, MessageEvent, Plugin,
+    PluginMeta, PluginScope,
 };
 use sqlx::SqlitePool;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::warn;
 
+use crate::command::{apply_command, enabled_builtins, log_enabled_tools, parse_agent_cmd, HELP};
+use crate::plan::{plan_chat, ChatPlan};
 use crate::session::{save_exchange, session_key};
-use crate::trigger::{build_messages, claim, fit_reply, llm_reply, Claim, BUSY_REPLY};
+use crate::trigger::{claim, fit_reply, llm_reply, Claim, BUSY_REPLY};
 
-const HELP: &str = "对话。@我、消息里带唤醒词（默认「福酱」），或回复我的消息，我会接话。\n\
-同一群共用一份上下文，私聊各自一份。\n\
-.agent              本说明\n\
-.agent reset        清空当前群或私聊的对话记录，人设保留\n\
-.agent persona      查看当前人设\n\
-.agent persona <名> 切换到配置里的人设\n\
-.agent status       当前人设、这一小时还剩几次，以及今日调用和 token\n\
-.agent tools        列出当前启用的工具\n\
-在配置里把 priority 设为 10，高于 fun。本插件接过的消息返回 Stop，fun 不会再处理同一条。\n\
-require_at 为 true 时，只认 @我或回复我，单独的唤醒词不算。";
-
-const USER_LIMIT_TIP: &str = "你这一小时里找福酱的次数到了，歇一会儿再来。";
-const SESSION_LIMIT_TIP: &str = "这个会话这一小时的次数到了，歇一会儿再来。";
-const BLACKLIST_TIP: &str = "这句话我不能接，换个说法再问我。";
-enum AgentCmd {
-    Help,
-    Reset,
-    Status,
-    Tools,
-    ShowPersona,
-    SetPersona(String),
-    Unknown,
-}
-
-enum ChatPlan {
-    Speak { messages: Vec<ChatMessage> },
-    Tip(&'static str),
-    MissingKey,
-}
+#[cfg(test)]
+pub(crate) use command::AgentCmd;
+#[cfg(test)]
+pub(crate) use plan::{BLACKLIST_TIP, SESSION_LIMIT_TIP, USER_LIMIT_TIP};
 
 pub struct AgentPlugin {
     pool: Mutex<Option<SqlitePool>>,
@@ -124,7 +103,7 @@ impl Plugin for AgentPlugin {
         }
         let cfg = AgentConfig::from_value(&ctx.instance_config(scope).await);
         let prefix = ctx.bot_config().await.command_prefix;
-        if let Some(rest) = command::strip_token(&msg.command_line(), ".agent", &prefix) {
+        if let Some(rest) = strip_token(&msg.command_line(), ".agent", &prefix) {
             self.on_command(ctx, msg, &cfg, rest).await;
             return Ok(Flow::Stop);
         }
@@ -326,219 +305,6 @@ async fn say(ctx: &BotContext, msg: &MessageEvent, text: impl Into<String>) {
     }
 }
 
-fn parse_agent_cmd(rest: &str) -> AgentCmd {
-    let mut parts = rest.split_whitespace();
-    let verb = parts.next().unwrap_or("");
-    match verb {
-        "" | "help" | "-h" | "--help" => AgentCmd::Help,
-        "reset" => {
-            if parts.next().is_some() {
-                AgentCmd::Unknown
-            } else {
-                AgentCmd::Reset
-            }
-        }
-        "status" => {
-            if parts.next().is_some() {
-                AgentCmd::Unknown
-            } else {
-                AgentCmd::Status
-            }
-        }
-        "tools" => {
-            if parts.next().is_some() {
-                AgentCmd::Unknown
-            } else {
-                AgentCmd::Tools
-            }
-        }
-        "persona" => match parts.next() {
-            None => AgentCmd::ShowPersona,
-            Some(name) if parts.next().is_none() => AgentCmd::SetPersona(name.to_string()),
-            Some(_) => AgentCmd::Unknown,
-        },
-        _ => AgentCmd::Unknown,
-    }
-}
-
-async fn apply_command(
-    pool: &SqlitePool,
-    cfg: &AgentConfig,
-    session_key: &str,
-    user_id: i64,
-    cmd: &AgentCmd,
-    prefix: &str,
-    now: i64,
-) -> anyhow::Result<String> {
-    match cmd {
-        AgentCmd::Help => Ok(command::rewrite_help(HELP, &[".agent"], prefix)),
-        AgentCmd::Unknown => {
-            let shown = command::expand(".agent", prefix);
-            Ok(format!("不认识这个子命令，发 {shown} 看说明"))
-        }
-        AgentCmd::Reset => {
-            let n = session::clear_messages(pool, session_key).await?;
-            if n == 0 {
-                Ok("当前会话没有对话记录。".to_string())
-            } else {
-                Ok("已清空当前会话的对话记录。".to_string())
-            }
-        }
-        AgentCmd::ShowPersona => {
-            let stored = session::persona_of(pool, session_key).await?;
-            let (title, prompt) = persona_line(cfg, stored.as_deref());
-            Ok(format!("当前人设：{title}\n{}", fit_reply(prompt)))
-        }
-        AgentCmd::SetPersona(name) => {
-            if cfg.prompt_for(name).is_none() {
-                let known = cfg.persona_names().join("、");
-                return Ok(format!("没有人设 {name}。可用：{known}。"));
-            }
-            session::set_persona(pool, session_key, name, now).await?;
-            Ok(format!("已切换到人设 {name}。"))
-        }
-        AgentCmd::Status => {
-            let stored = session::persona_of(pool, session_key).await?;
-            let (title, _) = persona_line(cfg, stored.as_deref());
-            let counts = session::usage_counts(pool, session_key, user_id, now).await?;
-            let quota = quota_sentence(
-                cfg.rate_limit.per_user_per_hour,
-                counts.user,
-                cfg.rate_limit.per_group_per_hour,
-                counts.session,
-            );
-            let today = session::today_usage(pool, session_key, user_id, now).await?;
-            Ok(format!(
-                "人设：{title}\n{quota}\n{}",
-                today_sentence(today.user, today.session)
-            ))
-        }
-        AgentCmd::Tools => {
-            let tools = log_enabled_tools(cfg);
-            Ok(fit_reply(&tools::tools_command_text(&tools)))
-        }
-    }
-}
-
-fn enabled_builtins(cfg: &AgentConfig) -> tools::BuiltinTools {
-    tools::BuiltinTools {
-        rank: cfg.enable_rank_tools,
-        contest: cfg.enable_contest_tools,
-        problem: cfg.enable_problem_tools,
-        memo: cfg.enable_memo_tools,
-        memo_write: cfg.enable_memo_write_tools,
-        fun: cfg.enable_fun_tools,
-    }
-}
-
-fn log_enabled_tools(cfg: &AgentConfig) -> Vec<ToolSpec> {
-    let tools = tools::assemble_tools(&cfg.tools, enabled_builtins(cfg));
-    let names: Vec<&str> = tools.iter().map(ToolSpec::name).collect();
-    info!(tools = ?names, "agent tools");
-    tools
-}
-
-/// History is loaded before the slot so a failed read does not burn quota.
-async fn plan_chat(
-    pool: &SqlitePool,
-    cfg: &AgentConfig,
-    session_key: &str,
-    user_id: i64,
-    user_text: &str,
-    now: i64,
-    key_ready: bool,
-) -> anyhow::Result<ChatPlan> {
-    if cfg.keyword_hit(user_text) {
-        return Ok(ChatPlan::Tip(BLACKLIST_TIP));
-    }
-    if !key_ready {
-        return Ok(ChatPlan::MissingKey);
-    }
-    if cfg.is_admin(user_id) {
-        let messages = turn_messages(pool, cfg, session_key, user_text).await?;
-        return Ok(ChatPlan::Speak { messages });
-    }
-    let messages = turn_messages(pool, cfg, session_key, user_text).await?;
-    let slot = session::take_slot(
-        pool,
-        session_key,
-        user_id,
-        cfg.rate_limit.per_user_per_hour,
-        cfg.rate_limit.per_group_per_hour,
-        now,
-    )
-    .await?;
-    Ok(match slot {
-        session::Slot::Taken => ChatPlan::Speak { messages },
-        session::Slot::UserLimited => ChatPlan::Tip(USER_LIMIT_TIP),
-        session::Slot::SessionLimited => ChatPlan::Tip(SESSION_LIMIT_TIP),
-    })
-}
-
-async fn turn_messages(
-    pool: &SqlitePool,
-    cfg: &AgentConfig,
-    session_key: &str,
-    user_text: &str,
-) -> anyhow::Result<Vec<ChatMessage>> {
-    let stored = session::persona_of(pool, session_key).await?;
-    let (_, persona) = cfg.resolve_persona(stored.as_deref());
-    let enabled = tools::assemble_tools(&cfg.tools, enabled_builtins(cfg));
-    let prompt = tools::instructions_with_catalog(persona, &enabled, cfg.inject_tool_list);
-    let history = session::recent_turns(pool, session_key, cfg.max_history_turns).await?;
-    Ok(build_messages(&prompt, history, user_text.to_string()))
-}
-
-fn persona_line<'a>(cfg: &'a AgentConfig, stored: Option<&str>) -> (String, &'a str) {
-    let (effective, prompt) = cfg.resolve_persona(stored);
-    let title = match stored {
-        Some(saved) if saved != effective => {
-            format!("{saved}，配置里没有，正在用 {effective}。")
-        }
-        _ => effective.to_string(),
-    };
-    (title, prompt)
-}
-
-fn seats_left(limit: u32, used: i64) -> Option<u32> {
-    if limit == 0 {
-        return None;
-    }
-    let used = u32::try_from(used.max(0)).unwrap_or(u32::MAX);
-    Some(limit.saturating_sub(used))
-}
-
-fn today_sentence(user: session::DayUsage, session: session::DayUsage) -> String {
-    format!(
-        "今日你 {uc} 次，输入 {ui}，输出 {uo}。今日会话 {sc} 次，输入 {si}，输出 {so}。",
-        uc = user.calls,
-        ui = user.in_tokens,
-        uo = user.out_tokens,
-        sc = session.calls,
-        si = session.in_tokens,
-        so = session.out_tokens,
-    )
-}
-
-fn quota_sentence(
-    user_limit: u32,
-    user_used: i64,
-    session_limit: u32,
-    session_used: i64,
-) -> String {
-    match (
-        seats_left(user_limit, user_used),
-        seats_left(session_limit, session_used),
-    ) {
-        (None, None) => "这一小时不限次数。".to_string(),
-        (Some(user), None) => format!("你这一小时还剩 {user} 次，这个会话不限次数。"),
-        (None, Some(session)) => format!("你这一小时不限次数，这个会话还剩 {session} 次。"),
-        (Some(user), Some(session)) => {
-            format!("你这一小时还剩 {user} 次，这个会话还剩 {session} 次。")
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::session;
@@ -597,123 +363,6 @@ mod tests {
         assert!(plugin.help().contains(".agent persona"));
         assert!(plugin.help().contains(".agent status"));
         assert!(plugin.help().contains(".agent tools"));
-    }
-
-    #[test]
-    fn parses_subcommands_from_the_first_token() {
-        assert!(matches!(parse_agent_cmd(""), AgentCmd::Help));
-        assert!(matches!(parse_agent_cmd("-h"), AgentCmd::Help));
-        assert!(matches!(parse_agent_cmd("reset"), AgentCmd::Reset));
-        assert!(matches!(parse_agent_cmd("reset now"), AgentCmd::Unknown));
-        assert!(matches!(parse_agent_cmd("status"), AgentCmd::Status));
-        assert!(matches!(parse_agent_cmd("tools"), AgentCmd::Tools));
-        assert!(matches!(parse_agent_cmd("tools now"), AgentCmd::Unknown));
-        assert!(matches!(parse_agent_cmd("persona"), AgentCmd::ShowPersona));
-        assert!(matches!(
-            parse_agent_cmd("persona strict"),
-            AgentCmd::SetPersona(ref name) if name == "strict"
-        ));
-        assert!(matches!(
-            parse_agent_cmd("persona strict now"),
-            AgentCmd::Unknown
-        ));
-        assert!(matches!(parse_agent_cmd("nope"), AgentCmd::Unknown));
-
-        let rest = command::strip_token(".agent persona strict", ".agent", ".").unwrap();
-        assert!(
-            matches!(parse_agent_cmd(rest), AgentCmd::SetPersona(ref name) if name == "strict")
-        );
-        let rest = command::strip_token("!agent reset", ".agent", "!").unwrap();
-        assert!(matches!(parse_agent_cmd(rest), AgentCmd::Reset));
-        assert!(command::strip_token("福酱 reset", ".agent", ".").is_none());
-        assert!(command::strip_token("请 .agent reset", ".agent", ".").is_none());
-    }
-
-    #[tokio::test]
-    async fn reset_clears_only_this_session_and_keeps_the_persona() {
-        let pool = pool().await;
-        let cfg = cfg(2, 4);
-        let group = session_key(Source::Group { id: 7 });
-        let friend = session_key(Source::Friend { id: 7 });
-        save_exchange(&pool, &group, 1, "g", "ga").await.unwrap();
-        save_exchange(&pool, &friend, 7, "p", "pa").await.unwrap();
-        session::set_persona(&pool, &group, "strict", 1)
-            .await
-            .unwrap();
-
-        let text = run(&pool, &cfg, &group, 1, &AgentCmd::Reset, 2).await;
-        assert_eq!(text, "已清空当前会话的对话记录。");
-        assert!(session::recent_turns(&pool, &group, 20)
-            .await
-            .unwrap()
-            .is_empty());
-        let left = session::recent_turns(&pool, &friend, 20).await.unwrap();
-        assert_eq!(left.len(), 2);
-        assert_eq!(left[0].content, "p");
-        assert_eq!(
-            session::persona_of(&pool, &group).await.unwrap().as_deref(),
-            Some("strict")
-        );
-        assert_eq!(usage_rows(&pool).await, 0);
-
-        let again = run(&pool, &cfg, &group, 1, &AgentCmd::Reset, 3).await;
-        assert_eq!(again, "当前会话没有对话记录。");
-    }
-
-    #[tokio::test]
-    async fn persona_view_switches_and_rejects_unknown_names() {
-        let pool = pool().await;
-        let cfg = cfg(2, 4);
-        let key = session_key(Source::Group { id: 1 });
-
-        let shown = run(&pool, &cfg, &key, 1, &AgentCmd::ShowPersona, 1).await;
-        assert_eq!(shown, "当前人设：default\n默认人设");
-        let switched = run(
-            &pool,
-            &cfg,
-            &key,
-            1,
-            &AgentCmd::SetPersona("strict".into()),
-            2,
-        )
-        .await;
-        assert_eq!(switched, "已切换到人设 strict。");
-        let shown = run(&pool, &cfg, &key, 1, &AgentCmd::ShowPersona, 3).await;
-        assert_eq!(shown, "当前人设：strict\n严格人设");
-
-        let missing = run(
-            &pool,
-            &cfg,
-            &key,
-            1,
-            &AgentCmd::SetPersona("nope".into()),
-            4,
-        )
-        .await;
-        assert_eq!(missing, "没有人设 nope。可用：default、strict。");
-        assert_eq!(
-            session::persona_of(&pool, &key).await.unwrap().as_deref(),
-            Some("strict")
-        );
-        assert_eq!(usage_rows(&pool).await, 0);
-
-        session::set_persona(&pool, &key, "ghost", 5).await.unwrap();
-        let stale = run(&pool, &cfg, &key, 1, &AgentCmd::ShowPersona, 6).await;
-        assert_eq!(
-            stale,
-            "当前人设：ghost，配置里没有，正在用 default。\n默认人设"
-        );
-
-        let help = apply_command(&pool, &cfg, &key, 1, &AgentCmd::Help, "!", 7)
-            .await
-            .unwrap();
-        assert!(help.contains("!agent reset"));
-        assert!(help.contains("!agent tools"));
-        assert!(!help.contains(".agent"));
-        let unknown = apply_command(&pool, &cfg, &key, 1, &AgentCmd::Unknown, ".", 8)
-            .await
-            .unwrap();
-        assert_eq!(unknown, "不认识这个子命令，发 .agent 看说明");
     }
 
     #[tokio::test]
@@ -952,49 +601,6 @@ mod tests {
                 .map(|m| m.content.as_str())
                 .collect::<Vec<_>>(),
             vec!["默认人设", "u2", "a2", "u3"]
-        );
-    }
-
-    #[tokio::test]
-    async fn status_shows_today_for_this_user_and_this_session() {
-        let pool = pool().await;
-        let cfg = cfg(0, 0);
-        let day = 86_400 * 10;
-        session::record_daily(&pool, "group:7", 5, day + 10, 1, 4, 2)
-            .await
-            .unwrap();
-        session::record_daily(&pool, "private:5", 5, day + 30, 1, 10, 1)
-            .await
-            .unwrap();
-        session::record_daily(&pool, "group:7", 8, day + 40, 1, 7, 8)
-            .await
-            .unwrap();
-        let status = run(&pool, &cfg, "group:7", 5, &AgentCmd::Status, day + 50).await;
-        assert_eq!(
-            status,
-            "人设：default\n这一小时不限次数。\n今日你 2 次，输入 14，输出 3。今日会话 2 次，输入 11，输出 10。"
-        );
-        let next = run(&pool, &cfg, "group:7", 5, &AgentCmd::Status, day + 86_400).await;
-        assert_eq!(
-            next,
-            "人设：default\n这一小时不限次数。\n今日你 0 次，输入 0，输出 0。今日会话 0 次，输入 0，输出 0。"
-        );
-    }
-
-    #[test]
-    fn quota_wording_covers_each_cap() {
-        assert_eq!(quota_sentence(0, 0, 0, 0), "这一小时不限次数。");
-        assert_eq!(
-            quota_sentence(2, 1, 0, 9),
-            "你这一小时还剩 1 次，这个会话不限次数。"
-        );
-        assert_eq!(
-            quota_sentence(0, 0, 4, 1),
-            "你这一小时不限次数，这个会话还剩 3 次。"
-        );
-        assert_eq!(
-            quota_sentence(30, 30, 120, 7),
-            "你这一小时还剩 0 次，这个会话还剩 113 次。"
         );
     }
 }
