@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use fujiang_core::Plugin;
+use fujiang_plugin_agent::AgentPlugin;
 use fujiang_plugin_contest::ContestPlugin;
 use fujiang_plugin_fun::FunPlugin;
 use fujiang_plugin_luck::LuckPlugin;
@@ -12,15 +13,16 @@ use tracing::warn;
 
 use crate::config::AppConfig;
 
-pub const NAMES: &[&str] = &["contest", "rank", "problem", "fun", "luck"];
+pub const NAMES: &[&str] = &["contest", "rank", "problem", "fun", "luck", "agent"];
 
 pub fn make(name: &str) -> Option<Arc<dyn Plugin>> {
     Some(match name {
-        "contest" => Arc::new(ContestPlugin::default()),
-        "rank" => Arc::new(RankPlugin::default()),
-        "problem" => Arc::new(ProblemPlugin::default()),
-        "fun" => Arc::new(FunPlugin::default()),
-        "luck" => Arc::new(LuckPlugin::default()),
+        "contest" => Arc::new(ContestPlugin),
+        "rank" => Arc::new(RankPlugin),
+        "problem" => Arc::new(ProblemPlugin),
+        "fun" => Arc::new(FunPlugin),
+        "luck" => Arc::new(LuckPlugin),
+        "agent" => Arc::new(AgentPlugin::default()),
         _ => return None,
     })
 }
@@ -32,6 +34,7 @@ pub fn enabled(cfg: &AppConfig, name: &str) -> bool {
         "problem" => cfg.plugins.problem.enabled,
         "fun" => cfg.plugins.fun.enabled,
         "luck" => cfg.plugins.luck.enabled,
+        "agent" => !cfg.plugins.disabled.iter().any(|n| n == name),
         _ => false,
     }
 }
@@ -273,6 +276,20 @@ pub fn apply_config(cfg: &mut AppConfig, name: &str, v: Value) -> anyhow::Result
             }
             stash_overlay(cfg, name, &v, &["enabled"]);
         }
+        // Admin enable sends only {"enabled": bool}. Replacing configs.agent would drop the model table.
+        "agent"
+            if v.as_object()
+                .is_some_and(|o| o.len() == 1 && o.contains_key("enabled")) =>
+        {
+            if let Some(on) = v.get("enabled").and_then(|x| x.as_bool()) {
+                cfg.plugins.disabled.retain(|n| n != "agent");
+                if !on {
+                    cfg.plugins.disabled.push("agent".to_string());
+                    cfg.plugins.disabled.sort();
+                    cfg.plugins.disabled.dedup();
+                }
+            }
+        }
         other => {
             anyhow::ensure!(v.is_object() || v.is_null(), "插件配置必须是 JSON 对象");
             if v.is_null() {
@@ -319,9 +336,42 @@ mod tests {
             json!({ "enabled": true, "groups": [1, 2], "priority": 3 }),
         )
         .unwrap();
-        assert_eq!(cfg.plugins.luck.enabled, true);
+        assert!(cfg.plugins.luck.enabled);
         assert_eq!(config_view(&cfg, "luck")["groups"], json!([1, 2]));
         assert_eq!(config_view(&cfg, "luck")["priority"], 3);
         assert_eq!(config_view(&cfg, "luck")["enabled"], true);
+    }
+
+    #[test]
+    fn agent_builtin_keeps_dynamic_config() {
+        let cfg = sample();
+        assert!(enabled(&cfg, "agent"));
+        assert!(initial(&cfg).iter().any(|(n, _)| n == "agent"));
+
+        let mut off = cfg.clone();
+        off.plugins.disabled.push("agent".into());
+        assert!(!enabled(&off, "agent"));
+        assert!(initial(&off).iter().all(|(n, _)| n != "agent"));
+
+        let mut cfg = sample();
+        apply_config(
+            &mut cfg,
+            "agent",
+            json!({ "priority": 10, "model": "deepseek-flash" }),
+        )
+        .unwrap();
+        assert_eq!(cfg.plugins.configs["agent"]["model"], "deepseek-flash");
+        assert_eq!(config_view(&cfg, "agent")["priority"], 10);
+        apply_config(&mut cfg, "agent", json!({ "enabled": false })).unwrap();
+        assert_eq!(cfg.plugins.configs["agent"]["model"], "deepseek-flash");
+        assert!(cfg.plugins.disabled.iter().any(|n| n == "agent"));
+        assert!(!enabled(&cfg, "agent"));
+        apply_config(&mut cfg, "agent", json!({ "enabled": true })).unwrap();
+        assert_eq!(cfg.plugins.configs["agent"]["model"], "deepseek-flash");
+        assert!(!cfg.plugins.disabled.iter().any(|n| n == "agent"));
+        assert!(enabled(&cfg, "agent"));
+        let mut next = cfg.clone();
+        apply_config(&mut next, "agent", json!({ "model": "other" })).unwrap();
+        assert!(needs_restart("agent", &cfg, &next));
     }
 }
