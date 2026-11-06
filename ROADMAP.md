@@ -3,7 +3,7 @@
 > 仓库：https://github.com/KazeMae/FujiangBot  
 > 看板：https://github.com/users/KazeMae/projects/2  
 > 总追踪：#19  
-> 更新：2026-11-07（#56 T2：定时任务技能包 `schedule`）
+> 更新：2026-11-07（#60 T3：fun / contest 技能包）
 
 本文档是规划源。Issue / Milestone / Project 与此对齐。冲突时以已合并 Issue 的验收为准，并回写本文档。
 
@@ -43,7 +43,7 @@
 | 长期记忆 | 有 | 会话摘要有；分层记忆进行中 #46 | M3 |
 | Web / 管理 | 有 | 8787 管理口，agent 配置偏 toml | M3 |
 | 插件当 tool | 插件生态 | 仅 contest/rank 部分方法 | **插件工具化波次** |
-| 工具发现 / 展示 | 常见 | `.agent tools` 列常驻工具。技能包经 `skills.list` 与 `skills.open` 懒加载。`qq.read` 与 `schedule` 已是包 | #53。管理页仍不单列 |
+| 工具发现 / 展示 | 常见 | `.agent tools` 列常驻工具。技能包经 `skills.list` 与 `skills.open` 懒加载。`qq.read`、`schedule`、`fun`、`contest` 已是包 | #53。管理页仍不单列 |
 | MCP | 可选 | 不做（#18 按需） | 默认不做 |
 
 ## 现状
@@ -95,10 +95,11 @@
 | #46 | Codex 风格分层记忆 | In Progress | 账号 / 群 / 个人（**群内发言也写个人记忆**）；见 `docs/layered-memory.md` |
 | #15 | 托管 RAG | 取消 | 不做 |
 | #18 | MCP | 延期 | 默认不做 |
-| #53 | 技能包懒加载、QQ 权限、定时任务 | In Progress | T0 #57、T1 #58 已合入。T2 见 #56。方案 `docs/agent-skills.md`。T3 未做 |
+| #53 | 技能包懒加载、QQ 权限、定时任务 | Done | T0 #57、T1 #58、T2 #56、T3 #60。方案 `docs/agent-skills.md` |
 | #54 T0 | `skills.list` / `skills.open` 与占位包 `ping` | Done | #57 |
 | #55 T1 | `qq.read`，按当前发言人只读 | Done | #58。只读他所属的群和他自己的私聊 |
 | #56 T2 | 技能包 `schedule` 与 `.agent schedule` | Done | 到点带创建者 QQ，按 `qq.read` 同一成员边界重验。私聊只发给创建者 |
+| #60 T3 | 技能包 `fun` 与 `contest` | Done | 不进常驻。打开后仍走 ServiceHub。`fun.learn` / `fun.search` 仍由宿主写入当前群 |
 
 前置：agent 热路径改动优先落在 `command.rs` / `plan.rs` / 新模块；单文件勿超 1000 行。
 
@@ -114,7 +115,7 @@
 2. **轨道 E**：管理页浏览分层记忆（后切片）。  
 3. **RAG / #15**：取消。  
 4. **#18**：保持延期。  
-5. **轨道 F（#53）**：#54 已由 #57 合入，#55 已由 #58 合入。#56 的定时任务在技能包 `schedule`，不进常驻工具。T3 仍未做。
+5. **轨道 F（#53）**：T0–T3 已完成。#54 已由 #57 合入，#55 已由 #58 合入。#56 的定时任务在技能包 `schedule`。#60 把 `fun` 和 `contest` 挪进技能包。这四件都不进常驻工具。
 
 每个 PR：自测 fmt/clippy/test（+ 相关 llvm-cov）→ 中文草稿 → 自审 → merge commit。不擅自部署。`lib.rs` 顶格时先拆文件。
 

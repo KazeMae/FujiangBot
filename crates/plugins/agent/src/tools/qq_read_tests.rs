@@ -169,6 +169,7 @@ fn tools_stay_closed_until_opened_and_dangerous_actions_stay_out() {
     let blocked = ready(skills::exec(
         "qq_get_group_info",
         &json!({"group_id": 7}),
+        BuiltinTools::OFF,
         &now,
         &mut opened,
     ))
@@ -176,11 +177,18 @@ fn tools_stay_closed_until_opened_and_dangerous_actions_stay_out() {
     assert_eq!(blocked, CLOSED_SKILL);
     assert!(opened.is_empty());
     for action in DANGER {
-        assert!(skills::exec(action, &json!({}), &now, &mut opened).is_none());
+        assert!(skills::exec(action, &json!({}), BuiltinTools::OFF, &now, &mut opened).is_none());
     }
 
     let mut sink = BTreeSet::new();
-    let listed = ready(skills::exec("skills_list", &json!({}), &opened, &mut sink)).unwrap();
+    let listed = ready(skills::exec(
+        "skills_list",
+        &json!({}),
+        BuiltinTools::OFF,
+        &opened,
+        &mut sink,
+    ))
+    .unwrap();
     assert_eq!(listed[0]["name"], "ping");
     assert_eq!(listed[1]["name"], PACK);
     assert_eq!(listed[1]["description"], PACK_DESC);
@@ -196,6 +204,7 @@ fn tools_stay_closed_until_opened_and_dangerous_actions_stay_out() {
     let opened_ok = ready(skills::exec(
         "skills_open",
         &json!({"name": " qq.read "}),
+        BuiltinTools::OFF,
         &now,
         &mut opened,
     ))

@@ -2,6 +2,8 @@ use std::collections::BTreeSet;
 
 use serde_json::{json, Value};
 
+use super::contest_pack;
+use super::fun_pack;
 use super::qq_read;
 use super::schedule_pack;
 use super::{assemble_tools, default_parameters, BuiltinTools, ToolSpec};
@@ -80,6 +82,25 @@ pub(crate) fn round_tools(
             push_new(&mut tools, spec);
         }
     }
+    if builtins.fun && opened.contains(fun_pack::PACK) {
+        for tool in fun_pack::tools() {
+            let spec =
+                ToolSpec::parse(tool.name, tool.description, fun_pack::parameters(tool.wire))
+                    .expect(tool.name);
+            push_new(&mut tools, spec);
+        }
+    }
+    if builtins.contest && opened.contains(contest_pack::PACK) {
+        for tool in contest_pack::tools() {
+            let spec = ToolSpec::parse(
+                tool.name,
+                tool.description,
+                contest_pack::parameters(tool.wire),
+            )
+            .expect(tool.name);
+            push_new(&mut tools, spec);
+        }
+    }
     tools
 }
 
@@ -93,18 +114,27 @@ pub(crate) enum SkillOut {
 pub(crate) fn exec(
     wire: &str,
     args: &Value,
+    builtins: BuiltinTools,
     opened_now: &BTreeSet<String>,
     opened: &mut BTreeSet<String>,
 ) -> Option<SkillOut> {
     if wire == "skills_list" {
-        return Some(SkillOut::Ready(Ok(list_value())));
+        return Some(SkillOut::Ready(Ok(list_value(builtins))));
     }
     if wire == "skills_open" {
-        return Some(SkillOut::Ready(open_value(args, opened)));
+        return Some(SkillOut::Ready(open_value(args, builtins, opened)));
     }
     let pack = pack_of(wire)?;
     if !opened_now.contains(pack) {
         return Some(SkillOut::Ready(Err(CLOSED_SKILL)));
+    }
+    if (pack == fun_pack::PACK && !builtins.fun)
+        || (pack == contest_pack::PACK && !builtins.contest)
+    {
+        return Some(SkillOut::Ready(Err(CLOSED_SKILL)));
+    }
+    if pack == fun_pack::PACK || pack == contest_pack::PACK {
+        return None;
     }
     if pack == qq_read::PACK {
         return Some(SkillOut::Qq);
@@ -115,7 +145,7 @@ pub(crate) fn exec(
     Some(SkillOut::Ready(invoke(wire)))
 }
 
-fn list_value() -> Value {
+fn list_value(builtins: BuiltinTools) -> Value {
     let mut rows: Vec<Value> = PACKS
         .iter()
         .map(|pack| json!({"name": pack.name, "description": pack.description}))
@@ -128,19 +158,37 @@ fn list_value() -> Value {
         "name": schedule_pack::PACK,
         "description": schedule_pack::PACK_DESC
     }));
+    if builtins.fun {
+        rows.push(json!({
+            "name": fun_pack::PACK,
+            "description": fun_pack::PACK_DESC
+        }));
+    }
+    if builtins.contest {
+        rows.push(json!({
+            "name": contest_pack::PACK,
+            "description": contest_pack::PACK_DESC
+        }));
+    }
     Value::Array(rows)
 }
 
-fn open_value(args: &Value, opened: &mut BTreeSet<String>) -> Result<Value, &'static str> {
+fn open_value(
+    args: &Value,
+    builtins: BuiltinTools,
+    opened: &mut BTreeSet<String>,
+) -> Result<Value, &'static str> {
     let name = args
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim();
-    if !PACKS.iter().any(|pack| pack.name == name)
-        && name != qq_read::PACK
-        && name != schedule_pack::PACK
-    {
+    let known = PACKS.iter().any(|pack| pack.name == name)
+        || name == qq_read::PACK
+        || name == schedule_pack::PACK
+        || (builtins.fun && name == fun_pack::PACK)
+        || (builtins.contest && name == contest_pack::PACK);
+    if !known {
         return Err(UNKNOWN_SKILL);
     }
     opened.insert(name.to_string());
@@ -179,6 +227,12 @@ fn pack_of(wire: &str) -> Option<&'static str> {
     }
     if schedule_pack::is_job_tool(wire) {
         return Some(schedule_pack::PACK);
+    }
+    if fun_pack::is_fun_tool(wire) {
+        return Some(fun_pack::PACK);
+    }
+    if contest_pack::is_contest_tool(wire) {
+        return Some(contest_pack::PACK);
     }
     PACKS.iter().find_map(|pack| {
         pack.tools

@@ -34,6 +34,15 @@ fn outputs(body: &Value) -> Vec<String> {
         .collect()
 }
 
+fn exec_off(
+    wire: &str,
+    args: &Value,
+    now: &BTreeSet<String>,
+    opened: &mut BTreeSet<String>,
+) -> Option<skills::SkillOut> {
+    skills::exec(wire, args, BuiltinTools::OFF, now, opened)
+}
+
 fn ready(step: Option<skills::SkillOut>) -> Result<Value, &'static str> {
     match step {
         Some(skills::SkillOut::Ready(result)) => result,
@@ -63,12 +72,16 @@ fn resident_meta_tools_stay_on_and_pack_tools_stay_closed() {
     assert!(off.iter().all(|spec| spec.name() != "ping.pong"));
 
     let on = resident_tools(&[], BuiltinTools::ON);
+    assert_eq!(on.len(), 11);
     assert_eq!(on[0].name(), "rank.list");
     assert_eq!(on[on.len() - 2].wire_name(), "skills_list");
     assert_eq!(on.last().unwrap().wire_name(), "skills_open");
     assert!(on.iter().any(|spec| spec.name() == "memo.list"));
     assert!(on.iter().all(|spec| spec.name() != "memo.add"));
     assert!(on.iter().all(|spec| spec.name() != "ping.pong"));
+    assert!(on
+        .iter()
+        .all(|spec| !spec.name().starts_with("fun.") && !spec.name().starts_with("contest.")));
 
     let custom = ToolSpec::parse("skills.list", "别的说明", json!({})).unwrap();
     let smuggle = ToolSpec::parse("ping.pong", "偷偷", json!({})).unwrap();
@@ -115,7 +128,7 @@ fn resident_meta_tools_stay_on_and_pack_tools_stay_closed() {
 fn list_open_unknown_and_closed_dispatch() {
     let mut opened = BTreeSet::new();
     let now = opened.clone();
-    let listed = ready(skills::exec("skills_list", &json!({}), &now, &mut opened)).unwrap();
+    let listed = ready(exec_off("skills_list", &json!({}), &now, &mut opened)).unwrap();
     assert!(opened.is_empty());
     let row = &listed[0];
     assert_eq!(row["name"], "ping");
@@ -137,18 +150,18 @@ fn list_open_unknown_and_closed_dispatch() {
         json!(null),
     ] {
         let now = opened.clone();
-        let err = ready(skills::exec("skills_open", &bad, &now, &mut opened)).unwrap_err();
+        let err = ready(exec_off("skills_open", &bad, &now, &mut opened)).unwrap_err();
         assert_eq!(err, UNKNOWN_SKILL);
         assert!(opened.is_empty());
     }
 
     let now = opened.clone();
-    let closed = ready(skills::exec("ping_pong", &json!({}), &now, &mut opened)).unwrap_err();
+    let closed = ready(exec_off("ping_pong", &json!({}), &now, &mut opened)).unwrap_err();
     assert_eq!(closed, CLOSED_SKILL);
     assert!(opened.is_empty());
 
     let now = opened.clone();
-    let opened_ok = ready(skills::exec(
+    let opened_ok = ready(exec_off(
         "skills_open",
         &json!({"name": " ping "}),
         &now,
@@ -157,7 +170,7 @@ fn list_open_unknown_and_closed_dispatch() {
     .unwrap();
     assert_eq!(opened_ok, json!({"name": "ping", "opened": true}));
     let now = opened.clone();
-    let again = ready(skills::exec(
+    let again = ready(exec_off(
         "skills_open",
         &json!({"name": "ping"}),
         &now,
@@ -171,11 +184,11 @@ fn list_open_unknown_and_closed_dispatch() {
     );
 
     let now = opened.clone();
-    let pong = ready(skills::exec("ping_pong", &json!({}), &now, &mut opened)).unwrap();
+    let pong = ready(exec_off("ping_pong", &json!({}), &now, &mut opened)).unwrap();
     assert_eq!(pong, json!({"pong": true}));
 
     let mut sink = BTreeSet::new();
-    assert!(skills::exec("rank_list", &json!({}), &BTreeSet::new(), &mut sink).is_none());
+    assert!(exec_off("rank_list", &json!({}), &BTreeSet::new(), &mut sink).is_none());
 }
 
 #[tokio::test]
@@ -444,4 +457,187 @@ async fn opening_counts_toward_max_tool_rounds() {
     assert!(tool_names(&script.bodies.lock().unwrap()[1])
         .iter()
         .any(|name| name == "ping_pong"));
+}
+
+fn pack_names(builtins: BuiltinTools) -> Vec<String> {
+    let mut opened = BTreeSet::new();
+    let now = opened.clone();
+    let listed = ready(skills::exec(
+        "skills_list",
+        &json!({}),
+        builtins,
+        &now,
+        &mut opened,
+    ))
+    .unwrap();
+    listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn fun_and_contest_packs_follow_the_flags() {
+    assert_eq!(
+        pack_names(BuiltinTools::OFF),
+        vec!["ping", "qq.read", "schedule"]
+    );
+    assert_eq!(
+        pack_names(BuiltinTools::ON),
+        vec!["ping", "qq.read", "schedule", "fun", "contest"]
+    );
+    assert_eq!(
+        pack_names(BuiltinTools {
+            fun: true,
+            ..BuiltinTools::OFF
+        }),
+        vec!["ping", "qq.read", "schedule", "fun"]
+    );
+    assert_eq!(
+        pack_names(BuiltinTools {
+            contest: true,
+            ..BuiltinTools::OFF
+        }),
+        vec!["ping", "qq.read", "schedule", "contest"]
+    );
+
+    let mut opened = BTreeSet::new();
+    let now = opened.clone();
+    let unknown = ready(skills::exec(
+        "skills_open",
+        &json!({"name": "fun"}),
+        BuiltinTools::OFF,
+        &now,
+        &mut opened,
+    ))
+    .unwrap_err();
+    assert_eq!(unknown, UNKNOWN_SKILL);
+    assert!(opened.is_empty());
+    let unknown = ready(skills::exec(
+        "skills_open",
+        &json!({"name": "contest"}),
+        BuiltinTools {
+            fun: true,
+            ..BuiltinTools::OFF
+        },
+        &now,
+        &mut opened,
+    ))
+    .unwrap_err();
+    assert_eq!(unknown, UNKNOWN_SKILL);
+    assert!(opened.is_empty());
+
+    let closed = ready(skills::exec(
+        "fun_tags",
+        &json!({}),
+        BuiltinTools::ON,
+        &now,
+        &mut opened,
+    ))
+    .unwrap_err();
+    assert_eq!(closed, CLOSED_SKILL);
+    let closed = ready(skills::exec(
+        "contest_upcoming",
+        &json!({"oj": "Codeforces"}),
+        BuiltinTools::ON,
+        &now,
+        &mut opened,
+    ))
+    .unwrap_err();
+    assert_eq!(closed, CLOSED_SKILL);
+    assert!(opened.is_empty());
+
+    let forced = BTreeSet::from(["fun".to_string(), "contest".to_string()]);
+    let hidden = round_tools(&[], BuiltinTools::OFF, &forced);
+    assert!(hidden
+        .iter()
+        .all(|spec| { !spec.name().starts_with("fun.") && !spec.name().starts_with("contest.") }));
+    let blocked = ready(skills::exec(
+        "fun_search",
+        &json!({"q": "猫"}),
+        BuiltinTools::OFF,
+        &forced,
+        &mut BTreeSet::new(),
+    ))
+    .unwrap_err();
+    assert_eq!(blocked, CLOSED_SKILL);
+    let blocked = ready(skills::exec(
+        "contest_today",
+        &json!({}),
+        BuiltinTools {
+            fun: true,
+            ..BuiltinTools::OFF
+        },
+        &forced,
+        &mut BTreeSet::new(),
+    ))
+    .unwrap_err();
+    assert_eq!(blocked, CLOSED_SKILL);
+
+    let mut opened = BTreeSet::new();
+    let now = opened.clone();
+    let opened_fun = ready(skills::exec(
+        "skills_open",
+        &json!({"name": " fun "}),
+        BuiltinTools::ON,
+        &now,
+        &mut opened,
+    ))
+    .unwrap();
+    assert_eq!(opened_fun, json!({"name": "fun", "opened": true}));
+    let now = opened.clone();
+    assert!(skills::exec(
+        "fun_search",
+        &json!({"q": "猫"}),
+        BuiltinTools::ON,
+        &now,
+        &mut opened
+    )
+    .is_none());
+    let now = opened.clone();
+    let opened_contest = ready(skills::exec(
+        "skills_open",
+        &json!({"name": "contest"}),
+        BuiltinTools::ON,
+        &now,
+        &mut opened,
+    ))
+    .unwrap();
+    assert_eq!(opened_contest, json!({"name": "contest", "opened": true}));
+    let now = opened.clone();
+    assert!(skills::exec(
+        "contest_today",
+        &json!({}),
+        BuiltinTools::ON,
+        &now,
+        &mut opened
+    )
+    .is_none());
+
+    let mut sink = BTreeSet::new();
+    let listed = ready(skills::exec(
+        "skills_list",
+        &json!({}),
+        BuiltinTools::ON,
+        &BTreeSet::new(),
+        &mut sink,
+    ))
+    .unwrap();
+    for name in ["fun", "contest"] {
+        let row = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == name)
+            .unwrap();
+        assert_eq!(row.as_object().unwrap().len(), 2);
+        assert!(!row["description"].as_str().unwrap().is_empty());
+    }
+    let raw = serde_json::to_string(&listed).unwrap();
+    assert!(!raw.contains("fun.tags"));
+    assert!(!raw.contains("fun_tags"));
+    assert!(!raw.contains("contest.upcoming"));
+    assert!(!raw.contains("contest_upcoming"));
 }

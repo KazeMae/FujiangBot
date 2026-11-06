@@ -1,18 +1,18 @@
 # Agent skills
 
-父问题是 [#53](https://github.com/KazeMae/FujiangBot/issues/53)。这一篇定三件事：技能包怎么懒加载，QQ 工具按谁的身份放行，定时任务到点时再查一次同一条边界。
+父问题是 [#53](https://github.com/KazeMae/FujiangBot/issues/53)。这一篇定四件事：技能包怎么懒加载，QQ 工具按谁的身份放行，定时任务到点时再查一次同一条边界，以及把 fun、contest 从常驻目录挪进技能包。
 
-T0 是 [#54](https://github.com/KazeMae/FujiangBot/issues/54)，只落地技能包的骨架。QQ 只读是 [#55](https://github.com/KazeMae/FujiangBot/issues/55)。定时任务是 [#56](https://github.com/KazeMae/FujiangBot/issues/56)。[#18](https://github.com/KazeMae/FujiangBot/issues/18) 的 MCP 仍延期。NapCat 动作说明用 [4.18.42 的 API 文档](https://napneko.github.io/api/4.18.42)。本仓库能直接调用的名字以 `crates/napcat-sdk/src/api.rs` 为准，不把那一页上的动作全部挂成工具。
+T0 是 [#54](https://github.com/KazeMae/FujiangBot/issues/54)，只落地技能包的骨架。QQ 只读是 [#55](https://github.com/KazeMae/FujiangBot/issues/55)。定时任务是 [#56](https://github.com/KazeMae/FujiangBot/issues/56)。T3 是 [#60](https://github.com/KazeMae/FujiangBot/issues/60)。[#18](https://github.com/KazeMae/FujiangBot/issues/18) 的 MCP 仍延期。NapCat 动作说明用 [4.18.42 的 API 文档](https://napneko.github.io/api/4.18.42)。本仓库能直接调用的名字以 `crates/napcat-sdk/src/api.rs` 为准，不把那一页上的动作全部挂成工具。
 
 ## 为什么要懒加载
 
-业务工具已经有 rank、contest、problem、memo、fun 和分层记忆。NapCat 还有一大组群、私聊、文件和账号动作。每一轮都带上全部参数说明，请求会变长，模型也更容易调到不该调的动作。
+常驻业务工具是 rank、problem、memo 和分层记忆。fun 和 contest 在技能包里。NapCat 还有一大组群、私聊、文件和账号动作。每一轮都带上全部参数说明，请求会变长，模型也更容易调到不该调的动作。
 
 常驻的只有一份短目录。模型先看有哪些技能包，点名打开一个，同一次发言的后续回合才带上那个包的参数说明。没打开的包不进 `tools`。
 
 ## 一次发言里的打开集合
 
-`assemble_tools` 仍只按开关组装业务工具，并接上 `[[plugins.configs.agent.tools]]`。它不知道技能包。
+`assemble_tools` 按开关组装仍留在常驻里的业务工具，并接上 `[[plugins.configs.agent.tools]]`。它不放入技能包。`enable_fun_tools` 和 `enable_contest_tools` 不在这里添加工具。这两个开关只决定 `skills.list` 列不列出 `fun` 和 `contest`。
 
 `skills.list` 和 `skills.open` 没有开关。`resident_tools` 在业务工具和配置项后面加上这两个。`.agent tools` 和 `inject_tool_list` 用的是这一份，此时打开集合是空的，所以看不到包里的工具。
 
@@ -106,7 +106,7 @@ T0 带一个无害的占位包，用来把列出、打开、调用串起来。�
 
 ## 定时任务
 
-这一节是 [#56](https://github.com/KazeMae/FujiangBot/issues/56)。四个工具放在技能包 `schedule` 里，不进入常驻的十七个工具。参数说明比较长，父问题要求常驻目录保持短。人用 `.agent schedule` 时不经过模型，也不需要 `skills.open`。模型先 `skills.open`，`name` 是 `schedule`，同一次发言的后续回合才看得到这四个工具。
+这一节是 [#56](https://github.com/KazeMae/FujiangBot/issues/56)。四个工具放在技能包 `schedule` 里，不进入常驻的十一个工具。参数说明比较长，父问题要求常驻目录保持短。人用 `.agent schedule` 时不经过模型，也不需要 `skills.open`。模型先 `skills.open`，`name` 是 `schedule`，同一次发言的后续回合才看得到这四个工具。
 
 | 逻辑名 | Responses 的 `name` | 作用 |
 |---|---|---|
@@ -168,14 +168,43 @@ T0 带一个无害的占位包，用来把列出、打开、调用串起来。�
 
 人的命令没有 `update`。修改走 `schedule.update`。命令不调用模型，也不计入每小时次数。
 
+## 图库包 fun
+
+这一节是 [#60](https://github.com/KazeMae/FujiangBot/issues/60)。四个只读工具放在技能包 `fun` 里，不进入常驻的十一个工具。开关仍是 `enable_fun_tools`，默认 true。
+
+为 false 时，`skills.list` 不出现 `fun`。`skills.open` 的 `name` 写成 `fun` 按未知包失败，日志是 `agent skill unknown`。这时打开集合里即使已经有 `fun`，请求也不带这四个工具，直接调用的日志是 `agent skill closed`，不调用 ServiceHub。
+
+为 true 时，模型先 `skills.open`，`name` 是 `fun`。同一次发言的后续回合才看得到工具。没打开时直接调用，日志同样是 `agent skill closed`，不调用 ServiceHub。同一次响应里先打开再调用，也按打开前的集合拒绝。
+
+| 逻辑名 | Responses 的 `name` | 调用 | 参数 |
+|---|---|---|---|
+| `fun.tags` | `fun_tags` | fun 的 `tags` | 无 |
+| `fun.stars` | `fun_stars` | fun 的 `stars` | 无 |
+| `fun.learn` | `fun_learn` | fun 的 `learn` | 可选字符串 `trigger`。宿主写入当前群 |
+| `fun.search` | `fun_search` | fun 的 `search` | 字符串 `q`。宿主写入当前群 |
+
+`skills.list` 只给包名和一句说明，不给工具名。打开之后的执行仍走 ServiceHub。`fun.learn` 和 `fun.search` 由宿主盖掉 `group_id`，群里写成当前群，私聊去掉 `group_id`。fun 不注册写工具。`delete`、`retire`、`add` 这类名字不在这个包里。
+
+配置项若写了同名的 `fun.tags` 等函数名，未打开时不进入 `tools`。打开之后用包里的说明，不用配置项里的那一句。
+
+## 比赛包 contest
+
+这一节同样是 [#60](https://github.com/KazeMae/FujiangBot/issues/60)。两个工具放在技能包 `contest` 里，不进入常驻目录。开关仍是 `enable_contest_tools`，默认 true。列出、打开、未打开时拒绝，以及开关关掉后工具不出现，规则和 `fun` 相同。包名是 `contest`。
+
+| 逻辑名 | Responses 的 `name` | 调用 | 参数 |
+|---|---|---|---|
+| `contest.upcoming` | `contest_upcoming` | contest 的 `upcoming` | 可选字符串 `oj` |
+| `contest.today` | `contest_today` | contest 的 `today` | 无 |
+
+`skills.list` 只给包名和一句说明。打开之后走 ServiceHub。`oj` 用来只看一个 OJ，例如 Codeforces 或 Atcoder。不传则返回全部。
+
 ## 切片
 
 | Issue | 内容 | 状态 |
 |---|---|---|
-| #53 | 懒加载、QQ 权限、定时任务 | 边界写在这一篇。T3 未做 |
+| #53 | 懒加载、QQ 权限、定时任务 | 边界写在这一篇。T0–T3 已做。T3 是 #60 |
 | #54 | `skills.list`、`skills.open`、这篇说明、占位包 | 已实现（#57） |
 | #55 | 只读技能包 `qq.read`，按发言人核对 | 已实现（#58） |
 | #56 | 技能包 `schedule`：`schedule.list`、`schedule.create`、`schedule.update`、`schedule.cancel`，以及 `.agent schedule`。到点重验 | 已实现 |
+| #60 | 技能包 `fun` 与 `contest`。开关仍是 `enable_fun_tools` / `enable_contest_tools` | Done |
 | #18 | MCP | 仍延期 |
-
-可选的后一步是把 fun、contest 这类非核心工具挪进技能包。#53 把它记为 T3，还没有单独的 issue。T0 不动这些业务工具的开关。
