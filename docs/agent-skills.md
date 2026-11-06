@@ -106,26 +106,76 @@ T0 带一个无害的占位包，用来把列出、打开、调用串起来。�
 
 ## 定时任务
 
-这一节是 [#56](https://github.com/KazeMae/FujiangBot/issues/56) 的边界。T0 不建表，不起时钟，也不注册这些工具。
+这一节是 [#56](https://github.com/KazeMae/FujiangBot/issues/56)。四个工具放在技能包 `schedule` 里，不进入常驻的十七个工具。参数说明比较长，父问题要求常驻目录保持短。人用 `.agent schedule` 时不经过模型，也不需要 `skills.open`。模型先 `skills.open`，`name` 是 `schedule`，同一次发言的后续回合才看得到这四个工具。
 
-每条任务记下创建者 QQ、时间、动作、目标。时间是 cron 或一次性的 unix 秒。目标是群号或 QQ。
+| 逻辑名 | Responses 的 `name` | 作用 |
+|---|---|---|
+| `schedule.list` | `schedule_list` | 列出自己的任务。新的在前，最多 50 条，包含已停用的 |
+| `schedule.create` | `schedule_create` | 新建。`kind` 是 `group` 或 `private` |
+| `schedule.update` | `schedule_update` | 修改自己的一条 |
+| `schedule.cancel` | `schedule_cancel` | 停用自己的一条 |
 
-工具用这四个名字：`schedule.list`、`schedule.create`、`schedule.update`、`schedule.cancel`。用户命令是 `.agent schedule`。
+`skills.list` 只给包名和一句说明。打开之后，请求里才出现 `schedule_list` 等四个名字。`send_group_msg` 和 `send_private_msg` 始终不在 `tools` 里。发送由到点的宿主完成。
 
-创建时先按创建者 QQ 做上一节的检查。他当时不能做的动作，不能写进任务。
+### 创建者
 
-到点由宿主触发。宿主取出任务上的创建者 QQ，再做同一次检查。不沿用创建时的允许结论，也不改用 bot 自己的身份，也不改用那时正好在说话的人。创建者已经退群时，群上的读和发按同一条成员规则拒绝。
+`creator_qq` 由宿主写入当前发言人的 QQ。参数里的 `creator_qq` 被忽略。列表只返回这个发言人的行。更新和取消的条件同时要求 `id` 和 `creator_qq`。别人的编号和没有的编号都失败，那一行保持原样。人看到「没有这条定时任务。」模型看到工具失败回复。
 
-定时任务如果要调用 QQ 动作，走和当场发言相同的允许判断。危险写操作仍然只看 `qq_write_allow`。
+### 这一刀发什么
+
+动作只存 `send_text`。别的 `action` 在创建时拒绝。库里已经有别的动作时，到点把 `last_error` 写成 `denied`，不发送，再按下面的规则推进时间。
+
+群任务要数字 `group_id`，同时写了 `user_id` 就拒绝。创建时和到点时都调用 `get_group_member_info`，参数是这个群和创建者 QQ。返回的 `user_id` 必须等于创建者。这和 `qq.read` 用的是同一个函数。
+
+私聊只发给创建者本人。省略 `user_id` 时写成创建者。写成别人则拒绝，不会改成创建者再插入。到点时目标不是创建者也不发送。这一刀只做本人私聊。到点不调用 `get_friend_msg_history` 或 `get_msg`。
+
+正文去掉首尾空白后要有 1 到 800 个字。时间是五段 `cron` 或正整数 `at`，只能填一个。`at` 是 unix 秒。已经过去或等于现在的 `at`，`next_run_at` 写成现在，下一拍发送。
+
+创建时群成员查询返回不是成员，不插入。人看到「这个目标现在不能发。」查询本身失败也不插入。人看到「现在没查成，过一会儿再试。」模型侧分别是拒绝和工具失败。
+
+### 时间
+
+`cron` 用本机本地时间。五段是分、时、日、月、周。支持 `*`、数字、逗号列表、`a-b`、`*/n` 和 `a-b/n`。周的 `0` 和 `7` 都是周日。日和周都不是单独的 `*` 时，碰上其中一个就到点。下一次从 `after` 之后的下一分钟开始找，最多看大约四年。对不上的表达式拒绝，例如 `0 0 31 2 *`。
+
+一次性任务在这次尝试结束（已发出，或被拒绝）后，`enabled` 变成 0，`next_run_at` 清空。周期任务保持启用，`next_run_at` 挪到下一次。算不出下一次就停用，`last_error` 是 `no next`。
+
+### 表
+
+任务只在 agent 插件 sqlite 的 `scheduled_jobs`。`ensure_schema` 先建 `id` 和 `creator_qq`，再用 `ALTER TABLE` 补列。列是 `cron`、`at`、`action`、`kind`、`group_id`、`user_id`、`payload`、`enabled`、`created_at`、`next_run_at`，另有运行用的 `claim_until`、`claim_token`、`last_error`。旧文件缺列时启动补上，原来的行还在。索引是 `(enabled, next_run_at)`。
+
+### 到点
+
+`on_start` 用 `PluginScope::spawn` 起一个 tokio interval，每 15 秒一拍，第一拍马上执行。错过的拍跳过，不补跑。插件卸载时这个任务先取消，然后 `on_stop` 才关连接池。
+
+每一拍最多领 20 条到期任务。领取是一条 `UPDATE`：`enabled = 1`，`next_run_at` 不晚于现在，并且 `claim_until` 为空或已过期。赢家写入 `claim_until = now + 120` 和 `claim_token`。`rows_affected` 为 1 才继续。发送前再读一次 `claim_token`。取消会清掉 token，这次就不再发。确认更新也要求 token 还在。
+
+成员查询或发送失败时清掉租约，写下 `last_error`，`next_run_at` 不动，下一拍再试。不是成员、动作不是 `send_text`、或私聊目标不是创建者时，不发送，记 `denied`，并按一次性或周期推进。创建时的允许结论不留到点复用。
+
+`qq.read` 把成员查询的传输错误当成不是成员。定时任务把同一次查询的 `Err` 留作重试，`Ok(false)` 才跳过这一次。
+
+发送已经成功、确认更新还没写上时进程停了，租约过期后会再发一次。发送失败会重试。权限拒绝不会把这一次再发一遍。取消若发生在发送已经开始之后，这一条仍可能发出。确认更新对不上 token 时不会改写下一轮时间。
+
+人的命令：
+
+```
+.agent schedule list
+.agent schedule create group <群号> at <unix秒> <正文>
+.agent schedule create group <群号> cron <分> <时> <日> <月> <周> <正文>
+.agent schedule create private at <unix秒> <正文>
+.agent schedule create private cron <分> <时> <日> <月> <周> <正文>
+.agent schedule cancel <编号>
+```
+
+人的命令没有 `update`。修改走 `schedule.update`。命令不调用模型，也不计入每小时次数。
 
 ## 切片
 
-| Issue | 内容 | T0 的状态 |
+| Issue | 内容 | 状态 |
 |---|---|---|
-| #53 | 懒加载、QQ 权限、定时任务 | 边界写在这一篇 |
-| #54 | `skills.list`、`skills.open`、这篇说明、占位包 | 本分支实现 |
-| #55 | 只读技能包 `qq.read`，按发言人核对 | 本分支实现 |
-| #56 | `schedule.list`、`schedule.create`、`schedule.update`、`schedule.cancel`，以及 `.agent schedule`。到点重验 | 未做 |
+| #53 | 懒加载、QQ 权限、定时任务 | 边界写在这一篇。T3 未做 |
+| #54 | `skills.list`、`skills.open`、这篇说明、占位包 | 已实现（#57） |
+| #55 | 只读技能包 `qq.read`，按发言人核对 | 已实现（#58） |
+| #56 | 技能包 `schedule`：`schedule.list`、`schedule.create`、`schedule.update`、`schedule.cancel`，以及 `.agent schedule`。到点重验 | 已实现 |
 | #18 | MCP | 仍延期 |
 
 可选的后一步是把 fun、contest 这类非核心工具挪进技能包。#53 把它记为 T3，还没有单独的 issue。T0 不动这些业务工具的开关。

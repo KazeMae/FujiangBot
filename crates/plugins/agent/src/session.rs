@@ -72,6 +72,7 @@ pub async fn ensure_schema(pool: &SqlitePool) -> anyhow::Result<()> {
     .await
     .context("create usage_daily")?;
     crate::layered_memory::ensure_schema(pool).await?;
+    crate::schedule::ensure_schema(pool).await?;
     Ok(())
 }
 

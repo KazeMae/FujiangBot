@@ -6,6 +6,8 @@ mod config;
 mod layered_memory;
 mod memory_consolidate;
 mod plan;
+mod schedule;
+mod schedule_cron;
 mod session;
 mod tools;
 mod trigger;
@@ -28,13 +30,13 @@ use sqlx::SqlitePool;
 use tokio::sync::Mutex;
 use tracing::warn;
 
-use crate::command::{apply_command, enabled_builtins, log_enabled_tools, parse_agent_cmd, HELP};
+use crate::command::{
+    apply_command, enabled_builtins, log_enabled_tools, parse_agent_cmd, AgentCmd, HELP,
+};
 use crate::plan::{plan_chat, ChatPlan};
 use crate::session::{save_exchange, session_key};
 use crate::trigger::{claim, fit_reply, llm_reply, Claim, BUSY_REPLY};
 
-#[cfg(test)]
-pub(crate) use command::AgentCmd;
 #[cfg(test)]
 pub(crate) use plan::{BLACKLIST_TIP, SESSION_LIMIT_TIP, USER_LIMIT_TIP};
 
@@ -86,6 +88,21 @@ impl Plugin for AgentPlugin {
             i64::from(cfg.memory_max_entries_per_scope),
         )
         .await?;
+        let tick_pool = pool.clone();
+        let tick_ctx = ctx.clone();
+        scope.spawn(async move {
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_secs(schedule::TICK_SECS));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                if let Err(err) =
+                    tools::schedule_tick(&tick_pool, &tick_ctx, session::unix_now()).await
+                {
+                    warn!(error = %err, "agent schedule tick");
+                }
+            }
+        });
         *self.pool.lock().await = Some(pool);
         log_enabled_tools(&cfg);
         Ok(())
@@ -141,6 +158,29 @@ impl AgentPlugin {
         };
         let prefix = ctx.bot_config().await.command_prefix;
         let cmd = parse_agent_cmd(rest);
+        if let AgentCmd::Schedule(human) = cmd {
+            match tools::schedule_command(&pool, msg.user_id(), &human, session::unix_now(), ctx)
+                .await
+            {
+                Ok(text) => {
+                    say(
+                        ctx,
+                        msg,
+                        fit_reply(&fujiang_core::command::rewrite_help(
+                            &text,
+                            &[".agent"],
+                            &prefix,
+                        )),
+                    )
+                    .await;
+                }
+                Err(err) => {
+                    warn!(error = %err, "agent schedule");
+                    say(ctx, msg, BUSY_REPLY).await;
+                }
+            }
+            return;
+        }
         match apply_command(
             &pool,
             cfg,
@@ -378,6 +418,7 @@ mod tests {
         assert!(plugin.help().contains(".agent persona"));
         assert!(plugin.help().contains(".agent status"));
         assert!(plugin.help().contains(".agent tools"));
+        assert!(plugin.help().contains(".agent schedule"));
     }
 
     #[tokio::test]

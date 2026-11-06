@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use serde_json::{json, Value};
 
 use super::qq_read;
+use super::schedule_pack;
 use super::{assemble_tools, default_parameters, BuiltinTools, ToolSpec};
 
 pub(crate) const UNKNOWN_SKILL: &str = "agent skill unknown";
@@ -68,6 +69,17 @@ pub(crate) fn round_tools(
             push_new(&mut tools, spec);
         }
     }
+    if opened.contains(schedule_pack::PACK) {
+        for tool in schedule_pack::tools() {
+            let spec = ToolSpec::parse(
+                tool.name,
+                tool.description,
+                schedule_pack::parameters(tool.wire),
+            )
+            .expect(tool.name);
+            push_new(&mut tools, spec);
+        }
+    }
     tools
 }
 
@@ -75,6 +87,7 @@ pub(crate) fn round_tools(
 pub(crate) enum SkillOut {
     Ready(Result<Value, &'static str>),
     Qq,
+    Schedule,
 }
 
 pub(crate) fn exec(
@@ -96,6 +109,9 @@ pub(crate) fn exec(
     if pack == qq_read::PACK {
         return Some(SkillOut::Qq);
     }
+    if pack == schedule_pack::PACK {
+        return Some(SkillOut::Schedule);
+    }
     Some(SkillOut::Ready(invoke(wire)))
 }
 
@@ -108,6 +124,10 @@ fn list_value() -> Value {
         "name": qq_read::PACK,
         "description": qq_read::PACK_DESC
     }));
+    rows.push(json!({
+        "name": schedule_pack::PACK,
+        "description": schedule_pack::PACK_DESC
+    }));
     Value::Array(rows)
 }
 
@@ -117,7 +137,10 @@ fn open_value(args: &Value, opened: &mut BTreeSet<String>) -> Result<Value, &'st
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim();
-    if !PACKS.iter().any(|pack| pack.name == name) && name != qq_read::PACK {
+    if !PACKS.iter().any(|pack| pack.name == name)
+        && name != qq_read::PACK
+        && name != schedule_pack::PACK
+    {
         return Err(UNKNOWN_SKILL);
     }
     opened.insert(name.to_string());
@@ -153,6 +176,9 @@ fn reserved_wire(wire: &str) -> bool {
 fn pack_of(wire: &str) -> Option<&'static str> {
     if qq_read::is_read_tool(wire) {
         return Some(qq_read::PACK);
+    }
+    if schedule_pack::is_job_tool(wire) {
+        return Some(schedule_pack::PACK);
     }
     PACKS.iter().find_map(|pack| {
         pack.tools

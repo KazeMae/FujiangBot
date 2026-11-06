@@ -18,6 +18,7 @@ pub(crate) const HELP: &str =
 .agent persona <名> 切换到配置里的人设\n\
 .agent status       当前人设、这一小时还剩几次，以及今日调用和 token\n\
 .agent tools        列出当前启用的工具\n\
+.agent schedule     列出、创建或取消自己的定时发文字。不调用模型\n\
 在配置里把 priority 设为 10，高于 fun。本插件接过的消息返回 Stop，fun 不会再处理同一条。\n\
 require_at 为 true 时，只认 @我或回复我，单独的唤醒词不算。";
 
@@ -30,6 +31,7 @@ pub(crate) enum AgentCmd {
     Tools,
     ShowPersona,
     SetPersona(String),
+    Schedule(crate::schedule::HumanCmd),
     Unknown,
 }
 
@@ -73,6 +75,7 @@ pub(crate) fn parse_agent_cmd(rest: &str) -> AgentCmd {
                 AgentCmd::Tools
             }
         }
+        "schedule" => AgentCmd::Schedule(crate::schedule::parse_human(parts)),
         "persona" => match parts.next() {
             None => AgentCmd::ShowPersona,
             Some(name) if parts.next().is_none() => AgentCmd::SetPersona(name.to_string()),
@@ -160,6 +163,7 @@ pub(crate) async fn apply_command(
             let tools = log_enabled_tools(cfg);
             Ok(fit_reply(&tools::tools_command_text(&tools)))
         }
+        AgentCmd::Schedule(_) => Ok(crate::schedule::USAGE.to_string()),
     }
 }
 

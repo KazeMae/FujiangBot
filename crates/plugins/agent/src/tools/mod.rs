@@ -17,8 +17,10 @@ use crate::client::{
 };
 
 mod qq_read;
+mod schedule_pack;
 mod skills;
 
+pub(crate) use schedule_pack::{command as schedule_command, tick as schedule_tick};
 pub(crate) use skills::resident_tools;
 
 pub(crate) const TOOL_CAP_REPLY: &str = "要查的步骤太多了，我先停在这里。";
@@ -139,6 +141,10 @@ pub(crate) struct MemoCallScope {
 }
 
 impl MemoCallScope {
+    pub(crate) fn speaker(&self) -> i64 {
+        self.user_id
+    }
+
     pub(crate) fn from_source(source: Source, user_id: i64) -> Self {
         let (kind, id) = match source {
             Source::Group { id } => ("group", id),
@@ -499,6 +505,38 @@ where
                                     in_tokens,
                                     out_tokens,
                                 );
+                            }
+                            skills::SkillOut::Schedule => {
+                                match schedule_pack::handle(pass, hub, &call.name, &args).await {
+                                    Ok(value) => prior.push(prior_call(call, value)),
+                                    Err(crate::schedule::Fail::Denied) => {
+                                        warn!(tool = %call.name, "agent schedule denied");
+                                        return tool_turn(
+                                            Ok(ToolReply::Degraded(TOOL_FAIL_REPLY)),
+                                            calls,
+                                            in_tokens,
+                                            out_tokens,
+                                        );
+                                    }
+                                    Err(crate::schedule::Fail::Bad) => {
+                                        warn!(tool = %call.name, "agent schedule bad");
+                                        return tool_turn(
+                                            Ok(ToolReply::Degraded(TOOL_FAIL_REPLY)),
+                                            calls,
+                                            in_tokens,
+                                            out_tokens,
+                                        );
+                                    }
+                                    Err(crate::schedule::Fail::Down(err)) => {
+                                        warn!(error = %err, tool = %call.name, "agent schedule");
+                                        return tool_turn(
+                                            Ok(ToolReply::Degraded(TOOL_FAIL_REPLY)),
+                                            calls,
+                                            in_tokens,
+                                            out_tokens,
+                                        );
+                                    }
+                                }
                             }
                             skills::SkillOut::Qq => {
                                 match qq_read::handle(
