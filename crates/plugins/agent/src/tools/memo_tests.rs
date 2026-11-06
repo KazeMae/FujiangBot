@@ -53,6 +53,8 @@ async fn memo_list_fills_the_current_chat_and_a_missing_service_degrades() {
         max_rounds: 3,
         scope: Some(&scope),
         memory: None,
+        memory_unused_secs: 0,
+        memory_max_entries: 0,
     };
     let memo_only = BuiltinTools {
         memo: true,
