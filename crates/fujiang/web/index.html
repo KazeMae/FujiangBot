@@ -60,6 +60,7 @@
     #banner { min-height: 1.4em; font-size: 13px; }
     #banner.ok { color: var(--ok); }
     #banner.err { color: var(--accent); }
+    #agent-usage { font-size: 13px; margin: 0 0 12px; }
     #login {
       display: none; position: fixed; inset: 0; background: rgba(42, 33, 24, 0.45);
       align-items: center; justify-content: center; z-index: 10;
@@ -204,6 +205,19 @@
       </div>
       <div id="entry-list"></div>
       <div id="dyn-list"></div>
+    </section>
+    <section>
+      <h2>福酱</h2>
+      <p class="hint">今日用量按 UTC 日只读。保存人设会先读取完整 agent 配置，只写回 system_prompt 和 personas，其它键保留。运行时 personas.default 盖过顶层 system_prompt。</p>
+      <div id="agent-usage">用量加载中…</div>
+      <label class="full">默认人设 system_prompt
+        <textarea id="agent-system-prompt"></textarea>
+      </label>
+      <div id="agent-personas"></div>
+      <div class="row" style="margin-bottom:12px">
+        <button class="ghost" type="button" id="agent-add">加人设</button>
+        <button class="primary" type="button" id="agent-save">保存人设</button>
+      </div>
     </section>
     <section>
       <h2>管理页</h2>
@@ -455,12 +469,100 @@
       }
     }
 
+    let agentListed = [];
+
+    function renderUsage(u) {
+      const t = u.totals || {};
+      const line = (calls, inn, out) => (calls ?? 0) + " 次 · 入 " + (inn ?? 0) + " · 出 " + (out ?? 0);
+      const users = (u.by_user || []).map((r) =>
+        "<div>" + escapeHtml(String(r.user_id)) + " · " + line(r.calls, r.in_tokens, r.out_tokens) + "</div>"
+      ).join("");
+      const sessions = (u.by_session || []).map((r) =>
+        "<div>" + escapeHtml(String(r.session_key)) + " · " + line(r.calls, r.in_tokens, r.out_tokens) + "</div>"
+      ).join("");
+      el("agent-usage").innerHTML =
+        "<div>UTC " + escapeHtml(String(u.day ?? "")) + " · day " + escapeHtml(String(u.day_id ?? "")) +
+        " · 合计 " + line(t.calls, t.in_tokens, t.out_tokens) + "</div>" +
+        "<div class=\"hint\">按人</div>" + (users || "<div class=\"hint\">无</div>") +
+        "<div class=\"hint\">按会话</div>" + (sessions || "<div class=\"hint\">无</div>");
+    }
+
+    function addPersonaRow(name, prompt) {
+      const row = document.createElement("div");
+      row.className = "row";
+      row.style.marginBottom = "8px";
+      row.dataset.personaRow = "1";
+      const nameInput = document.createElement("input");
+      nameInput.dataset.personaName = "1";
+      nameInput.placeholder = "名字";
+      nameInput.value = name || "";
+      const promptInput = document.createElement("input");
+      promptInput.dataset.personaPrompt = "1";
+      promptInput.placeholder = "system_prompt";
+      promptInput.value = prompt || "";
+      promptInput.style.flex = "2";
+      const del = document.createElement("button");
+      del.className = "ghost";
+      del.type = "button";
+      del.textContent = "删除";
+      del.onclick = () => row.remove();
+      row.append(nameInput, promptInput, del);
+      el("agent-personas").append(row);
+    }
+
+    function renderPersonas(view) {
+      el("agent-system-prompt").value = view.system_prompt ?? "";
+      agentListed = (view.personas || []).map((p) => p.name);
+      el("agent-personas").innerHTML = "";
+      (view.personas || []).forEach((p) => addPersonaRow(p.name, p.system_prompt));
+    }
+
+    async function loadAgent() {
+      const [usage, personas] = await Promise.all([
+        api("/api/agent/usage"),
+        api("/api/agent/personas"),
+      ]);
+      renderUsage(usage);
+      renderPersonas(personas);
+    }
+
+    async function saveAgentPersonas() {
+      const plugins = await api("/api/plugins");
+      const entry = (plugins.entries || []).find((e) => e.name === "agent" && e.primary);
+      const config = Object.assign({}, (entry && entry.config) || {});
+      const prev = config.personas && typeof config.personas === "object" && !Array.isArray(config.personas)
+        ? config.personas : {};
+      const listed = {};
+      agentListed.forEach((name) => { listed[name] = true; });
+      const next = {};
+      Object.keys(prev).forEach((name) => {
+        if (!listed[name]) next[name] = prev[name];
+      });
+      el("agent-personas").querySelectorAll("[data-persona-row]").forEach((row) => {
+        const name = row.querySelector("[data-persona-name]").value.trim();
+        if (!name) return;
+        const prompt = row.querySelector("[data-persona-prompt]").value;
+        const old = prev[name] && typeof prev[name] === "object" && !Array.isArray(prev[name]) ? prev[name] : {};
+        next[name] = Object.assign({}, old, { system_prompt: prompt });
+      });
+      config.system_prompt = el("agent-system-prompt").value;
+      config.personas = next;
+      const r = await api("/api/plugins/agent/config", {
+        method: "PUT",
+        body: JSON.stringify({ config }),
+      });
+      renderDyn(r.plugins);
+      renderPersonas(await api("/api/agent/personas"));
+      banner("已保存福酱人设", "ok");
+    }
+
     async function load() {
       banner("加载中…");
       const view = await api("/api/config");
       fill(view.config);
       renderStatus(view);
       await refreshDyn();
+      await loadAgent();
       banner("已加载。密钥框里的 ******** 或空白表示不修改。", "ok");
     }
 
@@ -478,6 +580,8 @@
 
     el("reload").onclick = () => load().catch((e) => banner(e.message, "err"));
     el("save").onclick = () => save().catch((e) => banner(e.message, "err"));
+    el("agent-add").onclick = () => addPersonaRow("", "");
+    el("agent-save").onclick = () => saveAgentPersonas().catch((e) => banner(e.message, "err"));
     el("dyn-load").onclick = () => dynAct("/api/plugins/load", { path: el("dyn-path").value.trim() });
     el("dyn-scan").onclick = () => dynAct("/api/plugins/scan", {});
     el("login-go").onclick = () => {

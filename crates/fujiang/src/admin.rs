@@ -44,6 +44,8 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/api/plugins/{name}/disable", post(disable_plugin))
         .route("/api/plugins/instances", post(add_instance))
         .route("/api/plugins/instances/drop", post(drop_instance))
+        .route("/api/agent/usage", get(crate::admin_agent::get_usage))
+        .route("/api/agent/personas", get(crate::admin_agent::get_personas))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
     Router::new()
         .route("/", get(index))

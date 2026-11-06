@@ -501,6 +501,8 @@ fujiang-core = { path = "../../fujiang-core" }
 | `PUT` | `/api/plugins/{name}/config` | `{ "config": { … } }` 写配置并重启该插件 |
 | `POST` | `/api/plugins/{name}/enable` | 启用 |
 | `POST` | `/api/plugins/{name}/disable` | 停用（dispose，动态库保留） |
+| `GET` | `/api/agent/usage?day=YYYY-MM-DD` | 只读 agent 用量。`day` 缺省为今天（UTC）。`day_id` 是 unix 秒对 86400 做 Euclidean 除法。JSON：`totals`、`by_user`、`by_session`（各最多 20 行，按 calls 降序）。读 `{store.data_dir}/plugin-data/agent/plugin.sqlite` 的 `usage_daily`。文件不在或没有这张表时 200 且全 0，不创建文件 |
+| `GET` | `/api/agent/personas` | 读内存里的 `plugins.configs.agent`。JSON：`system_prompt` 与 `personas`（`name`、`system_prompt`） |
 
 `GET /api/plugins` 形状（节选）：
 
@@ -532,7 +534,7 @@ fujiang-core = { path = "../../fujiang-core" }
 }
 ```
 
-管理页 `listen` 不要和 `adapter.event_listen` 相同。非本机监听且没有 token 时日志会警告。
+管理页 `listen` 保持本机回环（默认 `127.0.0.1:8787`），不要改成对外地址，也不要和 `adapter.event_listen` 相同。非本机监听且没有 token 时日志会警告。
 
 ---
 
