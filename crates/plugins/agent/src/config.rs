@@ -43,6 +43,7 @@ pub struct AgentConfig {
     pub enable_rank_tools: bool,
     pub enable_contest_tools: bool,
     pub enable_problem_tools: bool,
+    pub inject_tool_list: bool,
     pub tools: Vec<ToolSpec>,
     pub vision_enabled: bool,
     pub max_image_bytes: u64,
@@ -68,6 +69,7 @@ impl AgentConfig {
             enable_rank_tools: bool_field(v, "enable_rank_tools", true),
             enable_contest_tools: bool_field(v, "enable_contest_tools", true),
             enable_problem_tools: bool_field(v, "enable_problem_tools", true),
+            inject_tool_list: bool_field(v, "inject_tool_list", false),
             tools: tools_from(v),
             vision_enabled: bool_field(v, "vision_enabled", false),
             max_image_bytes: max_image_bytes_from(v),
@@ -244,6 +246,7 @@ mod tests {
         assert!(cfg.enable_rank_tools);
         assert!(cfg.enable_contest_tools);
         assert!(cfg.enable_problem_tools);
+        assert!(!cfg.inject_tool_list);
         assert!(cfg.tools.is_empty());
         assert!(!cfg.vision_enabled);
         assert_eq!(cfg.max_image_bytes, 5 * 1024 * 1024);
@@ -272,7 +275,8 @@ mod tests {
             "groups": [1],
             "allow_private": false,
             "enabled": true,
-            "api": "chat"
+            "api": "chat",
+            "inject_tool_list": true
         }));
         assert_eq!(cfg.base_url, "https://example.test/v1");
         assert_eq!(cfg.model, "deepseek-chat");
@@ -287,6 +291,7 @@ mod tests {
         assert_eq!(cfg.rate_limit.per_user_per_hour, 2);
         assert_eq!(cfg.rate_limit.per_group_per_hour, 9);
         assert_eq!(cfg.timeout_secs, 5);
+        assert!(cfg.inject_tool_list);
     }
 
     #[test]
@@ -304,6 +309,7 @@ mod tests {
             "enable_rank_tools": "no",
             "enable_contest_tools": 0,
             "enable_problem_tools": "no",
+            "inject_tool_list": "yes",
             "tools": "nope",
             "vision_enabled": "yes",
             "max_image_bytes": "big"

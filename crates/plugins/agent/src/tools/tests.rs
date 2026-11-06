@@ -183,6 +183,48 @@ fn builtin_tools_follow_the_switches() {
     assert_eq!(kept_config[0].method(), "list");
 }
 
+#[test]
+fn catalog_lists_logical_names_for_the_enabled_set() {
+    let on = assemble_tools(&[], BuiltinTools::ON);
+    let text = tools_command_text(&on);
+    assert_eq!(
+        text,
+        "可用工具：\n\
+rank.list：列出本群 Codeforces 榜上的队员，含 handle 和 rating。不需要参数。\n\
+rank.get：按 Codeforces handle 查一位已登记队员。可选字符串参数 handle。不传则这次查询失败。\n\
+contest.upcoming：列出即将开始的比赛。可选字符串参数 oj，例如 Codeforces 或 Atcoder。不传则返回全部。\n\
+contest.today：列出今天开始的比赛。不需要参数。\n\
+problem.today：返回当前每日一题里已经保存的题目。不需要参数。还没保存时是空数组。"
+    );
+    assert!(!text.contains('_'));
+    assert_eq!(tools_command_text(&[]), "当前没有可用工具。");
+
+    let shadowed = ToolSpec::parse("rank.list", "别的说明", json!({})).unwrap();
+    let kept = assemble_tools(std::slice::from_ref(&shadowed), BuiltinTools::ON);
+    let shown = tools_command_text(&kept);
+    assert!(shown.contains("rank.list：列出本群"));
+    assert!(!shown.contains("别的说明"));
+
+    let custom = assemble_tools(&[shadowed], BuiltinTools::OFF);
+    assert_eq!(
+        tools_command_text(&custom),
+        "可用工具：\nrank.list：别的说明"
+    );
+
+    let blank = ToolSpec::parse("memo.list", " ", json!({})).unwrap();
+    assert_eq!(tools_command_text(&[blank]), "可用工具：\nmemo.list");
+
+    assert_eq!(instructions_with_catalog("人设", &on, false), "人设");
+    let injected = instructions_with_catalog("人设", &on, true);
+    assert!(injected.starts_with("人设\n\n可用工具：\nrank.list："));
+    assert!(!injected.contains('_'));
+    assert_eq!(instructions_with_catalog("人设", &[], true), "人设");
+    assert_eq!(
+        instructions_with_catalog(" \n ", &custom, true),
+        "可用工具：\nrank.list：别的说明"
+    );
+}
+
 #[tokio::test]
 async fn tool_call_round_trips_through_the_hub_then_returns_text() {
     let script = Script::new(Kind::ToolThenText);

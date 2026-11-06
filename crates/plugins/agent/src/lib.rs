@@ -18,7 +18,7 @@ use fujiang_core::{
 };
 use sqlx::SqlitePool;
 use tokio::sync::Mutex;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::session::{save_exchange, session_key};
 use crate::trigger::{build_messages, claim, fit_reply, llm_reply, Claim, BUSY_REPLY};
@@ -30,6 +30,7 @@ const HELP: &str = "对话。@我、消息里带唤醒词（默认「福酱」�
 .agent persona      查看当前人设\n\
 .agent persona <名> 切换到配置里的人设\n\
 .agent status       当前人设，以及这一小时还剩几次\n\
+.agent tools        列出当前启用的工具\n\
 在配置里把 priority 设为 10，高于 fun。本插件接过的消息返回 Stop，fun 不会再处理同一条。\n\
 require_at 为 true 时，只认 @我或回复我，单独的唤醒词不算。";
 
@@ -40,6 +41,7 @@ enum AgentCmd {
     Help,
     Reset,
     Status,
+    Tools,
     ShowPersona,
     SetPersona(String),
     Unknown,
@@ -90,6 +92,8 @@ impl Plugin for AgentPlugin {
         let pool = ctx.open_instance_db(scope).await?;
         session::ensure_schema(&pool).await?;
         *self.pool.lock().await = Some(pool);
+        let cfg = AgentConfig::from_value(&ctx.instance_config(scope).await);
+        log_enabled_tools(&cfg);
         Ok(())
     }
 
@@ -234,11 +238,7 @@ impl AgentPlugin {
             &client,
             &messages,
             &cfg.tools,
-            tools::BuiltinTools {
-                rank: cfg.enable_rank_tools,
-                contest: cfg.enable_contest_tools,
-                problem: cfg.enable_problem_tools,
-            },
+            enabled_builtins(cfg),
             cfg.max_tool_rounds,
             ctx,
         )
@@ -319,6 +319,13 @@ fn parse_agent_cmd(rest: &str) -> AgentCmd {
                 AgentCmd::Status
             }
         }
+        "tools" => {
+            if parts.next().is_some() {
+                AgentCmd::Unknown
+            } else {
+                AgentCmd::Tools
+            }
+        }
         "persona" => match parts.next() {
             None => AgentCmd::ShowPersona,
             Some(name) if parts.next().is_none() => AgentCmd::SetPersona(name.to_string()),
@@ -376,7 +383,26 @@ async fn apply_command(
             );
             Ok(format!("人设：{title}\n{quota}"))
         }
+        AgentCmd::Tools => {
+            let tools = log_enabled_tools(cfg);
+            Ok(fit_reply(&tools::tools_command_text(&tools)))
+        }
     }
+}
+
+fn enabled_builtins(cfg: &AgentConfig) -> tools::BuiltinTools {
+    tools::BuiltinTools {
+        rank: cfg.enable_rank_tools,
+        contest: cfg.enable_contest_tools,
+        problem: cfg.enable_problem_tools,
+    }
+}
+
+fn log_enabled_tools(cfg: &AgentConfig) -> Vec<ToolSpec> {
+    let tools = tools::assemble_tools(&cfg.tools, enabled_builtins(cfg));
+    let names: Vec<&str> = tools.iter().map(ToolSpec::name).collect();
+    info!(tools = ?names, "agent tools");
+    tools
 }
 
 /// History is loaded before the slot so a failed read does not burn quota.
@@ -389,7 +415,9 @@ async fn plan_chat(
     now: i64,
 ) -> anyhow::Result<ChatPlan> {
     let stored = session::persona_of(pool, session_key).await?;
-    let (_, prompt) = cfg.resolve_persona(stored.as_deref());
+    let (_, persona) = cfg.resolve_persona(stored.as_deref());
+    let enabled = tools::assemble_tools(&cfg.tools, enabled_builtins(cfg));
+    let prompt = tools::instructions_with_catalog(persona, &enabled, cfg.inject_tool_list);
     let history = session::recent_turns(pool, session_key, cfg.max_history_turns).await?;
     let slot = session::take_slot(
         pool,
@@ -402,7 +430,7 @@ async fn plan_chat(
     .await?;
     Ok(match slot {
         session::Slot::Taken => ChatPlan::Speak {
-            messages: build_messages(prompt, history, user_text.to_string()),
+            messages: build_messages(&prompt, history, user_text.to_string()),
         },
         session::Slot::UserLimited => ChatPlan::Tip(USER_LIMIT_TIP),
         session::Slot::SessionLimited => ChatPlan::Tip(SESSION_LIMIT_TIP),
@@ -504,6 +532,7 @@ mod tests {
         assert!(plugin.help().contains(".agent reset"));
         assert!(plugin.help().contains(".agent persona"));
         assert!(plugin.help().contains(".agent status"));
+        assert!(plugin.help().contains(".agent tools"));
     }
 
     #[test]
@@ -513,6 +542,8 @@ mod tests {
         assert!(matches!(parse_agent_cmd("reset"), AgentCmd::Reset));
         assert!(matches!(parse_agent_cmd("reset now"), AgentCmd::Unknown));
         assert!(matches!(parse_agent_cmd("status"), AgentCmd::Status));
+        assert!(matches!(parse_agent_cmd("tools"), AgentCmd::Tools));
+        assert!(matches!(parse_agent_cmd("tools now"), AgentCmd::Unknown));
         assert!(matches!(parse_agent_cmd("persona"), AgentCmd::ShowPersona));
         assert!(matches!(
             parse_agent_cmd("persona strict"),
@@ -613,11 +644,86 @@ mod tests {
             .await
             .unwrap();
         assert!(help.contains("!agent reset"));
+        assert!(help.contains("!agent tools"));
         assert!(!help.contains(".agent"));
         let unknown = apply_command(&pool, &cfg, &key, 1, &AgentCmd::Unknown, ".", 8)
             .await
             .unwrap();
         assert_eq!(unknown, "不认识这个子命令，发 .agent 看说明");
+    }
+
+    #[tokio::test]
+    async fn tools_command_lists_the_enabled_set_and_injection_is_opt_in() {
+        let pool = pool().await;
+        let key = session_key(Source::Group { id: 3 });
+        let off = AgentConfig::from_value(&json!({
+            "system_prompt": "默认人设",
+            "enable_rank_tools": false,
+            "enable_contest_tools": false,
+            "enable_problem_tools": false
+        }));
+        let empty = run(&pool, &off, &key, 1, &AgentCmd::Tools, 1).await;
+        assert_eq!(empty, "当前没有可用工具。");
+
+        let listed = AgentConfig::from_value(&json!({
+            "system_prompt": "默认人设",
+            "enable_rank_tools": false,
+            "enable_contest_tools": false,
+            "enable_problem_tools": false,
+            "tools": [{
+                "name": "memo.list",
+                "description": "列出备忘",
+                "parameters": {"type": "object", "properties": {}}
+            }]
+        }));
+        let text = run(&pool, &listed, &key, 1, &AgentCmd::Tools, 2).await;
+        assert_eq!(text, "可用工具：\nmemo.list：列出备忘");
+        assert!(!text.contains("memo_list"));
+
+        let quiet = plan_chat(&pool, &listed, &key, 1, "hi", 3).await.unwrap();
+        let ChatPlan::Speak { messages } = quiet else {
+            panic!("expected a chat");
+        };
+        assert_eq!(messages[0].content, "默认人设");
+
+        let loud = AgentConfig::from_value(&json!({
+            "system_prompt": "默认人设",
+            "inject_tool_list": true,
+            "enable_rank_tools": false,
+            "enable_contest_tools": false,
+            "enable_problem_tools": false,
+            "rate_limit": { "per_user_per_hour": 0, "per_group_per_hour": 0 },
+            "tools": [{
+                "name": "memo.list",
+                "description": "列出备忘",
+                "parameters": {"type": "object", "properties": {}}
+            }]
+        }));
+        let plan = plan_chat(&pool, &loud, &key, 1, "hi", 4).await.unwrap();
+        let ChatPlan::Speak { messages } = plan else {
+            panic!("expected a chat");
+        };
+        assert_eq!(
+            messages[0].content,
+            "默认人设\n\n可用工具：\nmemo.list：列出备忘"
+        );
+        assert_eq!(messages[0].role, Role::System);
+
+        let shadowed = AgentConfig::from_value(&json!({
+            "enable_contest_tools": false,
+            "enable_problem_tools": false,
+            "tools": [{
+                "name": "rank.list",
+                "description": "别的说明",
+                "parameters": {"type": "object", "properties": {}}
+            }]
+        }));
+        let rank = run(&pool, &shadowed, &key, 9, &AgentCmd::Tools, 5).await;
+        assert!(rank.contains("rank.list：列出本群"));
+        assert!(rank.contains("rank.get："));
+        assert!(!rank.contains("别的说明"));
+        assert!(!rank.contains("contest.upcoming"));
+        assert!(!rank.contains('_'));
     }
 
     #[tokio::test]

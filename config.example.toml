@@ -98,7 +98,9 @@ enabled = true
 # enable_rank_tools = true
 # enable_contest_tools = true
 # enable_problem_tools = true
+# inject_tool_list = false
 # # 三个开关默认都是 true。写成 false 就从请求里拿掉对应的内置工具。
+# # inject_tool_list 默认 false。改成 true 后，当前启用工具的短清单会追加到系统提示。`.agent tools` 始终列出同一份清单。
 # # 工具名写成「服务.方法」。请求里的函数名把点换成下划线。
 # # 内置工具默认已有 rank.list、rank.get、contest.upcoming、contest.today、problem.today。
 # # 下面这项和已启用的 rank_list 函数名相同，所以不会发出去。关掉 enable_rank_tools 之后才会。

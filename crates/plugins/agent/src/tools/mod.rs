@@ -122,6 +122,46 @@ pub(crate) fn assemble_tools(configured: &[ToolSpec], builtins: BuiltinTools) ->
     tools
 }
 
+pub(crate) fn tools_command_text(tools: &[ToolSpec]) -> String {
+    match tool_list_block(tools) {
+        Some(block) => block,
+        None => "当前没有可用工具。".to_string(),
+    }
+}
+
+pub(crate) fn instructions_with_catalog(prompt: &str, tools: &[ToolSpec], inject: bool) -> String {
+    let prompt = prompt.trim();
+    if !inject {
+        return prompt.to_string();
+    }
+    match tool_list_block(tools) {
+        Some(block) if prompt.is_empty() => block,
+        Some(block) => format!("{prompt}\n\n{block}"),
+        None => prompt.to_string(),
+    }
+}
+
+fn tool_list_block(tools: &[ToolSpec]) -> Option<String> {
+    if tools.is_empty() {
+        return None;
+    }
+    let lines = tools
+        .iter()
+        .map(catalog_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!("可用工具：\n{lines}"))
+}
+
+fn catalog_line(spec: &ToolSpec) -> String {
+    let description = spec.description();
+    if description.is_empty() {
+        spec.name().to_string()
+    } else {
+        format!("{}：{}", spec.name(), description)
+    }
+}
+
 fn builtin_specs(builtins: BuiltinTools) -> Vec<ToolSpec> {
     let mut specs = Vec::new();
     if builtins.rank {
