@@ -115,6 +115,10 @@ enabled = true
 # system_prompt = "你是福酱，西南科技大学 ACM 群助手。"
 # wake_words = ["福酱"]
 # require_at = false
+# blacklist = ["代写"]
+# 命中后回复固定中文，不调用模型，不计数。admins 里的 QQ 也拦。
+# admins = [10001]
+# 这些 QQ 不计入每小时次数。空数组表示没有人免去次数。黑名单仍然生效。
 # [plugins.configs.agent.rate_limit]
 # per_user_per_hour = 30
 # per_group_per_hour = 120
