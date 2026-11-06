@@ -125,6 +125,11 @@ enabled = true
 # [plugins.configs.agent.rate_limit]
 # per_user_per_hour = 30
 # per_group_per_hour = 120
+# [plugins.configs.agent.memory]
+# enabled = true
+# 默认 true。存下的回合超过 max_history_turns 时，更早的回合折成一段摘要。
+# 摘要写在人设后面、工具清单前面。false 时不折叠，也不把摘要放进系统提示。
+# 上下文示例这次不做。
 # [plugins.configs.agent.personas.strict]
 # system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
