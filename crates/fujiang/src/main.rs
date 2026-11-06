@@ -1,5 +1,6 @@
 mod admin;
 mod admin_agent;
+mod admin_memory;
 mod config;
 mod dynload;
 mod plugins;

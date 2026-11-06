@@ -93,7 +93,7 @@ pub(crate) async fn get_personas(State(state): State<Arc<AppState>>) -> Response
     Json(personas_from_config(raw)).into_response()
 }
 
-fn agent_db_path(store: &fujiang_store::Store) -> PathBuf {
+pub(crate) fn agent_db_path(store: &fujiang_store::Store) -> PathBuf {
     store
         .data_dir()
         .join("plugin-data")
@@ -101,7 +101,7 @@ fn agent_db_path(store: &fujiang_store::Store) -> PathBuf {
         .join("plugin.sqlite")
 }
 
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -163,21 +163,10 @@ fn empty_report(day: &str, day_id: i64) -> UsageReport {
 }
 
 async fn usage_report(path: &Path, day: &str, day_id: i64) -> anyhow::Result<UsageReport> {
-    if !path.is_file() {
+    let Some(mut conn) = open_read(path).await? else {
         return Ok(empty_report(day, day_id));
-    }
-    let mut conn = SqliteConnectOptions::new()
-        .filename(path)
-        .read_only(true)
-        .create_if_missing(false)
-        .connect()
-        .await?;
-    let table: Option<i64> = sqlx::query_scalar(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'usage_daily'",
-    )
-    .fetch_optional(&mut conn)
-    .await?;
-    if table.is_none() {
+    };
+    if !has_table(&mut conn, "usage_daily").await? {
         return Ok(empty_report(day, day_id));
     }
     let totals = sqlx::query_as::<_, TokenTotals>(
@@ -254,6 +243,32 @@ fn personas_from_config(v: &Value) -> PersonasView {
         system_prompt,
         personas,
     }
+}
+
+pub(crate) async fn open_read(path: &Path) -> anyhow::Result<Option<sqlx::SqliteConnection>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(
+        SqliteConnectOptions::new()
+            .filename(path)
+            .read_only(true)
+            .create_if_missing(false)
+            .connect()
+            .await?,
+    ))
+}
+
+pub(crate) async fn has_table(
+    conn: &mut sqlx::SqliteConnection,
+    name: &str,
+) -> anyhow::Result<bool> {
+    let hit: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")
+            .bind(name)
+            .fetch_optional(&mut *conn)
+            .await?;
+    Ok(hit.is_some())
 }
 
 #[cfg(test)]
