@@ -78,7 +78,31 @@ T0 带一个无害的占位包，用来把列出、打开、调用串起来。�
 
 发言人是群管理员，也不自动打开这些动作。T0 不读取 `qq_write_allow`。
 
-[#55](https://github.com/KazeMae/FujiangBot/issues/55) 只做只读技能包 `qq.read`。发送和危险写操作都不在那一刀里。
+[#55](https://github.com/KazeMae/FujiangBot/issues/55) 只做只读技能包 `qq.read`。发送和危险写操作都不在那一刀里。动作和拒绝方式在下一节。
+
+## 只读包 qq.read
+
+打开之前，包里的工具不进 `tools`。这时直接调用，日志是 `agent skill closed`，不访问 NapCat。`skills.list` 只给包名和这句说明，不给工具名：只读 QQ。打开之后可以查看发言人所在的群，以及他自己和 bot 的私聊。不能发消息，也不能踢人、禁言或读取凭据。
+
+发言人的 QQ 由宿主从入站消息写入，和分层记忆一样。模型传来的 `user_id` 不能把发言人换成别人。
+
+群工具先调用 `get_group_member_info`，参数是目标 `group_id` 和发言人的 QQ。返回的 `user_id` 必须就是发言人。查不到、报错，或返回的是别人，都拒绝，并且不再调用目标动作。bot 自己在群里不够。同一次发言里，同一个群的结论会复用。
+
+| 工具 | Responses 的 `name` | NapCat 动作 | 放行 |
+|---|---|---|---|
+| `qq.get_group_info` | `qq_get_group_info` | `get_group_info` | 发言人在该群 |
+| `qq.get_group_member_info` | `qq_get_group_member_info` | `get_group_member_info` | 发言人在该群。`user_id` 是要查的成员 |
+| `qq.get_group_member_list` | `qq_get_group_member_list` | `get_group_member_list` | 发言人在该群 |
+| `qq.get_essence_msg_list` | `qq_get_essence_msg_list` | `get_essence_msg_list` | 发言人在该群 |
+| `qq.get_group_msg_history` | `qq_get_group_msg_history` | `get_group_msg_history` | 先核对 `group_id`。记录里出现别的群或私聊，整次拒绝 |
+| `qq.get_msg` | `qq_get_msg` | `get_msg` | 先取出这条消息，再判断群或私聊。群消息再核对成员。私聊对方必须是发言人。对不上就拒绝，内容不返回 |
+| `qq.get_friend_msg_history` | `qq_get_friend_msg_history` | `get_friend_msg_history` | `user_id` 必须是发言人。省略时按发言人查。写成别人就拒绝，并且不调用 NapCat |
+
+越权的日志是 `agent qq denied`。用户仍看到「我没查成，过一会儿再问我一次。」
+
+`get_stranger_info` 不在这个包里。它不是所在的群，也不是自己的私聊。发送和危险写操作也不在，包括 `send_private_msg`、`send_group_msg`、`send_msg`、`set_group_kick`、`set_group_ban`、`set_group_whole_ban`、`set_group_admin`、`set_group_leave`、`delete_msg`、`get_cookies`、`get_credentials`、`get_csrf_token`、`clean_cache`、`bot_exit`。
+
+调用走现有的 `Messenger`。`HttpAdapter` 和 `WsAdapter` 用已经连上的 NapCat 客户端，不另开连接。
 
 ## 定时任务
 
@@ -100,7 +124,7 @@ T0 带一个无害的占位包，用来把列出、打开、调用串起来。�
 |---|---|---|
 | #53 | 懒加载、QQ 权限、定时任务 | 边界写在这一篇 |
 | #54 | `skills.list`、`skills.open`、这篇说明、占位包 | 本分支实现 |
-| #55 | 只读技能包 `qq.read`，按发言人核对 | 未做 |
+| #55 | 只读技能包 `qq.read`，按发言人核对 | 本分支实现 |
 | #56 | `schedule.list`、`schedule.create`、`schedule.update`、`schedule.cancel`，以及 `.agent schedule`。到点重验 | 未做 |
 | #18 | MCP | 仍延期 |
 

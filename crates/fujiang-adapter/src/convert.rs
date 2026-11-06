@@ -49,10 +49,9 @@ pub fn map_message(nc: &NcEvent) -> Option<MessageEvent> {
     }
     let source = if let Some(gid) = nc.group_id() {
         Source::Group { id: gid }
-    } else if let Some(uid) = nc.user_id() {
-        Source::Friend { id: uid }
     } else {
-        return None;
+        let uid = nc.user_id()?;
+        Source::Friend { id: uid }
     };
     let sender = nc.sender();
     let segments: Vec<Segment> = nc.message_segments().into_iter().map(from_recv).collect();
