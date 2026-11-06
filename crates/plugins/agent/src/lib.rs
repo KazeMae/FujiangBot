@@ -41,7 +41,6 @@ require_at 为 true 时，只认 @我或回复我，单独的唤醒词不算。"
 const USER_LIMIT_TIP: &str = "你这一小时里找福酱的次数到了，歇一会儿再来。";
 const SESSION_LIMIT_TIP: &str = "这个会话这一小时的次数到了，歇一会儿再来。";
 const BLACKLIST_TIP: &str = "这句话我不能接，换个说法再问我。";
-
 enum AgentCmd {
     Help,
     Reset,
