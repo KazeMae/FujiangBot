@@ -42,6 +42,7 @@ pub struct AgentConfig {
     pub max_tool_rounds: u32,
     pub enable_rank_tools: bool,
     pub enable_contest_tools: bool,
+    pub enable_problem_tools: bool,
     pub tools: Vec<ToolSpec>,
     pub vision_enabled: bool,
     pub max_image_bytes: u64,
@@ -66,6 +67,7 @@ impl AgentConfig {
             max_tool_rounds: u32_field(v, "max_tool_rounds", DEFAULT_MAX_TOOL_ROUNDS),
             enable_rank_tools: bool_field(v, "enable_rank_tools", true),
             enable_contest_tools: bool_field(v, "enable_contest_tools", true),
+            enable_problem_tools: bool_field(v, "enable_problem_tools", true),
             tools: tools_from(v),
             vision_enabled: bool_field(v, "vision_enabled", false),
             max_image_bytes: max_image_bytes_from(v),
@@ -241,6 +243,7 @@ mod tests {
         assert_eq!(cfg.max_tool_rounds, 3);
         assert!(cfg.enable_rank_tools);
         assert!(cfg.enable_contest_tools);
+        assert!(cfg.enable_problem_tools);
         assert!(cfg.tools.is_empty());
         assert!(!cfg.vision_enabled);
         assert_eq!(cfg.max_image_bytes, 5 * 1024 * 1024);
@@ -300,6 +303,7 @@ mod tests {
             "max_tool_rounds": "nope",
             "enable_rank_tools": "no",
             "enable_contest_tools": 0,
+            "enable_problem_tools": "no",
             "tools": "nope",
             "vision_enabled": "yes",
             "max_image_bytes": "big"
@@ -384,16 +388,20 @@ mod tests {
     fn builtin_tool_flags_default_on_and_can_turn_off() {
         let off = AgentConfig::from_value(&json!({
             "enable_rank_tools": false,
-            "enable_contest_tools": false
+            "enable_contest_tools": false,
+            "enable_problem_tools": false
         }));
         assert!(!off.enable_rank_tools);
         assert!(!off.enable_contest_tools);
+        assert!(!off.enable_problem_tools);
 
         let rank_only = AgentConfig::from_value(&json!({
-            "enable_contest_tools": false
+            "enable_contest_tools": false,
+            "enable_problem_tools": false
         }));
         assert!(rank_only.enable_rank_tools);
         assert!(!rank_only.enable_contest_tools);
+        assert!(!rank_only.enable_problem_tools);
     }
 
     #[test]

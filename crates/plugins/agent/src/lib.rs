@@ -237,6 +237,7 @@ impl AgentPlugin {
             tools::BuiltinTools {
                 rank: cfg.enable_rank_tools,
                 contest: cfg.enable_contest_tools,
+                problem: cfg.enable_problem_tools,
             },
             cfg.max_tool_rounds,
             ctx,
