@@ -177,7 +177,7 @@ pub(crate) fn enabled_builtins(cfg: &AgentConfig) -> tools::BuiltinTools {
 }
 
 pub(crate) fn log_enabled_tools(cfg: &AgentConfig) -> Vec<ToolSpec> {
-    let tools = tools::assemble_tools(&cfg.tools, enabled_builtins(cfg));
+    let tools = tools::resident_tools(&cfg.tools, enabled_builtins(cfg));
     let names: Vec<&str> = tools.iter().map(ToolSpec::name).collect();
     info!(tools = ?names, "agent tools");
     tools

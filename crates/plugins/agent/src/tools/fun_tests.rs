@@ -165,6 +165,8 @@ async fn fun_learn_fills_the_current_group() {
             "fun_stars".to_string(),
             "fun_learn".to_string(),
             "fun_search".to_string(),
+            "skills_list".to_string(),
+            "skills_open".to_string(),
         ]
     );
 }

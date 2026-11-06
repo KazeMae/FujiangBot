@@ -84,7 +84,14 @@ async fn memo_list_fills_the_current_chat_and_a_missing_service_degrades() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(names, vec!["memo_list".to_string()]);
+    assert_eq!(
+        names,
+        vec![
+            "memo_list".to_string(),
+            "skills_list".to_string(),
+            "skills_open".to_string(),
+        ]
+    );
 
     let catch = Catch::default();
     let _guard = tracing::subscriber::set_default(catch.clone());

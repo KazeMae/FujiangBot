@@ -125,11 +125,11 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
 ## 工具
 
-适配层把 Responses 的 `function_call` 交给 ServiceHub。模型返回 `function_call` 时，插件按工具名调用 `ctx.call`。`memory` 例外，直接读写本插件的 sqlite。结果放进下一次请求的 `function_call_output`。模型返回文本后，这一轮结束。工具来回只留在这一轮的内存里。会话表仍只保存用户原文和最终回复。分层记忆写在另一张表，见上文「分层记忆」。
+适配层把 Responses 的 `function_call` 交给 ServiceHub。模型返回 `function_call` 时，插件按工具名调用 `ctx.call`。`memory` 例外，直接读写本插件的 sqlite。`skills` 和占位包 `ping` 也例外，由本插件直接回答。结果放进下一次请求的 `function_call_output`。模型返回文本后，这一轮结束。工具来回只留在这一轮的内存里。会话表仍只保存用户原文和最终回复。分层记忆写在另一张表，见上文「分层记忆」。
 
 工具名的格式是 `服务.方法`。第一个 `.` 之前是服务名，之后是方法名。`rank.list` 调用 rank 的 `list`。`rank.get` 调用 rank 的 `get`。`contest.upcoming` 调用 contest 的 `upcoming`。`problem.today` 调用 problem 的 `today`。Responses 要求函数名匹配 `^[a-zA-Z0-9_-]+$`，所以请求里的 `name` 把 `.` 换成 `_`。`rank.list` 发出去是 `rank_list`。`rank.get` 发出去是 `rank_get`。
 
-默认带十五个内置工具。`memo.add` 默认不带。fun 不注册写工具，也没有删除图库的方法。分层记忆的读写默认都带。
+默认带十七个常驻工具。十五个是原来的业务工具，另外两个是 `skills.list` 和 `skills.open`，没有开关。`memo.add` 默认不带。fun 不注册写工具，也没有删除图库的方法。分层记忆的读写默认都带。技能包里的工具不在这十七个里。打开规则见 [agent skills](agent-skills.md)。
 
 | 配置名 | 请求里的函数名 | 调用 | 参数 |
 |---|---|---|---|
@@ -149,6 +149,8 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 | `memory.upsert` | `memory_upsert` | 本插件 sqlite | 字符串 `scope`、`key`、`value`。默认注册 |
 | `memory.forget` | `memory_forget` | 本插件 sqlite | 字符串 `scope`、`key`。可选布尔 `prefix`。默认注册 |
 | `memory.consolidate` | `memory_consolidate` | 本插件 sqlite | 可选字符串 `scope`。默认注册 |
+| `skills.list` | `skills_list` | 本插件，不走 ServiceHub | 无。返回技能包的 `name` 和 `description` |
+| `skills.open` | `skills_open` | 本插件，不走 ServiceHub | 字符串 `name`。未知名字失败。再次打开仍成功 |
 
 `oj` 用来只看一个 OJ。例如 Codeforces、Atcoder、LuoGu、NowCoder 或 SCPC。不传则返回全部。
 
@@ -178,11 +180,11 @@ fun 编进 fujiang。`on_start` 执行 `ctx.provide("fun", …)`。四个读方�
 
 `[[plugins.configs.agent.tools]]` 可以再追加别的 `服务.方法`。配置项的函数名和某个已启用内置工具相同，就留下内置的那一项。这个内置工具的开关为 false 时，同名配置项会发出去。
 
-组装之后如果一个工具都没有，请求不带 `tools` 字段，插件只调用一次 `LlmClient::complete`。有工具就走工具循环。一轮发言里的执行次数不超过 `max_tool_rounds`。
+`skills.list` 和 `skills.open` 每次都在请求里。业务工具仍按各自的开关组装。正常请求因此带 `tools`，并走工具循环。一轮发言里的执行次数不超过 `max_tool_rounds`。打开一个技能包花掉其中一次。工具列表在代码里变成空时，请求不带 `tools`，插件只调用一次 `LlmClient::complete`。当前这两个常驻工具不会把列表变空。
 
-`.agent tools` 打印这一次会带上的工具。顺序和请求一致。内置工具在前，后面是配置追加的工具。每一行先写逻辑名，再写说明。逻辑名是 `服务.方法`，例如 `rank.list`。说明跟在全角冒号后面。请求里的函数名仍把点换成下划线，所以 `rank.list` 发出去是 `rank_list`。这条命令不调用模型。一个工具都没有时，回复「当前没有可用工具。」说明为空时，这一行只有逻辑名。
+`.agent tools` 打印这一次请求开始时会带上的工具。还没打开的技能包不在里面。顺序是业务内置工具、配置追加的工具、`skills.list`、`skills.open`。每一行先写逻辑名，再写说明。逻辑名是 `服务.方法`，例如 `rank.list`。说明跟在全角冒号后面。请求里的函数名仍把点换成下划线，所以 `rank.list` 发出去是 `rank_list`，`skills.list` 发出去是 `skills_list`。这条命令不调用模型。列表为空时，回复「当前没有可用工具。」当前常驻工具使这份列表不为空。说明为空时，这一行只有逻辑名。
 
-`inject_tool_list` 为 true 时，插件把同一段文字追加到当次人设的系统提示后面。人设和清单之间空一行。清单以「可用工具：」起头。没有启用工具时不追加。为 false 时，系统提示保持人设原文。模型请求里的 `tools` 字段两种情况下都照旧发送。
+`inject_tool_list` 为 true 时，插件把同一段文字追加到当次人设的系统提示后面。人设和清单之间空一行。清单以「可用工具：」起头。这段文字同样不含尚未打开的技能包。没有启用工具时不追加。为 false 时，系统提示保持人设原文。模型请求里的 `tools` 字段两种情况下都照旧发送。
 
 插件在 `on_start` 打一条 `info` 日志。字段 `tools` 是当时的逻辑名列表。有人发送 `.agent tools` 时再打一条。管理页不单独展示这份清单。配置改完后，下一次 `.agent tools` 用的是新配置。启动时的那条日志要等重启才更新。
 

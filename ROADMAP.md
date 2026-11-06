@@ -3,7 +3,7 @@
 > 仓库：https://github.com/KazeMae/FujiangBot  
 > 看板：https://github.com/users/KazeMae/projects/2  
 > 总追踪：#19  
-> 更新：2026-11-06（M1 完成；M2 适配层与 rank/contest 内置工具已合入）
+> 更新：2026-11-07（#53 T0：skills 懒加载方案与骨架）
 
 本文档是规划源。Issue / Milestone / Project 与此对齐。冲突时以已合并 Issue 的验收为准，并回写本文档。
 
@@ -43,7 +43,7 @@
 | 长期记忆 | 有 | 会话摘要有；分层记忆进行中 #46 | M3 |
 | Web / 管理 | 有 | 8787 管理口，agent 配置偏 toml | M3 |
 | 插件当 tool | 插件生态 | 仅 contest/rank 部分方法 | **插件工具化波次** |
-| 工具发现 / 展示 | 常见 | `.agent tools` 列逻辑名。`inject_tool_list` 默认关。启动日志有同一份名字 | 管理页仍不单列 |
+| 工具发现 / 展示 | 常见 | `.agent tools` 列常驻工具。技能包经 `skills.list` 与 `skills.open` 懒加载 | #53。管理页仍不单列 |
 | MCP | 可选 | 不做（#18 按需） | 默认不做 |
 
 ## 现状
@@ -95,6 +95,10 @@
 | #46 | Codex 风格分层记忆 | In Progress | 账号 / 群 / 个人（**群内发言也写个人记忆**）；见 `docs/layered-memory.md` |
 | #15 | 托管 RAG | 取消 | 不做 |
 | #18 | MCP | 延期 | 默认不做 |
+| #53 | 技能包懒加载、QQ 权限、定时任务 | In Progress | 方案 `docs/agent-skills.md` |
+| #54 T0 | `skills.list` / `skills.open` 与占位包 `ping` | In Progress | 本分支。不做真实 QQ、定时任务、MCP |
+| #55 T1 | `qq.read`，按当前发言人只读 | Todo | 依赖 #54。只读他所属的群和他自己的私聊 |
+| #56 T2 | `schedule.*` 与 `.agent schedule` | Todo | 到点带创建者 QQ，按同一边界重验 |
 
 前置：agent 热路径改动优先落在 `command.rs` / `plan.rs` / 新模块；单文件勿超 1000 行。
 
@@ -109,7 +113,8 @@
 1. **轨道 D（记忆）**：#46 分层记忆 T0（schema + tools）；群聊按发言者 QQ 更新个人记忆。  
 2. **轨道 E**：管理页浏览分层记忆（后切片）。  
 3. **RAG / #15**：取消。  
-4. **#18**：保持延期。
+4. **#18**：保持延期。  
+5. **轨道 F（#53）**：先合 #54 的懒加载骨架，再做 #55 只读 QQ 与 #56 定时任务。T1 与 T2 可以分开评审，都依赖 T0 的打开方式。
 
 每个 PR：自测 fmt/clippy/test（+ 相关 llvm-cov）→ 中文草稿 → 自审 → merge commit。不擅自部署。`lib.rs` 顶格时先拆文件。
 
@@ -137,3 +142,5 @@
 - 自建重型向量库。
 - 托管 RAG（#15 已取消）。  
 - 依赖 cdylib 热插跑生产 agent。
+- 把 NapCat 4.18.42 的全部 action 挂成常驻工具（#53，改为技能包懒加载）。
+- 默认打开踢人、禁言、退群、cookies、重启类 QQ 写操作。

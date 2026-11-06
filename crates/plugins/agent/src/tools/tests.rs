@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -8,9 +8,10 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::field::{Field, Visit};
-use tracing::span::{Attributes, Id, Record};
-use tracing::{Event, Level, Metadata, Subscriber};
+
+#[path = "catch.rs"]
+mod catch;
+use catch::Catch;
 
 use super::*;
 use crate::client::{ChatMessage, LlmClient, LlmError, Role};
@@ -427,8 +428,10 @@ async fn empty_tools_call_complete_once() {
     let base = spawn_app(script.clone()).await;
     let client = test_client(&base);
     let hub = Rec::default();
-    let reply = reply_of(&client, &user("在吗"), &[], BuiltinTools::OFF, 3, &hub)
+    let pass = ToolPass::rounds(3);
+    let reply = super::tool_loop(&client, &user("在吗"), &pass, &hub, |_| Vec::new())
         .await
+        .reply
         .unwrap();
     assert_eq!(reply, ToolReply::Text("本周有两场".into()));
     assert!(hub.log.lock().unwrap().is_empty());
@@ -509,7 +512,9 @@ async fn builtin_rank_and_contest_calls_return_the_model_text() {
             "memory_get",
             "memory_upsert",
             "memory_forget",
-            "memory_consolidate"
+            "memory_consolidate",
+            "skills_list",
+            "skills_open"
         ]
     );
     assert_eq!(
@@ -649,6 +654,8 @@ async fn disabled_builtin_group_stays_out_of_the_request() {
             "contest_upcoming".to_string(),
             "contest_today".to_string(),
             "memo_search".to_string(),
+            "skills_list".to_string(),
+            "skills_open".to_string(),
         ]
     );
     assert!(hub.log.lock().unwrap().is_empty());
@@ -731,6 +738,7 @@ enum Kind {
 struct Script {
     pub(super) hits: Arc<AtomicUsize>,
     pub(super) bodies: Arc<Mutex<Vec<Value>>>,
+    pub(super) steps: Arc<Vec<Value>>,
     kind: Kind,
 }
 
@@ -739,6 +747,7 @@ impl Script {
         Self {
             hits: Arc::new(AtomicUsize::new(0)),
             bodies: Arc::new(Mutex::new(Vec::new())),
+            steps: Arc::new(Vec::new()),
             kind,
         }
     }
@@ -765,6 +774,9 @@ async fn spawn_app(script: Script) -> String {
 async fn handle(State(script): State<Script>, Json(body): Json<Value>) -> Json<Value> {
     let n = script.hits.fetch_add(1, Ordering::SeqCst);
     script.bodies.lock().unwrap().push(body);
+    if let Some(step) = script.steps.get(n) {
+        return Json(step.clone());
+    }
     Json(match script.kind {
         Kind::Text => text_body(),
         Kind::ToolThenText if n == 0 => two_calls(),
@@ -935,57 +947,11 @@ impl ToolHub for Rec {
     }
 }
 
-#[derive(Clone, Default)]
-struct Catch(Arc<Mutex<Vec<String>>>);
-
-impl Catch {
-    fn has(&self, needle: &str) -> bool {
-        self.0
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|line| line.contains(needle))
-    }
-}
-
-struct Msg(String);
-
-impl Visit for Msg {
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-            self.0 = format!("{value:?}");
-        }
-    }
-}
-
-impl Subscriber for Catch {
-    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        *metadata.level() <= Level::WARN
-    }
-
-    fn new_span(&self, _: &Attributes<'_>) -> Id {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        Id::from_u64(NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-
-    fn record(&self, _: &Id, _: &Record<'_>) {}
-
-    fn record_follows_from(&self, _: &Id, _: &Id) {}
-
-    fn event(&self, event: &Event<'_>) {
-        let mut msg = Msg(String::new());
-        event.record(&mut msg);
-        self.0.lock().unwrap().push(msg.0);
-    }
-
-    fn enter(&self, _: &Id) {}
-
-    fn exit(&self, _: &Id) {}
-}
-
 #[path = "fun_tests.rs"]
 mod fun_tests;
 #[path = "memo_tests.rs"]
 mod memo_tests;
 #[path = "memory_tests.rs"]
 mod memory_tests;
+#[path = "skills_tests.rs"]
+mod skills_tests;

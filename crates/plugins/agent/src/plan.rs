@@ -68,7 +68,7 @@ async fn turn_messages(
     } else {
         String::new()
     };
-    let enabled = tools::assemble_tools(&cfg.tools, enabled_builtins(cfg));
+    let enabled = tools::resident_tools(&cfg.tools, enabled_builtins(cfg));
     let prompt = tools::instructions_with_catalog(
         &prompt_with_memory(persona, &summary),
         &enabled,
