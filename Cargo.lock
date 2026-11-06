@@ -599,8 +599,10 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sqlx",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

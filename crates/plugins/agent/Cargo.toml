@@ -3,7 +3,7 @@ name = "fujiang-plugin-agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "DeepSeek-compatible chat client (group wiring comes later)"
+description = "Chat replies on mention, with one session per group"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -15,7 +15,10 @@ fujiang-core = { path = "../../fujiang-core" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
