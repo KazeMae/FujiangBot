@@ -108,6 +108,8 @@ pub(crate) struct BuiltinTools {
     pub memo: bool,
     pub memo_write: bool,
     pub fun: bool,
+    pub memory: bool,
+    pub memory_write: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +138,7 @@ impl MemoCallScope {
 pub(crate) struct ToolPass<'a> {
     pub max_rounds: u32,
     pub scope: Option<&'a MemoCallScope>,
+    pub memory: Option<&'a sqlx::SqlitePool>,
 }
 
 #[cfg(test)]
@@ -144,6 +147,7 @@ impl ToolPass<'static> {
         Self {
             max_rounds,
             scope: None,
+            memory: None,
         }
     }
 }
@@ -157,6 +161,8 @@ impl BuiltinTools {
         memo: true,
         memo_write: false,
         fun: true,
+        memory: true,
+        memory_write: true,
     };
     const OFF: Self = Self {
         rank: false,
@@ -165,6 +171,8 @@ impl BuiltinTools {
         memo: false,
         memo_write: false,
         fun: false,
+        memory: false,
+        memory_write: false,
     };
 }
 
@@ -303,6 +311,53 @@ fn builtin_specs(builtins: BuiltinTools) -> Vec<ToolSpec> {
             }),
         ));
     }
+    if builtins.memory {
+        specs.push(builtin_spec(
+            "memory.list",
+            "列出分层记忆的键。可选字符串 scope：account、group 或 user。不传时群里看账号、本群和当前发言人，私聊看账号和当前发言人。还没有时是空数组。",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "scope": { "type": "string" } }
+            }),
+        ));
+        specs.push(builtin_spec(
+            "memory.get",
+            "读取一条分层记忆。字符串 scope 和 key。没有这条时结果是 null。",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "scope": { "type": "string" },
+                    "key": { "type": "string" }
+                }
+            }),
+        ));
+    }
+    if builtins.memory && builtins.memory_write {
+        specs.push(builtin_spec(
+            "memory.upsert",
+            "写入或覆盖一条分层记忆。字符串 scope、key、value。value 最多 500 个字。user 只写当前发言人，group 只写当前群。",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "scope": { "type": "string" },
+                    "key": { "type": "string" },
+                    "value": { "type": "string" }
+                }
+            }),
+        ));
+        specs.push(builtin_spec(
+            "memory.forget",
+            "删除分层记忆。字符串 scope 和 key。可选布尔 prefix 为 true 时按前缀删除。",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "scope": { "type": "string" },
+                    "key": { "type": "string" },
+                    "prefix": { "type": "boolean" }
+                }
+            }),
+        ));
+    }
     specs
 }
 
@@ -390,22 +445,38 @@ pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
                     };
                     let args = bind_memo_scope(spec.service(), pass.scope, args);
                     let args = bind_fun_scope(spec.service(), spec.method(), pass.scope, args);
-                    let value = match hub.invoke(spec.service(), spec.method(), args).await {
-                        Ok(value) => value,
-                        Err(err) => {
-                            warn!(
-                                error = %err,
-                                tool = spec.name(),
-                                service = spec.service(),
-                                method = spec.method(),
-                                "agent tool"
-                            );
-                            return tool_turn(
-                                Ok(ToolReply::Degraded(TOOL_FAIL_REPLY)),
-                                calls,
-                                in_tokens,
-                                out_tokens,
-                            );
+                    let args = bind_memory_scope(spec.service(), pass.scope, args);
+                    let value = if spec.service() == "memory" {
+                        match memory_value(pass, spec.method(), &args).await {
+                            Ok(value) => value,
+                            Err(err) => {
+                                warn!(error = %err, tool = spec.name(), "agent tool");
+                                return tool_turn(
+                                    Ok(ToolReply::Degraded(TOOL_FAIL_REPLY)),
+                                    calls,
+                                    in_tokens,
+                                    out_tokens,
+                                );
+                            }
+                        }
+                    } else {
+                        match hub.invoke(spec.service(), spec.method(), args).await {
+                            Ok(value) => value,
+                            Err(err) => {
+                                warn!(
+                                    error = %err,
+                                    tool = spec.name(),
+                                    service = spec.service(),
+                                    method = spec.method(),
+                                    "agent tool"
+                                );
+                                return tool_turn(
+                                    Ok(ToolReply::Degraded(TOOL_FAIL_REPLY)),
+                                    calls,
+                                    in_tokens,
+                                    out_tokens,
+                                );
+                            }
                         }
                     };
                     let output = serde_json::to_string(&value).unwrap_or_else(|_| "null".into());
@@ -420,6 +491,16 @@ pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
             }
         }
     }
+}
+
+async fn memory_value(pass: &ToolPass<'_>, method: &str, args: &Value) -> anyhow::Result<Value> {
+    let Some(pool) = pass.memory else {
+        anyhow::bail!("memory db is not open");
+    };
+    if pass.scope.is_none() {
+        anyhow::bail!("memory scope is missing");
+    }
+    crate::layered_memory::call(pool, method, args, crate::session::unix_now()).await
 }
 
 fn tool_turn(
@@ -479,6 +560,33 @@ fn bind_fun_scope(
         obj.remove("group_id");
     }
     Value::Object(obj)
+}
+
+fn bind_memory_scope(service: &str, scope: Option<&MemoCallScope>, args: Value) -> Value {
+    let Some(scope) = scope.filter(|_| service == "memory") else {
+        return args;
+    };
+    let mut obj = match args {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+    obj.insert("user_id".to_string(), Value::from(scope.user_id));
+    obj.insert("source".to_string(), Value::String(memory_source(scope)));
+    if scope.source_kind == "group" {
+        obj.insert("group_id".to_string(), Value::from(scope.source_id));
+    } else {
+        obj.remove("group_id");
+    }
+    obj.remove("scope_id");
+    Value::Object(obj)
+}
+
+fn memory_source(scope: &MemoCallScope) -> String {
+    if scope.source_kind == "group" {
+        format!("group:{}", scope.source_id)
+    } else {
+        "private".to_string()
+    }
 }
 
 fn bind_memo_scope(service: &str, scope: Option<&MemoCallScope>, args: Value) -> Value {

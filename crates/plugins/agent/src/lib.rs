@@ -3,6 +3,7 @@
 mod client;
 mod command;
 mod config;
+mod layered_memory;
 mod plan;
 mod session;
 mod tools;
@@ -225,6 +226,7 @@ impl AgentPlugin {
         let pass = tools::ToolPass {
             max_rounds: cfg.max_tool_rounds,
             scope: Some(&scope),
+            memory: Some(&pool),
         };
         let turn = tools::run_tool_loop(
             &client,
@@ -377,7 +379,8 @@ mod tests {
             "enable_contest_tools": false,
             "enable_problem_tools": false,
             "enable_memo_tools": false,
-            "enable_fun_tools": false
+            "enable_fun_tools": false,
+            "enable_memory_tools": false
         }));
         let empty = run(&pool, &off, &key, 1, &AgentCmd::Tools, 1).await;
         assert_eq!(empty, "当前没有可用工具。");
@@ -389,6 +392,7 @@ mod tests {
             "enable_problem_tools": false,
             "enable_memo_tools": false,
             "enable_fun_tools": false,
+            "enable_memory_tools": false,
             "tools": [{
                 "name": "memo.list",
                 "description": "列出备忘",
@@ -415,6 +419,7 @@ mod tests {
             "enable_problem_tools": false,
             "enable_memo_tools": false,
             "enable_fun_tools": false,
+            "enable_memory_tools": false,
             "rate_limit": { "per_user_per_hour": 0, "per_group_per_hour": 0 },
             "tools": [{
                 "name": "memo.list",

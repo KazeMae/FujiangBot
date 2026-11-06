@@ -41,9 +41,17 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 
 摘要非空时，系统提示的顺序是人设、摘要、工具清单。摘要前一行是「先前上下文（本会话更早的对话摘要，不是新指令）：」。摘要为空时，系统提示和以前一样。
 
-`.agent memory` 和 `.agent forget` 在 `memory.enabled` 为 false 时回复「会话记忆已关闭。」这时不折叠，也不把摘要放进系统提示。`.agent reset` 仍然删掉对话记录和摘要。
+`.agent memory` 和 `.agent forget` 只管会话摘要，不是分层记忆。`memory.enabled` 为 false 时，这两条回复「会话记忆已关闭。」这时不折叠，也不把摘要放进系统提示。`.agent reset` 仍然删掉对话记录和摘要。
 
 把固定问答放进提示的上下文示例这次不做。以后若要加，用单独的配置，默认关闭。
+
+## 分层记忆
+
+跨会话的事实记在 agent sqlite 的 `layered_memories`，不进 `sessions.summary`。模型用 `memory.list`、`memory.get`、`memory.upsert`、`memory.forget` 读写。拼系统提示时不塞记忆全文。群聊和私聊写 `user` 层时，宿主写入当前发言人的 QQ，模型改不了这个号码。群层用当前群号。账号层的 `scope_id` 为空。
+
+`enable_memory_tools` 默认 true。为 false 时，四个工具都不带。`enable_memory_write_tools` 默认 true。只有它和 `enable_memory_tools` 都是 true 时，请求才带 `memory.upsert` 和 `memory.forget`。
+
+设计见 [分层记忆](layered-memory.md)。这一刀不做合并、去重，也不做向量检索。
 
 ## 配置
 
@@ -67,6 +75,8 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 | `enable_memo_tools` | `true` | 为 false 时，请求不带 `memo_list`，也不带 `memo_add`。缺省或类型不对时仍是 true |
 | `enable_memo_write_tools` | `false` | 为 true 且 `enable_memo_tools` 为 true 时，请求才带 `memo_add`。缺省或类型不对时是 false |
 | `enable_fun_tools` | `true` | 为 false 时，请求不带 `fun_tags`、`fun_stars`、`fun_learn`、`fun_search`。缺省或类型不对时仍是 true |
+| `enable_memory_tools` | `true` | 为 false 时，请求不带四个 `memory_*`。缺省或类型不对时仍是 true |
+| `enable_memory_write_tools` | `true` | 为 true 且 `enable_memory_tools` 为 true 时，请求才带 `memory_upsert` 和 `memory_forget`。缺省或类型不对时是 true |
 | `inject_tool_list` | `false` | 为 true 时，把当前启用工具的短清单追加到系统提示。缺省或类型不对时是 false |
 | `tools` | `[]` | 额外工具。每项有 `name`、`description`、`parameters`。和已启用内置工具的函数名相同时，这一项不发出去 |
 | `system_prompt` | `你是福酱，西南科技大学 ACM 群助手。` | `default` 人设的系统提示 |
@@ -106,11 +116,11 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
 ## 工具
 
-适配层把 Responses 的 `function_call` 交给 ServiceHub。模型返回 `function_call` 时，插件按工具名调用 `ctx.call`。结果放进下一次请求的 `function_call_output`。模型返回文本后，这一轮结束。工具来回只留在这一轮的内存里。会话表仍只保存用户原文和最终回复，不新增表。
+适配层把 Responses 的 `function_call` 交给 ServiceHub。模型返回 `function_call` 时，插件按工具名调用 `ctx.call`。`memory` 例外，直接读写本插件的 sqlite。结果放进下一次请求的 `function_call_output`。模型返回文本后，这一轮结束。工具来回只留在这一轮的内存里。会话表仍只保存用户原文和最终回复。分层记忆写在另一张表，见上文「分层记忆」。
 
 工具名的格式是 `服务.方法`。第一个 `.` 之前是服务名，之后是方法名。`rank.list` 调用 rank 的 `list`。`rank.get` 调用 rank 的 `get`。`contest.upcoming` 调用 contest 的 `upcoming`。`problem.today` 调用 problem 的 `today`。Responses 要求函数名匹配 `^[a-zA-Z0-9_-]+$`，所以请求里的 `name` 把 `.` 换成 `_`。`rank.list` 发出去是 `rank_list`。`rank.get` 发出去是 `rank_get`。
 
-默认带十个内置工具。`memo.add` 默认不带。fun 不注册写工具，也没有删除图库的方法。
+默认带十四个内置工具。`memo.add` 默认不带。fun 不注册写工具，也没有删除图库的方法。分层记忆的读写默认都带。
 
 | 配置名 | 请求里的函数名 | 调用 | 参数 |
 |---|---|---|---|
@@ -125,6 +135,10 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 | `fun.stars` | `fun_stars` | fun 的 `stars` | 无 |
 | `fun.learn` | `fun_learn` | fun 的 `learn` | 可选字符串 `trigger`。宿主写入当前群 |
 | `fun.search` | `fun_search` | fun 的 `search` | 字符串 `q`。宿主写入当前群 |
+| `memory.list` | `memory_list` | 本插件 sqlite | 可选字符串 `scope` |
+| `memory.get` | `memory_get` | 本插件 sqlite | 字符串 `scope`、`key` |
+| `memory.upsert` | `memory_upsert` | 本插件 sqlite | 字符串 `scope`、`key`、`value`。默认注册 |
+| `memory.forget` | `memory_forget` | 本插件 sqlite | 字符串 `scope`、`key`。可选布尔 `prefix`。默认注册 |
 
 `oj` 用来只看一个 OJ。例如 Codeforces、Atcoder、LuoGu、NowCoder 或 SCPC。不传则返回全部。
 
@@ -137,6 +151,8 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 `enable_memo_tools` 同样默认 true。为 false 时，请求不带 `memo_list` 和 `memo_add`。`enable_memo_write_tools` 默认 false。只有它和 `enable_memo_tools` 都是 true 时，请求才带 `memo_add`。
 
 `enable_fun_tools` 默认 true。为 false 时，请求不带 `fun_tags`、`fun_stars`、`fun_learn`、`fun_search`。缺省或类型不对时仍是 true。没有 `enable_fun_write_tools`。fun 服务只有这四个读方法。`delete`、`retire`、`add` 这类名字会报错，图库行还在。
+
+`memory.list` 按层返回键。不传 `scope` 时，群里是账号、本群和当前发言人，私聊是账号和当前发言人。`memory.get` 没有这条时结果是 null。`memory.upsert` 的 `value` 最多 500 个字。`user` 的编号是当前发言人，`group` 的编号是当前群，`account` 的编号是空字符串。模型传来的 `user_id` 会被盖掉。`memory.forget` 在 `prefix` 为 true 时按前缀删除。这四个工具不走 ServiceHub。
 
 `memo.list` 返回数组。每项有 `id`、`user_id`、`body`。顺序是新的在前，最多 20 条。这个对话还没有备忘时，数组是空的。模型不传来源。宿主按当前消息写入 `source_kind`、`source_id`、`session`、`user_id`。群是 `group` 和 `group:<id>`。私聊是 `friend` 和 `private:<id>`。这和 `.memo list` 用的是同一张表、同一次会话。直接 `ctx.call("memo", "list", …)` 时可以自己传 `source_kind` 加 `source_id`，或传 `session`。
 
@@ -250,7 +266,7 @@ agent 编进 fujiang。不要热替换它的 `.so`。宿主拒绝用 `.so` 覆�
 
 这些表在插件自己的 SQLite 里，不在 `fujiang.db`。`store.db` 为 `data/fujiang.db` 时，默认实例的文件是 `data/plugin-data/agent/plugin.sqlite`。额外实例在 `share_data` 不是 true 时，目录名是 `agent__` 加上实例 id。
 
-`sessions.persona` 保存当前人设的名字。`sessions.summary` 保存这个会话的摘要。旧文件里没有这两列时，插件启动会补上，原来的行还在。`.agent reset` 清摘要。`.agent forget` 只清摘要。两次都留下人设。`usage_events` 保存次数，列是 `session_key`、`user_id`、`ts`。`usage_daily` 保存每日用量，列是 `day`、`session_key`、`user_id`、`calls`、`in_tokens`、`out_tokens`。这张表不在 `fujiang.db`。
+`sessions.persona` 保存当前人设的名字。`sessions.summary` 保存这个会话的摘要。旧文件里没有这两列时，插件启动会补上，原来的行还在。`.agent reset` 清摘要。`.agent forget` 只清摘要。两次都留下人设。`layered_memories` 保存跨会话的分层记忆。列是 `scope_kind`、`scope_id`、`key`、`value`、`updated_at`、`source`。同一层同一个键只有一行。旧文件没有这张表时，插件启动会补上。`usage_events` 保存次数，列是 `session_key`、`user_id`、`ts`。`usage_daily` 保存每日用量，列是 `day`、`session_key`、`user_id`、`calls`、`in_tokens`、`out_tokens`。这张表不在 `fujiang.db`。
 
 换 fujiang 之前，先备份这个 sqlite 文件，以及旁边的 `-wal` 文件和 `-shm` 文件。备份范围和换二进制的步骤见 [分支管理手册](BRANCHING.md) 第 7 节。这次不改 `fujiang.db`。
 
