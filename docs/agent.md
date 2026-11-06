@@ -51,6 +51,8 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 | `enable_rank_tools` | `true` | 为 false 时，请求不带 `rank_list` 和 `rank_get`。缺省或类型不对时仍是 true |
 | `enable_contest_tools` | `true` | 为 false 时，请求不带 `contest_upcoming` 和 `contest_today`。缺省或类型不对时仍是 true |
 | `enable_problem_tools` | `true` | 为 false 时，请求不带 `problem_today`。缺省或类型不对时仍是 true |
+| `enable_memo_tools` | `true` | 为 false 时，请求不带 `memo_list`，也不带 `memo_add`。缺省或类型不对时仍是 true |
+| `enable_memo_write_tools` | `false` | 为 true 且 `enable_memo_tools` 为 true 时，请求才带 `memo_add`。缺省或类型不对时是 false |
 | `inject_tool_list` | `false` | 为 true 时，把当前启用工具的短清单追加到系统提示。缺省或类型不对时是 false |
 | `tools` | `[]` | 额外工具。每项有 `name`、`description`、`parameters`。和已启用内置工具的函数名相同时，这一项不发出去 |
 | `system_prompt` | `你是福酱，西南科技大学 ACM 群助手。` | `default` 人设的系统提示 |
@@ -90,7 +92,7 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
 工具名的格式是 `服务.方法`。第一个 `.` 之前是服务名，之后是方法名。`rank.list` 调用 rank 的 `list`。`rank.get` 调用 rank 的 `get`。`contest.upcoming` 调用 contest 的 `upcoming`。`problem.today` 调用 problem 的 `today`。Responses 要求函数名匹配 `^[a-zA-Z0-9_-]+$`，所以请求里的 `name` 把 `.` 换成 `_`。`rank.list` 发出去是 `rank_list`。`rank.get` 发出去是 `rank_get`。
 
-默认带五个内置工具。
+默认带六个内置工具。`memo.add` 默认不带。
 
 | 配置名 | 请求里的函数名 | 调用 | 参数 |
 |---|---|---|---|
@@ -99,6 +101,8 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 | `contest.upcoming` | `contest_upcoming` | contest 的 `upcoming` | 可选字符串 `oj` |
 | `contest.today` | `contest_today` | contest 的 `today` | 无 |
 | `problem.today` | `problem_today` | problem 的 `today` | 无 |
+| `memo.list` | `memo_list` | memo 的 `list` | 无。宿主写入当前会话 |
+| `memo.add` | `memo_add` | memo 的 `add` | 字符串 `body`。默认不注册 |
 
 `oj` 用来只看一个 OJ。例如 Codeforces、Atcoder、LuoGu、NowCoder 或 SCPC。不传则返回全部。
 
@@ -106,7 +110,15 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
 `problem.today` 返回数组。每项有 `date`、`band`、`contest_id`、`idx`、`url`。这一天还没有保存的题目时，数组是空的。日期和 `.每日一题` 用同一个规则。过了 `daily_reset_hour` 才换下一天。这个方法只读。调用 `problem.today` 不会抽新题。
 
-`enable_rank_tools` 为 false 时，请求不带 `rank_list` 和 `rank_get`。`enable_contest_tools` 为 false 时，请求不带 `contest_upcoming` 和 `contest_today`。`enable_problem_tools` 为 false 时，请求不带 `problem_today`。字段缺省时按 true 处理。类型不是布尔值时也按 true 处理。
+`enable_rank_tools` 为 false 时，请求不带 `rank_list` 和 `rank_get`。`enable_contest_tools` 为 false 时，请求不带 `contest_upcoming` 和 `contest_today`。`enable_problem_tools` 为 false 时，请求不带 `problem_today`。这三个字段缺省时按 true 处理。类型不是布尔值时也按 true 处理。
+
+`enable_memo_tools` 同样默认 true。为 false 时，请求不带 `memo_list` 和 `memo_add`。`enable_memo_write_tools` 默认 false。只有它和 `enable_memo_tools` 都是 true 时，请求才带 `memo_add`。
+
+`memo.list` 返回数组。每项有 `id`、`user_id`、`body`。顺序是新的在前，最多 20 条。这个对话还没有备忘时，数组是空的。模型不传来源。宿主按当前消息写入 `source_kind`、`source_id`、`session`、`user_id`。群是 `group` 和 `group:<id>`。私聊是 `friend` 和 `private:<id>`。这和 `.memo list` 用的是同一张表、同一次会话。直接 `ctx.call("memo", "list", …)` 时可以自己传 `source_kind` 加 `source_id`，或传 `session`。
+
+`memo.add` 的 `body` 是要记下的正文。宿主同样写上来源。正文是空白，或这个对话已经达到 `max_per_source` 时，服务返回错误，用户看到「我没查成，过一会儿再问我一次。」
+
+memo 是动态插件，编成 `libfujiang_plugin_memo.so`（macOS 上是 `.dylib`）后由宿主加载。服务写在 memo crate 里。加载成功时 `on_start` 执行 `ctx.provide("memo", …)`。agent 编进 fujiang，不链接 memo。memo 没加载，或服务调用失败时，`memo_list` 走上面的失败回复。数据仍在插件自己的 SQLite，不进 `fujiang.db`。
 
 `[[plugins.configs.agent.tools]]` 可以再追加别的 `服务.方法`。配置项的函数名和某个已启用内置工具相同，就留下内置的那一项。这个内置工具的开关为 false 时，同名配置项会发出去。
 

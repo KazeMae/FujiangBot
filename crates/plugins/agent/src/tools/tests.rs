@@ -62,7 +62,8 @@ fn builtin_tools_follow_the_switches() {
             "rank_get",
             "contest_upcoming",
             "contest_today",
-            "problem_today"
+            "problem_today",
+            "memo_list"
         ]
     );
     assert_eq!(on[0].service(), "rank");
@@ -112,6 +113,15 @@ fn builtin_tools_follow_the_switches() {
         "返回当前每日一题里已经保存的题目。不需要参数。还没保存时是空数组。"
     );
     assert_eq!(on[4].parameters(), &default_parameters());
+    assert_eq!(on[5].service(), "memo");
+    assert_eq!(on[5].method(), "list");
+    assert_eq!(on[5].wire_name(), "memo_list");
+    assert_eq!(
+        on[5].description(),
+        "列出当前对话已经记下的备忘。不需要参数。还没有备忘时是空数组。"
+    );
+    assert_eq!(on[5].parameters(), &default_parameters());
+    assert!(on.iter().all(|spec| spec.name() != "memo.add"));
 
     let rank_only = assemble_tools(
         &[],
@@ -119,6 +129,8 @@ fn builtin_tools_follow_the_switches() {
             rank: true,
             contest: false,
             problem: false,
+            memo: false,
+            memo_write: false,
         },
     );
     assert_eq!(
@@ -134,6 +146,8 @@ fn builtin_tools_follow_the_switches() {
             rank: false,
             contest: true,
             problem: false,
+            memo: false,
+            memo_write: false,
         },
     );
     assert_eq!(
@@ -149,6 +163,8 @@ fn builtin_tools_follow_the_switches() {
             rank: false,
             contest: false,
             problem: true,
+            memo: false,
+            memo_write: false,
         },
     );
     assert_eq!(
@@ -162,8 +178,43 @@ fn builtin_tools_follow_the_switches() {
 
     let extra = ToolSpec::parse("memo.search", "查备忘", json!({})).unwrap();
     let with_extra = assemble_tools(&[extra], BuiltinTools::ON);
-    assert_eq!(with_extra[5].name(), "memo.search");
-    assert_eq!(with_extra[5].wire_name(), "memo_search");
+    assert_eq!(with_extra[6].name(), "memo.search");
+    assert_eq!(with_extra[6].wire_name(), "memo_search");
+
+    let write = assemble_tools(
+        &[],
+        BuiltinTools {
+            rank: false,
+            contest: false,
+            problem: false,
+            memo: true,
+            memo_write: true,
+        },
+    );
+    assert_eq!(
+        write.iter().map(ToolSpec::wire_name).collect::<Vec<_>>(),
+        vec!["memo_list", "memo_add"]
+    );
+    assert_eq!(write[1].service(), "memo");
+    assert_eq!(write[1].method(), "add");
+    assert_eq!(
+        write[1].parameters(),
+        &json!({
+            "type": "object",
+            "properties": { "body": { "type": "string" } }
+        })
+    );
+    let list_only = assemble_tools(
+        &[],
+        BuiltinTools {
+            rank: false,
+            contest: false,
+            problem: false,
+            memo: false,
+            memo_write: true,
+        },
+    );
+    assert!(list_only.is_empty());
 
     let configured = ToolSpec::parse(
         "rank.list",
@@ -172,7 +223,7 @@ fn builtin_tools_follow_the_switches() {
     )
     .unwrap();
     let kept_builtin = assemble_tools(std::slice::from_ref(&configured), BuiltinTools::ON);
-    assert_eq!(kept_builtin.len(), 5);
+    assert_eq!(kept_builtin.len(), 6);
     assert_eq!(kept_builtin[0].description(), on[0].description());
     assert_eq!(kept_builtin[0].parameters(), on[0].parameters());
 
@@ -194,7 +245,8 @@ rank.list：列出本群 Codeforces 榜上的队员，含 handle 和 rating。�
 rank.get：按 Codeforces handle 查一位已登记队员。可选字符串参数 handle。不传则这次查询失败。\n\
 contest.upcoming：列出即将开始的比赛。可选字符串参数 oj，例如 Codeforces 或 Atcoder。不传则返回全部。\n\
 contest.today：列出今天开始的比赛。不需要参数。\n\
-problem.today：返回当前每日一题里已经保存的题目。不需要参数。还没保存时是空数组。"
+problem.today：返回当前每日一题里已经保存的题目。不需要参数。还没保存时是空数组。\n\
+memo.list：列出当前对话已经记下的备忘。不需要参数。还没有备忘时是空数组。"
     );
     assert!(!text.contains('_'));
     assert_eq!(tools_command_text(&[]), "当前没有可用工具。");
@@ -443,7 +495,8 @@ async fn builtin_rank_and_contest_calls_return_the_model_text() {
             "rank_get",
             "contest_upcoming",
             "contest_today",
-            "problem_today"
+            "problem_today",
+            "memo_list"
         ]
     );
     assert_eq!(
@@ -564,6 +617,8 @@ async fn disabled_builtin_group_stays_out_of_the_request() {
             rank: false,
             contest: true,
             problem: false,
+            memo: false,
+            memo_write: false,
         },
         3,
         &hub,
@@ -597,7 +652,8 @@ async fn reply_of(
     max_rounds: u32,
     hub: &Rec,
 ) -> Result<ToolReply, LlmError> {
-    run_tool_loop(client, messages, configured, builtins, max_rounds, hub)
+    let pass = ToolPass::rounds(max_rounds);
+    run_tool_loop(client, messages, configured, builtins, &pass, hub)
         .await
         .reply
 }
@@ -609,7 +665,8 @@ async fn spend_sums_token_rounds_and_still_counts_a_body_without_usage() {
     let client = test_client(&base);
     let tools = vec![ToolSpec::parse("rank.list", "当前榜", json!({})).unwrap()];
     let hub = Rec::default();
-    let turn = run_tool_loop(&client, &user("榜"), &tools, BuiltinTools::OFF, 3, &hub).await;
+    let pass = ToolPass::rounds(3);
+    let turn = run_tool_loop(&client, &user("榜"), &tools, BuiltinTools::OFF, &pass, &hub).await;
     assert_eq!(turn.reply.unwrap(), ToolReply::Text("好".into()));
     assert_eq!(turn.calls, 2);
     assert_eq!(turn.in_tokens, 4);
@@ -618,7 +675,8 @@ async fn spend_sums_token_rounds_and_still_counts_a_body_without_usage() {
     let script = Script::new(Kind::MissingId);
     let base = spawn_app(script).await;
     let client = test_client(&base);
-    let turn = run_tool_loop(&client, &user("榜"), &tools, BuiltinTools::OFF, 3, &hub).await;
+    let pass = ToolPass::rounds(3);
+    let turn = run_tool_loop(&client, &user("榜"), &tools, BuiltinTools::OFF, &pass, &hub).await;
     assert!(matches!(turn.reply, Err(LlmError::Decode(_))));
     assert_eq!(turn.calls, 1);
     assert_eq!(turn.in_tokens, 0);
@@ -653,12 +711,13 @@ enum Kind {
     GetAndToday,
     ProblemCall,
     Metered,
+    MemoList,
 }
 
 #[derive(Clone)]
 struct Script {
-    hits: Arc<AtomicUsize>,
-    bodies: Arc<Mutex<Vec<Value>>>,
+    pub(super) hits: Arc<AtomicUsize>,
+    pub(super) bodies: Arc<Mutex<Vec<Value>>>,
     kind: Kind,
 }
 
@@ -724,6 +783,8 @@ async fn handle(State(script): State<Script>, Json(body): Json<Value>) -> Json<V
                 "content": [{"type": "output_text", "text": "好"}]
             }]
         }),
+        Kind::MemoList if n == 0 => one_call_with("call_memo", "memo_list", "{}"),
+        Kind::MemoList => saying("这个对话有一条备忘。"),
         Kind::MissingId => json!({
             "output": [{
                 "type": "function_call",
@@ -828,8 +889,8 @@ fn one_call_with(call_id: &str, name: &str, arguments: &str) -> Value {
 
 #[derive(Default)]
 struct Rec {
-    log: Mutex<Vec<(String, String, Value)>>,
-    fail: bool,
+    pub(super) log: Mutex<Vec<(String, String, Value)>>,
+    pub(super) fail: bool,
 }
 
 #[async_trait]
@@ -893,3 +954,6 @@ impl Subscriber for Catch {
 
     fn exit(&self, _: &Id) {}
 }
+
+#[path = "memo_tests.rs"]
+mod memo_tests;
