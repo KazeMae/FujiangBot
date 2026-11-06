@@ -232,6 +232,20 @@ async fn call_group<H: ToolHub + ?Sized>(
     hub.onebot(action, params).await.map_err(QqFail::Down)
 }
 
+pub(crate) async fn membership<H: ToolHub + ?Sized>(
+    hub: &H,
+    speaker: i64,
+    group_id: i64,
+) -> anyhow::Result<bool> {
+    let value = hub
+        .onebot(
+            "get_group_member_info",
+            json!({"group_id": group_id, "user_id": speaker}),
+        )
+        .await?;
+    Ok(value.get("user_id").and_then(id_of) == Some(speaker))
+}
+
 async fn speaker_in_group<H: ToolHub + ?Sized>(
     hub: &H,
     speaker: i64,
@@ -241,16 +255,7 @@ async fn speaker_in_group<H: ToolHub + ?Sized>(
     if let Some(hit) = members.get(&group_id) {
         return *hit;
     }
-    let ok = match hub
-        .onebot(
-            "get_group_member_info",
-            json!({"group_id": group_id, "user_id": speaker}),
-        )
-        .await
-    {
-        Ok(value) => value.get("user_id").and_then(id_of) == Some(speaker),
-        Err(_) => false,
-    };
+    let ok = membership(hub, speaker, group_id).await.unwrap_or(false);
     members.insert(group_id, ok);
     ok
 }

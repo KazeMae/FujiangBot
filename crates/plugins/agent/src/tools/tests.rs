@@ -955,5 +955,7 @@ mod memo_tests;
 mod memory_tests;
 #[path = "qq_read_tests.rs"]
 mod qq_read_tests;
+#[path = "schedule_tests.rs"]
+mod schedule_tests;
 #[path = "skills_tests.rs"]
 mod skills_tests;

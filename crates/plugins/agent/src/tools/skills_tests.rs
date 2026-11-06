@@ -38,6 +38,7 @@ fn ready(step: Option<skills::SkillOut>) -> Result<Value, &'static str> {
     match step {
         Some(skills::SkillOut::Ready(result)) => result,
         Some(skills::SkillOut::Qq) => panic!("qq"),
+        Some(skills::SkillOut::Schedule) => panic!("schedule"),
         None => panic!("none"),
     }
 }

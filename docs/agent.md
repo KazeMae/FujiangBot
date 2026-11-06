@@ -30,6 +30,7 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 | `.agent persona <名>` | 换成这个人设。名字是一个词，区分大小写，并且必须写在配置里 |
 | `.agent status` | 显示当前人设、过去 3600 秒里还剩几次，以及今日调用和 token |
 | `.agent tools` | 列出当前启用的工具。每行是逻辑名和说明。不调用模型，也不计入每小时次数 |
+| `.agent schedule` | 列出、创建或取消自己的定时发文字。不调用模型。写法在这条命令自己的回复里 |
 
 不认识的子命令会告诉发话人怎么看说明，然后返回 Stop。
 
@@ -125,11 +126,11 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
 ## 工具
 
-适配层把 Responses 的 `function_call` 交给 ServiceHub。模型返回 `function_call` 时，插件按工具名调用 `ctx.call`。`memory` 例外，直接读写本插件的 sqlite。`skills` 和占位包 `ping` 也例外，由本插件直接回答。结果放进下一次请求的 `function_call_output`。模型返回文本后，这一轮结束。工具来回只留在这一轮的内存里。会话表仍只保存用户原文和最终回复。分层记忆写在另一张表，见上文「分层记忆」。
+适配层把 Responses 的 `function_call` 交给 ServiceHub。模型返回 `function_call` 时，插件按工具名调用 `ctx.call`。`memory` 例外，直接读写本插件的 sqlite。`skills` 和占位包 `ping` 由本插件直接回答。`qq.read` 和 `schedule` 也由本插件处理，不走 ServiceHub。结果放进下一次请求的 `function_call_output`。模型返回文本后，这一轮结束。工具来回只留在这一轮的内存里。会话表仍只保存用户原文和最终回复。分层记忆写在另一张表，见上文「分层记忆」。定时任务写在 `scheduled_jobs`，见下文「数据与部署」。
 
 工具名的格式是 `服务.方法`。第一个 `.` 之前是服务名，之后是方法名。`rank.list` 调用 rank 的 `list`。`rank.get` 调用 rank 的 `get`。`contest.upcoming` 调用 contest 的 `upcoming`。`problem.today` 调用 problem 的 `today`。Responses 要求函数名匹配 `^[a-zA-Z0-9_-]+$`，所以请求里的 `name` 把 `.` 换成 `_`。`rank.list` 发出去是 `rank_list`。`rank.get` 发出去是 `rank_get`。
 
-默认带十七个常驻工具。十五个是原来的业务工具，另外两个是 `skills.list` 和 `skills.open`，没有开关。`memo.add` 默认不带。fun 不注册写工具，也没有删除图库的方法。分层记忆的读写默认都带。技能包里的工具不在这十七个里。打开规则见 [agent skills](agent-skills.md)。
+默认带十七个常驻工具。十五个是原来的业务工具，另外两个是 `skills.list` 和 `skills.open`，没有开关。`memo.add` 默认不带。fun 不注册写工具，也没有删除图库的方法。分层记忆的读写默认都带。技能包里的工具不在这十七个里。`schedule` 是其中一个包，打开名是 `schedule`。四个工具是 `schedule.list`、`schedule.create`、`schedule.update`、`schedule.cancel`，请求里是 `schedule_list`、`schedule_create`、`schedule_update`、`schedule_cancel`。创建者 QQ 由宿主写入当前发言人。到点只发文字：群要求创建者仍是成员，私聊只发给创建者本人。打开规则和投递见 [agent skills](agent-skills.md)。
 
 | 配置名 | 请求里的函数名 | 调用 | 参数 |
 |---|---|---|---|
@@ -278,7 +279,7 @@ agent 编进 fujiang。不要热替换它的 `.so`。宿主拒绝用 `.so` 覆�
 
 这些表在插件自己的 SQLite 里，不在 `fujiang.db`。`store.db` 为 `data/fujiang.db` 时，默认实例的文件是 `data/plugin-data/agent/plugin.sqlite`。额外实例在 `share_data` 不是 true 时，目录名是 `agent__` 加上实例 id。
 
-`sessions.persona` 保存当前人设的名字。`sessions.summary` 保存这个会话的摘要。旧文件里没有这两列时，插件启动会补上，原来的行还在。`.agent reset` 清摘要。`.agent forget` 只清摘要。两次都留下人设。`layered_memories` 保存跨会话的分层记忆。列是 `scope_kind`、`scope_id`、`key`、`value`、`updated_at`、`source`、`usage_count`、`last_used_at`。同一层同一个键只有一行。旧文件没有这张表时，插件启动会补上。旧表没有 `usage_count` 或 `last_used_at` 时，启动会 `ALTER` 补上，原来的行还在。`usage_count` 从 0 起，`last_used_at` 为空。`usage_events` 保存次数，列是 `session_key`、`user_id`、`ts`。`usage_daily` 保存每日用量，列是 `day`、`session_key`、`user_id`、`calls`、`in_tokens`、`out_tokens`。这张表不在 `fujiang.db`。
+`sessions.persona` 保存当前人设的名字。`sessions.summary` 保存这个会话的摘要。旧文件里没有这两列时，插件启动会补上，原来的行还在。`.agent reset` 清摘要。`.agent forget` 只清摘要。两次都留下人设。`layered_memories` 保存跨会话的分层记忆。列是 `scope_kind`、`scope_id`、`key`、`value`、`updated_at`、`source`、`usage_count`、`last_used_at`。同一层同一个键只有一行。旧文件没有这张表时，插件启动会补上。旧表没有 `usage_count` 或 `last_used_at` 时，启动会 `ALTER` 补上，原来的行还在。`usage_count` 从 0 起，`last_used_at` 为空。`scheduled_jobs` 保存定时发文字。列是 `id`、`creator_qq`、`cron`、`at`、`action`、`kind`、`group_id`、`user_id`、`payload`、`enabled`、`created_at`、`next_run_at`，以及领取用的 `claim_until`、`claim_token`、`last_error`。建表时先有 `id` 和 `creator_qq`，其余列由启动时的 `ALTER` 补上。旧文件缺列时补上，原来的行还在。`usage_events` 保存次数，列是 `session_key`、`user_id`、`ts`。`usage_daily` 保存每日用量，列是 `day`、`session_key`、`user_id`、`calls`、`in_tokens`、`out_tokens`。这张表不在 `fujiang.db`。
 
 换 fujiang 之前，先备份这个 sqlite 文件，以及旁边的 `-wal` 文件和 `-shm` 文件。备份范围和换二进制的步骤见 [分支管理手册](BRANCHING.md) 第 7 节。这次不改 `fujiang.db`。
 

@@ -67,6 +67,22 @@ fn parses_subcommands_from_the_first_token() {
         AgentCmd::Unknown
     ));
     assert!(matches!(parse_agent_cmd("nope"), AgentCmd::Unknown));
+    assert!(matches!(
+        parse_agent_cmd("schedule"),
+        AgentCmd::Schedule(crate::schedule::HumanCmd::Help)
+    ));
+    assert!(matches!(
+        parse_agent_cmd("schedule list"),
+        AgentCmd::Schedule(crate::schedule::HumanCmd::List)
+    ));
+    assert!(matches!(
+        parse_agent_cmd("schedule cancel 4"),
+        AgentCmd::Schedule(crate::schedule::HumanCmd::Cancel(4))
+    ));
+    assert!(matches!(
+        parse_agent_cmd("schedule cancel"),
+        AgentCmd::Schedule(crate::schedule::HumanCmd::Bad)
+    ));
 
     let rest = command::strip_token(".agent persona strict", ".agent", ".").unwrap();
     assert!(matches!(parse_agent_cmd(rest), AgentCmd::SetPersona(ref name) if name == "strict"));
