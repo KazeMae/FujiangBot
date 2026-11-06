@@ -50,6 +50,10 @@ fn parses_subcommands_from_the_first_token() {
     assert!(matches!(parse_agent_cmd("-h"), AgentCmd::Help));
     assert!(matches!(parse_agent_cmd("reset"), AgentCmd::Reset));
     assert!(matches!(parse_agent_cmd("reset now"), AgentCmd::Unknown));
+    assert!(matches!(parse_agent_cmd("memory"), AgentCmd::Memory));
+    assert!(matches!(parse_agent_cmd("memory now"), AgentCmd::Unknown));
+    assert!(matches!(parse_agent_cmd("forget"), AgentCmd::Forget));
+    assert!(matches!(parse_agent_cmd("forget now"), AgentCmd::Unknown));
     assert!(matches!(parse_agent_cmd("status"), AgentCmd::Status));
     assert!(matches!(parse_agent_cmd("tools"), AgentCmd::Tools));
     assert!(matches!(parse_agent_cmd("tools now"), AgentCmd::Unknown));
@@ -83,6 +87,8 @@ async fn reset_clears_only_this_session_and_keeps_the_persona() {
     session::set_persona(&pool, &group, "strict", 1)
         .await
         .unwrap();
+    save_exchange(&pool, &group, 1, "g2", "ga2").await.unwrap();
+    session::fold_overflow(&pool, &group, 1).await.unwrap();
 
     let text = run(&pool, &cfg, &group, 1, &AgentCmd::Reset, 2).await;
     assert_eq!(text, "已清空当前会话的对话记录。");
@@ -90,9 +96,11 @@ async fn reset_clears_only_this_session_and_keeps_the_persona() {
         .await
         .unwrap()
         .is_empty());
+    assert_eq!(session::summary_of(&pool, &group).await.unwrap(), "");
     let left = session::recent_turns(&pool, &friend, 20).await.unwrap();
     assert_eq!(left.len(), 2);
     assert_eq!(left[0].content, "p");
+    assert_eq!(session::summary_of(&pool, &friend).await.unwrap(), "");
     assert_eq!(
         session::persona_of(&pool, &group).await.unwrap().as_deref(),
         Some("strict")
@@ -101,6 +109,23 @@ async fn reset_clears_only_this_session_and_keeps_the_persona() {
 
     let again = run(&pool, &cfg, &group, 1, &AgentCmd::Reset, 3).await;
     assert_eq!(again, "当前会话没有对话记录。");
+
+    save_exchange(&pool, &group, 1, "only", "sum")
+        .await
+        .unwrap();
+    session::fold_overflow(&pool, &group, 0).await.unwrap();
+    assert!(session::recent_turns(&pool, &group, 20)
+        .await
+        .unwrap()
+        .is_empty());
+    let only = run(&pool, &cfg, &group, 1, &AgentCmd::Reset, 4).await;
+    assert_eq!(only, "已清空当前会话的对话记录。");
+    assert_eq!(session::summary_of(&pool, &group).await.unwrap(), "");
+    assert_eq!(
+        session::persona_of(&pool, &group).await.unwrap().as_deref(),
+        Some("strict")
+    );
+    assert_eq!(session::summary_of(&pool, &friend).await.unwrap(), "");
 }
 
 #[tokio::test]
@@ -151,6 +176,8 @@ async fn persona_view_switches_and_rejects_unknown_names() {
         .await
         .unwrap();
     assert!(help.contains("!agent reset"));
+    assert!(help.contains("!agent memory"));
+    assert!(help.contains("!agent forget"));
     assert!(help.contains("!agent tools"));
     assert!(!help.contains(".agent"));
     let unknown = apply_command(&pool, &cfg, &key, 1, &AgentCmd::Unknown, ".", 8)

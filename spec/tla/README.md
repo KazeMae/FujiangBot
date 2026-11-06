@@ -1,6 +1,6 @@
-# 用 TLC 检查 ToolLoop
+# 用 TLC 检查 ToolLoop 和 Session
 
-在仓库根目录执行 `scripts/run-tlc.sh`。它检查 `spec/tla/ToolLoop.tla`。通过时，输出里有这一句。
+在仓库根目录执行 `scripts/run-tlc.sh`。它先检查 `spec/tla/ToolLoop.tla`，再检查 `spec/tla/Session.tla`。通过时，每一段输出里都有这一句。
 
 ```
 Model checking completed. No error has been found.
@@ -46,6 +46,7 @@ TLA_TOOLS_JAR=/path/to/tla2tools.jar scripts/run-tlc.sh
 
 ```
 java -cp tla2tools.jar tlc2.TLC -workers 1 -deadlock -config spec/tla/ToolLoop.cfg spec/tla/ToolLoop.tla
+java -cp tla2tools.jar tlc2.TLC -workers 1 -deadlock -config spec/tla/Session.cfg spec/tla/Session.tla
 ```
 
 ## 通过时成立的命题
@@ -61,3 +62,15 @@ java -cp tla2tools.jar tlc2.TLC -workers 1 -deadlock -config spec/tla/ToolLoop.c
 模型不含语言模型的传输失败，也不含响应 JSON 的解码失败。实现里这两类返回 `Err(LlmError)`。调用方另回一句说明，不使用 `ToolReply::Degraded`。未知工具、参数不是 JSON，或 `ToolHub::invoke` 返回错误，才是 `Degraded`。
 
 改 `run_tool_loop` 的完成、降级或轮次上限时，先改 `ToolLoop.tla`，再跑 `scripts/run-tlc.sh`。
+
+## Session
+
+`Session.tla` 写的是会话摘要和人设。`Window` 是 1。`messages` 从 0 到 3。`summary` 是真或假。`persona` 是 `default` 或 `strict`。
+
+TLC 检查不变式 `Inv`。
+
+- `reset` 之后消息数是 0，摘要是假，人设和这一步之前相同。
+- `forget` 之后摘要是假，消息数和人设都和这一步之前相同。
+- `fold` 只在消息数大于 `Window` 时发生。之后消息数等于 `Window`，摘要是真，人设和这一步之前相同。
+
+模型不含每小时次数，也不含模型调用。改 `.agent reset`、`.agent forget` 或摘要折叠时，先改 `Session.tla`，再跑 `scripts/run-tlc.sh`。

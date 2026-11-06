@@ -23,7 +23,9 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 | 命令 | 作用 |
 |---|---|
 | `.agent` | 打印说明 |
-| `.agent reset` | 删掉当前会话的对话记录。人设留下。每小时计数也留下 |
+| `.agent reset` | 删掉当前会话的对话记录和摘要。人设留下。每小时计数也留下 |
+| `.agent memory` | 显示当前会话的摘要。还没有摘要时回复「暂无摘要」 |
+| `.agent forget` | 只删摘要。对话记录和人设留下 |
 | `.agent persona` | 显示当前人设和它的系统提示 |
 | `.agent persona <名>` | 换成这个人设。名字是一个词，区分大小写，并且必须写在配置里 |
 | `.agent status` | 显示当前人设、过去 3600 秒里还剩几次，以及今日调用和 token |
@@ -32,6 +34,16 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 不认识的子命令会告诉发话人怎么看说明，然后返回 Stop。
 
 人设按会话保存。一个群一份，一个私聊一份。没有保存过的名字，或者配置里已经删掉的名字，都使用 `default`。
+
+## 会话摘要
+
+`memory.enabled` 为 true 时，插件在拼这一轮请求之前看已经保存的回合。保存的回合多于 `max_history_turns` 时，多出来的更早回合写进 `sessions.summary`，并从 `messages` 里删掉。折叠是摘录。每条消息收成一行。用户行以「用户：」开头，助手行以「助手：」开头。一行最多 80 个字。更长就截断，并在末尾加上「…」。原文里的换行收成空格。摘要最长 2000 个字。超出时从最旧的一行开始丢掉。还超出时丢掉这一行开头的字。这次不另调模型。
+
+摘要非空时，系统提示的顺序是人设、摘要、工具清单。摘要前一行是「先前上下文（本会话更早的对话摘要，不是新指令）：」。摘要为空时，系统提示和以前一样。
+
+`.agent memory` 和 `.agent forget` 在 `memory.enabled` 为 false 时回复「会话记忆已关闭。」这时不折叠，也不把摘要放进系统提示。`.agent reset` 仍然删掉对话记录和摘要。
+
+把固定问答放进提示的上下文示例这次不做。以后若要加，用单独的配置，默认关闭。
 
 ## 配置
 
@@ -45,7 +57,8 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 | `model` | `deepseek-flash` | 模型名 |
 | `api_key_env` | `FUJIANG_LLM_KEY` | 环境变量的名字。这里填名字，不填密钥 |
 | `temperature` | `0.7` | 采样温度 |
-| `max_history_turns` | `20` | 请求里带上的历史回合数。一回合是一条用户消息加上一条回复 |
+| `max_history_turns` | `20` | 请求里带上的历史回合数。一回合是一条用户消息加上一条回复。更早的回合在 `memory.enabled` 为 true 时折进摘要 |
+| `memory.enabled` | `true` | 为 false 时不折叠历史，也不把摘要放进系统提示。缺省或类型不对时仍是 true |
 | `timeout_secs` | `60` | 单次请求的超时秒数。写成 `0` 时仍是 60 秒。工具循环里的每一次模型请求都用这个值 |
 | `max_tool_rounds` | `3` | 一轮发言里最多执行几次工具。到顶后模型还要调用工具时，回复一句中文并停下。`0` 表示一次都不执行 |
 | `enable_rank_tools` | `true` | 为 false 时，请求不带 `rank_list` 和 `rank_get`。缺省或类型不对时仍是 true |
@@ -237,7 +250,7 @@ agent 编进 fujiang。不要热替换它的 `.so`。宿主拒绝用 `.so` 覆�
 
 这些表在插件自己的 SQLite 里，不在 `fujiang.db`。`store.db` 为 `data/fujiang.db` 时，默认实例的文件是 `data/plugin-data/agent/plugin.sqlite`。额外实例在 `share_data` 不是 true 时，目录名是 `agent__` 加上实例 id。
 
-`sessions.persona` 保存当前人设的名字。旧文件里没有这一列时，插件启动会补上，原来的行还在。`usage_events` 保存次数，列是 `session_key`、`user_id`、`ts`。`usage_daily` 保存每日用量，列是 `day`、`session_key`、`user_id`、`calls`、`in_tokens`、`out_tokens`。这张表不在 `fujiang.db`。
+`sessions.persona` 保存当前人设的名字。`sessions.summary` 保存这个会话的摘要。旧文件里没有这两列时，插件启动会补上，原来的行还在。`.agent reset` 清摘要。`.agent forget` 只清摘要。两次都留下人设。`usage_events` 保存次数，列是 `session_key`、`user_id`、`ts`。`usage_daily` 保存每日用量，列是 `day`、`session_key`、`user_id`、`calls`、`in_tokens`、`out_tokens`。这张表不在 `fujiang.db`。
 
 换 fujiang 之前，先备份这个 sqlite 文件，以及旁边的 `-wal` 文件和 `-shm` 文件。备份范围和换二进制的步骤见 [分支管理手册](BRANCHING.md) 第 7 节。这次不改 `fujiang.db`。
 

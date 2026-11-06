@@ -24,8 +24,15 @@ if [ "$sum" != "$expect" ]; then
   echo "tla2tools.jar 的 sha1 是 $sum，不是 1.7.4 的 $expect" >&2
   exit 2
 fi
-exec java -XX:+UseParallelGC -cp "$jar" tlc2.TLC \
-  -workers 1 \
-  -deadlock \
-  -config "$spec/ToolLoop.cfg" \
-  "$spec/ToolLoop.tla"
+run_model() {
+  name=$1
+  echo "检查 $name"
+  java -XX:+UseParallelGC -cp "$jar" tlc2.TLC \
+    -workers 1 \
+    -deadlock \
+    -config "$spec/$name.cfg" \
+    "$spec/$name.tla"
+}
+
+run_model ToolLoop
+run_model Session

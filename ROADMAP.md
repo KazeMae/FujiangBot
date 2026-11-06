@@ -117,7 +117,7 @@
 | 模型 | 性质（简述） | 优先级 |
 |---|---|---|
 | `spec/tla/ToolLoop.tla` | 轮数硬顶；工具错误不离开降级态；无 tools 时单次 complete | P0 |
-| `spec/tla/Session.tla` | reset 清空对话保留人设；限额与 reset 正交 | P1 |
+| `spec/tla/Session.tla` | reset 清空消息和摘要并保留人设；forget 只清空摘要；fold 不改人设 | P1 |
 
 实现须对照模型；改 loop/session 行为时先改 TLA+ 或同步改。
 
