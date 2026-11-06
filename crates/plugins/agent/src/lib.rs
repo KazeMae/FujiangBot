@@ -202,20 +202,29 @@ impl AgentPlugin {
                 return;
             }
         };
-        let reply =
-            match tools::run_tool_loop(&client, &messages, &cfg.tools, cfg.max_tool_rounds, ctx)
-                .await
-            {
-                Ok(tools::ToolReply::Text(text)) => text,
-                Ok(tools::ToolReply::Degraded(text)) => {
-                    say(ctx, msg, text).await;
-                    return;
-                }
-                Err(err) => {
-                    say(ctx, msg, llm_reply(&err)).await;
-                    return;
-                }
-            };
+        let reply = match tools::run_tool_loop(
+            &client,
+            &messages,
+            &cfg.tools,
+            tools::BuiltinTools {
+                rank: cfg.enable_rank_tools,
+                contest: cfg.enable_contest_tools,
+            },
+            cfg.max_tool_rounds,
+            ctx,
+        )
+        .await
+        {
+            Ok(tools::ToolReply::Text(text)) => text,
+            Ok(tools::ToolReply::Degraded(text)) => {
+                say(ctx, msg, text).await;
+                return;
+            }
+            Err(err) => {
+                say(ctx, msg, llm_reply(&err)).await;
+                return;
+            }
+        };
         let visible = fit_reply(&reply);
         if visible.is_empty() {
             say(ctx, msg, BUSY_REPLY).await;

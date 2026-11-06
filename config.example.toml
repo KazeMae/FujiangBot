@@ -91,7 +91,12 @@ enabled = true
 # max_history_turns = 20
 # timeout_secs = 60
 # max_tool_rounds = 3
-# # 工具名写成「服务.方法」。请求里的函数名把点换成下划线。内置工具的注册在 issue #11。
+# enable_rank_tools = true
+# enable_contest_tools = true
+# # 两个开关默认都是 true。写成 false 就从请求里拿掉对应的内置工具。
+# # 工具名写成「服务.方法」。请求里的函数名把点换成下划线。
+# # 内置工具默认已有 rank.list、contest.upcoming、contest.today。
+# # 下面这项和已启用的 rank_list 函数名相同，所以不会发出去。关掉 enable_rank_tools 之后才会。
 # [[plugins.configs.agent.tools]]
 # name = "rank.list"
 # description = "列出当前榜"

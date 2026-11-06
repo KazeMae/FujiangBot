@@ -90,9 +90,26 @@ impl ToolHub for BotContext {
     }
 }
 
-/// Config tools plus builtin specs. Issue #11 fills [`builtin_specs`].
-pub(crate) fn assemble_tools(configured: &[ToolSpec]) -> Vec<ToolSpec> {
-    let mut tools = builtin_specs();
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BuiltinTools {
+    pub rank: bool,
+    pub contest: bool,
+}
+
+#[cfg(test)]
+impl BuiltinTools {
+    const ON: Self = Self {
+        rank: true,
+        contest: true,
+    };
+    const OFF: Self = Self {
+        rank: false,
+        contest: false,
+    };
+}
+
+pub(crate) fn assemble_tools(configured: &[ToolSpec], builtins: BuiltinTools) -> Vec<ToolSpec> {
+    let mut tools = builtin_specs(builtins);
     for spec in configured {
         if tools.iter().any(|kept| kept.wire_name == spec.wire_name) {
             continue;
@@ -102,18 +119,46 @@ pub(crate) fn assemble_tools(configured: &[ToolSpec]) -> Vec<ToolSpec> {
     tools
 }
 
-fn builtin_specs() -> Vec<ToolSpec> {
-    Vec::new()
+fn builtin_specs(builtins: BuiltinTools) -> Vec<ToolSpec> {
+    let mut specs = Vec::new();
+    if builtins.rank {
+        specs.push(builtin_spec(
+            "rank.list",
+            "列出本群 Codeforces 榜上的队员，含 handle 和 rating。不需要参数。",
+            default_parameters(),
+        ));
+    }
+    if builtins.contest {
+        specs.push(builtin_spec(
+            "contest.upcoming",
+            "列出即将开始的比赛。可选字符串参数 oj，例如 Codeforces 或 Atcoder。不传则返回全部。",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "oj": { "type": "string" } }
+            }),
+        ));
+        specs.push(builtin_spec(
+            "contest.today",
+            "列出今天开始的比赛。不需要参数。",
+            default_parameters(),
+        ));
+    }
+    specs
+}
+
+fn builtin_spec(name: &str, description: &str, parameters: Value) -> ToolSpec {
+    ToolSpec::parse(name, description, parameters).expect("builtin tool name")
 }
 
 pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
     client: &LlmClient,
     messages: &[ChatMessage],
     configured: &[ToolSpec],
+    builtins: BuiltinTools,
     max_rounds: u32,
     hub: &H,
 ) -> Result<ToolReply, LlmError> {
-    let tools = assemble_tools(configured);
+    let tools = assemble_tools(configured, builtins);
     if tools.is_empty() {
         return Ok(ToolReply::Text(client.complete(messages).await?));
     }
@@ -247,16 +292,101 @@ mod tests {
         assert!(ToolSpec::parse(".list", "x", json!({})).is_none());
         assert!(ToolSpec::parse("rank.", "x", json!({})).is_none());
         assert!(ToolSpec::parse("has space.list", "x", json!({})).is_none());
-        assert!(assemble_tools(&[]).is_empty());
+        assert!(assemble_tools(&[], BuiltinTools::OFF).is_empty());
 
         let first = ToolSpec::parse("a.b_c", "one", json!({})).unwrap();
         let second = ToolSpec::parse("a_b.c", "two", json!({})).unwrap();
         assert_eq!(first.wire_name(), "a_b_c");
-        let kept = assemble_tools(&[first, second]);
+        let kept = assemble_tools(&[first, second], BuiltinTools::OFF);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].name(), "a.b_c");
         assert_eq!(kept[0].service(), "a");
         assert_eq!(kept[0].method(), "b_c");
+    }
+
+    #[test]
+    fn builtin_tools_follow_the_two_switches() {
+        let on = assemble_tools(&[], BuiltinTools::ON);
+        assert_eq!(
+            on.iter().map(ToolSpec::wire_name).collect::<Vec<_>>(),
+            vec!["rank_list", "contest_upcoming", "contest_today"]
+        );
+        assert_eq!(on[0].service(), "rank");
+        assert_eq!(on[0].method(), "list");
+        assert_eq!(
+            on[0].description(),
+            "列出本群 Codeforces 榜上的队员，含 handle 和 rating。不需要参数。"
+        );
+        assert_eq!(on[0].parameters(), &default_parameters());
+        assert_eq!(on[1].service(), "contest");
+        assert_eq!(on[1].method(), "upcoming");
+        assert_eq!(
+            on[1].description(),
+            "列出即将开始的比赛。可选字符串参数 oj，例如 Codeforces 或 Atcoder。不传则返回全部。"
+        );
+        assert_eq!(
+            on[1].parameters(),
+            &json!({
+                "type": "object",
+                "properties": { "oj": { "type": "string" } }
+            })
+        );
+        assert!(on[1].parameters().get("required").is_none());
+        assert_eq!(on[2].method(), "today");
+        assert_eq!(on[2].description(), "列出今天开始的比赛。不需要参数。");
+        assert_eq!(on[2].parameters(), &default_parameters());
+
+        let rank_only = assemble_tools(
+            &[],
+            BuiltinTools {
+                rank: true,
+                contest: false,
+            },
+        );
+        assert_eq!(
+            rank_only
+                .iter()
+                .map(ToolSpec::wire_name)
+                .collect::<Vec<_>>(),
+            vec!["rank_list"]
+        );
+        let contest_only = assemble_tools(
+            &[],
+            BuiltinTools {
+                rank: false,
+                contest: true,
+            },
+        );
+        assert_eq!(
+            contest_only
+                .iter()
+                .map(ToolSpec::wire_name)
+                .collect::<Vec<_>>(),
+            vec!["contest_upcoming", "contest_today"]
+        );
+        assert!(assemble_tools(&[], BuiltinTools::OFF).is_empty());
+
+        let extra = ToolSpec::parse("memo.search", "查备忘", json!({})).unwrap();
+        let with_extra = assemble_tools(&[extra], BuiltinTools::ON);
+        assert_eq!(with_extra[3].name(), "memo.search");
+        assert_eq!(with_extra[3].wire_name(), "memo_search");
+
+        let configured = ToolSpec::parse(
+            "rank.list",
+            "别的说明",
+            json!({"type": "object", "properties": {"limit": {"type": "integer"}}}),
+        )
+        .unwrap();
+        let kept_builtin = assemble_tools(std::slice::from_ref(&configured), BuiltinTools::ON);
+        assert_eq!(kept_builtin.len(), 3);
+        assert_eq!(kept_builtin[0].description(), on[0].description());
+        assert_eq!(kept_builtin[0].parameters(), on[0].parameters());
+
+        let kept_config = assemble_tools(&[configured], BuiltinTools::OFF);
+        assert_eq!(kept_config.len(), 1);
+        assert_eq!(kept_config[0].description(), "别的说明");
+        assert_eq!(kept_config[0].service(), "rank");
+        assert_eq!(kept_config[0].method(), "list");
     }
 
     #[tokio::test]
@@ -280,7 +410,7 @@ mod tests {
                 content: "最近有比赛吗".into(),
             },
         ];
-        let reply = run_tool_loop(&client, &messages, &tools, 3, &hub)
+        let reply = run_tool_loop(&client, &messages, &tools, BuiltinTools::OFF, 3, &hub)
             .await
             .unwrap();
         assert_eq!(reply, ToolReply::Text("本周有两场".into()));
@@ -331,7 +461,7 @@ mod tests {
         let client = test_client(&base);
         let tools = vec![ToolSpec::parse("rank.list", "当前榜", json!({})).unwrap()];
         let hub = Rec::default();
-        let reply = run_tool_loop(&client, &user("再查"), &tools, 1, &hub)
+        let reply = run_tool_loop(&client, &user("再查"), &tools, BuiltinTools::OFF, 1, &hub)
             .await
             .unwrap();
         assert_eq!(reply, ToolReply::Degraded(TOOL_CAP_REPLY));
@@ -343,7 +473,7 @@ mod tests {
         let base = spawn_app(script.clone()).await;
         let client = test_client(&base);
         let hub = Rec::default();
-        let reply = run_tool_loop(&client, &user("再查"), &tools, 0, &hub)
+        let reply = run_tool_loop(&client, &user("再查"), &tools, BuiltinTools::OFF, 0, &hub)
             .await
             .unwrap();
         assert_eq!(reply, ToolReply::Degraded(TOOL_CAP_REPLY));
@@ -364,7 +494,7 @@ mod tests {
             log: Mutex::new(Vec::new()),
             fail: true,
         };
-        let reply = run_tool_loop(&client, &user("榜"), &tools, 3, &hub)
+        let reply = run_tool_loop(&client, &user("榜"), &tools, BuiltinTools::OFF, 3, &hub)
             .await
             .unwrap();
         assert_eq!(reply, ToolReply::Degraded(TOOL_FAIL_REPLY));
@@ -377,7 +507,7 @@ mod tests {
         let base = spawn_app(script.clone()).await;
         let client = test_client(&base);
         let hub = Rec::default();
-        let reply = run_tool_loop(&client, &user("榜"), &tools, 3, &hub)
+        let reply = run_tool_loop(&client, &user("榜"), &tools, BuiltinTools::OFF, 3, &hub)
             .await
             .unwrap();
         assert_eq!(reply, ToolReply::Degraded(TOOL_FAIL_REPLY));
@@ -389,7 +519,7 @@ mod tests {
         let base = spawn_app(script.clone()).await;
         let client = test_client(&base);
         let hub = Rec::default();
-        let reply = run_tool_loop(&client, &user("榜"), &tools, 3, &hub)
+        let reply = run_tool_loop(&client, &user("榜"), &tools, BuiltinTools::OFF, 3, &hub)
             .await
             .unwrap();
         assert_eq!(reply, ToolReply::Degraded(TOOL_FAIL_REPLY));
@@ -403,7 +533,7 @@ mod tests {
         let base = spawn_app(script.clone()).await;
         let client = test_client(&base);
         let hub = Rec::default();
-        let reply = run_tool_loop(&client, &user("在吗"), &[], 3, &hub)
+        let reply = run_tool_loop(&client, &user("在吗"), &[], BuiltinTools::OFF, 3, &hub)
             .await
             .unwrap();
         assert_eq!(reply, ToolReply::Text("本周有两场".into()));
@@ -421,10 +551,138 @@ mod tests {
         let client = test_client(&base);
         let tools = vec![ToolSpec::parse("rank.list", "当前榜", json!({})).unwrap()];
         let hub = Rec::default();
-        let err = run_tool_loop(&client, &user("榜"), &tools, 3, &hub)
+        let err = run_tool_loop(&client, &user("榜"), &tools, BuiltinTools::OFF, 3, &hub)
             .await
             .unwrap_err();
         assert!(matches!(err, LlmError::Decode(_)), "{err}");
+        assert!(hub.log.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn builtin_rank_and_contest_calls_return_the_model_text() {
+        let script = Script::new(Kind::ThreeThenText);
+        let base = spawn_app(script.clone()).await;
+        let client = test_client(&base);
+        let hub = Rec::default();
+        let reply = run_tool_loop(
+            &client,
+            &user("今天有比赛吗，榜怎么样"),
+            &[],
+            BuiltinTools::ON,
+            3,
+            &hub,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reply,
+            ToolReply::Text("今天 Codeforces 一场。榜上 12 人。".into())
+        );
+        assert_eq!(
+            hub.log.lock().unwrap().clone(),
+            vec![
+                ("rank".into(), "list".into(), json!({})),
+                (
+                    "contest".into(),
+                    "upcoming".into(),
+                    json!({"oj": "Codeforces"})
+                ),
+                ("contest".into(), "today".into(), json!({})),
+            ]
+        );
+        let bodies = script.bodies.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 2);
+        let names: Vec<_> = bodies[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["rank_list", "contest_upcoming", "contest_today"]
+        );
+        assert_eq!(
+            bodies[0]["tools"][0]["description"],
+            "列出本群 Codeforces 榜上的队员，含 handle 和 rating。不需要参数。"
+        );
+        assert_eq!(bodies[1]["input"][2]["output"], r#"{"via":"rank.list"}"#);
+        assert_eq!(
+            bodies[1]["input"][4]["output"],
+            r#"{"via":"contest.upcoming"}"#
+        );
+        assert_eq!(
+            bodies[1]["input"][6]["output"],
+            r#"{"via":"contest.today"}"#
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn builtin_contest_today_error_uses_the_degraded_reply() {
+        let catch = Catch::default();
+        let _guard = tracing::subscriber::set_default(catch.clone());
+        let script = Script::new(Kind::TodayCall);
+        let base = spawn_app(script.clone()).await;
+        let client = test_client(&base);
+        let hub = Rec {
+            log: Mutex::new(Vec::new()),
+            fail: true,
+        };
+        let reply = run_tool_loop(
+            &client,
+            &user("今天有比赛吗"),
+            &[],
+            BuiltinTools::ON,
+            3,
+            &hub,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply, ToolReply::Degraded(TOOL_FAIL_REPLY));
+        let log = hub.log.lock().unwrap().clone();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].0, "contest");
+        assert_eq!(log[0].1, "today");
+        assert_eq!(script.hits.load(Ordering::SeqCst), 1);
+        assert!(catch.has("agent tool"));
+    }
+
+    #[tokio::test]
+    async fn disabled_builtin_group_stays_out_of_the_request() {
+        let script = Script::new(Kind::Text);
+        let base = spawn_app(script.clone()).await;
+        let client = test_client(&base);
+        let hub = Rec::default();
+        let extra = vec![ToolSpec::parse("memo.search", "查备忘", json!({})).unwrap()];
+        let reply = run_tool_loop(
+            &client,
+            &user("今天比赛"),
+            &extra,
+            BuiltinTools {
+                rank: false,
+                contest: true,
+            },
+            3,
+            &hub,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply, ToolReply::Text("本周有两场".into()));
+        let bodies = script.bodies.lock().unwrap();
+        let names: Vec<_> = bodies[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "contest_upcoming".to_string(),
+                "contest_today".to_string(),
+                "memo_search".to_string(),
+            ]
+        );
         assert!(hub.log.lock().unwrap().is_empty());
     }
 
@@ -450,6 +708,8 @@ mod tests {
         BadArgs,
         Unknown,
         MissingId,
+        ThreeThenText,
+        TodayCall,
     }
 
     #[derive(Clone)]
@@ -499,6 +759,9 @@ mod tests {
             Kind::BadArgs => text_body(),
             Kind::Unknown if n == 0 => one_call_with("call_x", "no_such", "{}"),
             Kind::Unknown => text_body(),
+            Kind::ThreeThenText if n == 0 => three_calls(),
+            Kind::ThreeThenText => saying("今天 Codeforces 一场。榜上 12 人。"),
+            Kind::TodayCall => one_call_with("call_today", "contest_today", "{}"),
             Kind::MissingId => json!({
                 "output": [{
                     "type": "function_call",
@@ -510,12 +773,41 @@ mod tests {
     }
 
     fn text_body() -> Value {
+        saying("本周有两场")
+    }
+
+    fn saying(text: &str) -> Value {
         json!({
-            "output_text": "本周有两场",
+            "output_text": text,
             "output": [{
                 "type": "message",
                 "content": [{"type": "output_text", "text": "NO"}]
             }]
+        })
+    }
+
+    fn three_calls() -> Value {
+        json!({
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_rank",
+                    "name": "rank_list",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_up",
+                    "name": "contest_upcoming",
+                    "arguments": "{\"oj\":\"Codeforces\"}"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_today",
+                    "name": "contest_today",
+                    "arguments": "{}"
+                }
+            ]
         })
     }
 
