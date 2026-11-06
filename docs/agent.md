@@ -45,7 +45,9 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 | `api_key_env` | `FUJIANG_LLM_KEY` | 环境变量的名字。这里填名字，不填密钥 |
 | `temperature` | `0.7` | 采样温度 |
 | `max_history_turns` | `20` | 请求里带上的历史回合数。一回合是一条用户消息加上一条回复 |
-| `timeout_secs` | `60` | 单次请求的超时秒数。写成 `0` 时仍是 60 秒 |
+| `timeout_secs` | `60` | 单次请求的超时秒数。写成 `0` 时仍是 60 秒。工具循环里的每一次模型请求都用这个值 |
+| `max_tool_rounds` | `3` | 一轮发言里最多执行几次工具。到顶后模型还要调用工具时，回复一句中文并停下。`0` 表示一次都不执行 |
+| `tools` | `[]` | 工具列表。每项有 `name`、`description`、`parameters`。空列表不进入工具循环 |
 | `system_prompt` | `你是福酱，西南科技大学 ACM 群助手。` | `default` 人设的系统提示 |
 | `wake_words` | `["福酱"]` | 唤醒词。空数组表示没有唤醒词 |
 | `require_at` | `false` | 为 true 时，唤醒词不算叫到 |
@@ -73,7 +75,19 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
 `config.example.toml` 里的同一段是注释。抄进 `config.toml` 时不要写上密钥。
 
-客户端只走 OpenAI Responses：`POST {base_url}/responses`。system 拼进 `instructions`，其余回合放进 `input`，从 `output_text` 或 `output` 里的 `output_text` 段取出回复。公共方法为 `LlmClient::complete`。若配置里仍写着旧的 `api` 字段，会被忽略。
+客户端只走 OpenAI Responses：`POST {base_url}/responses`。system 拼进 `instructions`，其余回合放进 `input`，从 `output_text` 或 `output` 里的 `output_text` 段取出回复。没有工具时公共方法是 `LlmClient::complete`。有工具时用 `LlmClient::complete_with_tools`，仍是同一个地址。若配置里仍写着旧的 `api` 字段，会被忽略。工具规则见下文「工具」。
+
+## 工具
+
+适配层把 Responses 的 `function_call` 交给 ServiceHub。模型返回 `function_call` 时，插件按工具名调用 `ctx.call`。结果放进下一次请求的 `function_call_output`。模型返回文本后，这一轮结束。工具来回只留在这一轮的内存里。会话表仍只保存用户原文和最终回复，不新增表。
+
+工具名的格式是 `服务.方法`。第一个 `.` 之前是服务名，之后是方法名。`rank.list` 调用 rank 的 `list`。`contest.upcoming` 调用 contest 的 `upcoming`。Responses 要求函数名匹配 `^[a-zA-Z0-9_-]+$`，所以请求里的 `name` 把 `.` 换成 `_`。`rank.list` 发出去是 `rank_list`。
+
+`tools` 为空时，请求不带 `tools` 字段，插件只调用一次 `LlmClient::complete`。`tools` 非空时走工具循环。一轮发言里的执行次数不超过 `max_tool_rounds`。
+
+次数到顶而模型还要调用工具时，用户看到「要查的步骤太多了，我先停在这里。」工具名不在这一轮的列表里、参数不是 JSON，或 ServiceHub 返回错误时，用户看到「我没查成，过一会儿再问我一次。」插件不退出。到顶和调用失败都会打 `tracing::warn!`。
+
+issue #11 才注册 rank 和 contest 的内置工具。这一版不注册。生产环境的 agent 编进 fujiang，不从 `plugins/` 里的 `.so` 启动。部署细节见下文「数据与部署」。
 
 ## 环境变量
 

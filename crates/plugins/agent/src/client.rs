@@ -54,18 +54,23 @@ impl LlmClient {
     }
 
     pub async fn complete(&self, messages: &[ChatMessage]) -> Result<String, LlmError> {
-        let request = responses_request(&self.model, self.temperature, messages);
-        let (status, body) = self.send_json("responses", &request).await?;
-        if !status.is_success() {
-            return Err(LlmError::Api {
-                status: status.as_u16(),
-                body: error_message_or_snippet(&body),
-            });
-        }
+        let request = responses_request(&self.model, self.temperature, messages, &[], &[]);
+        let body = self.post_ok(&request).await?;
         parse_responses(&body)
     }
 
-    fn new(cfg: &AgentConfig, http: reqwest::Client, api_key: String) -> Self {
+    pub(crate) async fn complete_with_tools(
+        &self,
+        messages: &[ChatMessage],
+        prior: &[PriorCall],
+        tools: &[FunctionTool<'_>],
+    ) -> Result<ModelOutput, LlmError> {
+        let request = responses_request(&self.model, self.temperature, messages, prior, tools);
+        let body = self.post_ok(&request).await?;
+        parse_model_output(&body)
+    }
+
+    pub(crate) fn new(cfg: &AgentConfig, http: reqwest::Client, api_key: String) -> Self {
         Self {
             http,
             base_url: cfg.base_url.clone(),
@@ -94,6 +99,17 @@ impl LlmClient {
         let text = response.text().await.map_err(map_reqwest)?;
         Ok((status, text))
     }
+
+    async fn post_ok(&self, request: &ResponsesRequest<'_>) -> Result<String, LlmError> {
+        let (status, body) = self.send_json("responses", request).await?;
+        if !status.is_success() {
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                body: error_message_or_snippet(&body),
+            });
+        }
+        Ok(body)
+    }
 }
 
 fn require_key(env_name: &str, raw: Option<&str>) -> Result<String, LlmError> {
@@ -109,26 +125,84 @@ fn endpoint(base: &str, path: &str) -> String {
     format!("{}/{}", base.trim().trim_end_matches('/'), path)
 }
 
+/// One executed function call, echoed on the next `/responses` input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PriorCall {
+    pub call_id: String,
+    pub name: String,
+    pub arguments: String,
+    pub output: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FunctionCall {
+    pub call_id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FunctionTool<'a> {
+    pub name: &'a str,
+    pub description: &'a str,
+    pub parameters: &'a Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ModelOutput {
+    Text(String),
+    Calls(Vec<FunctionCall>),
+}
+
 #[derive(Serialize)]
 struct ResponsesRequest<'a> {
     model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
-    input: Vec<ResponsesMessage<'a>>,
+    input: Vec<InputItem<'a>>,
     temperature: f64,
     stream: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<WireFunction<'a>>,
 }
 
 #[derive(Serialize)]
-struct ResponsesMessage<'a> {
-    role: &'a str,
-    content: &'a str,
+#[serde(untagged)]
+enum InputItem<'a> {
+    Message {
+        role: &'a str,
+        content: &'a str,
+    },
+    FunctionCall {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        call_id: &'a str,
+        name: &'a str,
+        arguments: &'a str,
+    },
+    FunctionCallOutput {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        call_id: &'a str,
+        output: &'a str,
+    },
+}
+
+#[derive(Serialize)]
+struct WireFunction<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    name: &'a str,
+    description: &'a str,
+    parameters: &'a Value,
 }
 
 fn responses_request<'a>(
     model: &'a str,
     temperature: f64,
     messages: &'a [ChatMessage],
+    prior: &'a [PriorCall],
+    tools: &'a [FunctionTool<'a>],
 ) -> ResponsesRequest<'a> {
     let mut instructions = String::new();
     let mut input = Vec::new();
@@ -143,16 +217,38 @@ fn responses_request<'a>(
                 }
                 instructions.push_str(&message.content);
             }
-            Role::User => input.push(ResponsesMessage {
+            Role::User => input.push(InputItem::Message {
                 role: "user",
                 content: &message.content,
             }),
-            Role::Assistant => input.push(ResponsesMessage {
+            Role::Assistant => input.push(InputItem::Message {
                 role: "assistant",
                 content: &message.content,
             }),
         }
     }
+    for call in prior {
+        input.push(InputItem::FunctionCall {
+            kind: "function_call",
+            call_id: &call.call_id,
+            name: &call.name,
+            arguments: &call.arguments,
+        });
+        input.push(InputItem::FunctionCallOutput {
+            kind: "function_call_output",
+            call_id: &call.call_id,
+            output: &call.output,
+        });
+    }
+    let tools = tools
+        .iter()
+        .map(|tool| WireFunction {
+            kind: "function",
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters,
+        })
+        .collect();
     ResponsesRequest {
         model,
         instructions: if instructions.is_empty() {
@@ -163,6 +259,7 @@ fn responses_request<'a>(
         input,
         temperature,
         stream: false,
+        tools,
     }
 }
 
@@ -203,6 +300,20 @@ fn error_message_or_snippet(body: &str) -> String {
 fn parse_responses(body: &str) -> Result<String, LlmError> {
     let value: Value =
         serde_json::from_str(body).map_err(|err| LlmError::Decode(err.to_string()))?;
+    text_from_response(&value)
+}
+
+fn parse_model_output(body: &str) -> Result<ModelOutput, LlmError> {
+    let value: Value =
+        serde_json::from_str(body).map_err(|err| LlmError::Decode(err.to_string()))?;
+    let calls = function_calls(&value)?;
+    if !calls.is_empty() {
+        return Ok(ModelOutput::Calls(calls));
+    }
+    text_from_response(&value).map(ModelOutput::Text)
+}
+
+fn text_from_response(value: &Value) -> Result<String, LlmError> {
     if let Some(text) = value.get("output_text").and_then(Value::as_str) {
         if !text.is_empty() {
             return Ok(text.to_string());
@@ -223,6 +334,47 @@ fn parse_responses(body: &str) -> Result<String, LlmError> {
     } else {
         Ok(text)
     }
+}
+
+fn function_calls(value: &Value) -> Result<Vec<FunctionCall>, LlmError> {
+    let Some(output) = value.get("output").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    let mut calls = Vec::new();
+    for item in output {
+        if item.get("type").and_then(Value::as_str) != Some("function_call") {
+            continue;
+        }
+        let name = item
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty());
+        let call_id = item
+            .get("call_id")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty());
+        let (Some(name), Some(call_id)) = (name, call_id) else {
+            return Err(LlmError::Decode(
+                "function_call missing call_id or name".into(),
+            ));
+        };
+        let arguments = match item.get("arguments") {
+            Some(Value::String(text)) if text.trim().is_empty() => "{}".to_string(),
+            Some(Value::String(text)) => text.clone(),
+            Some(_) => {
+                return Err(LlmError::Decode(
+                    "function_call arguments must be a string".into(),
+                ));
+            }
+            None => "{}".to_string(),
+        };
+        calls.push(FunctionCall {
+            call_id: call_id.to_string(),
+            name: name.to_string(),
+            arguments,
+        });
+    }
+    Ok(calls)
 }
 
 fn is_message_item(item: &Value) -> bool {
@@ -370,6 +522,7 @@ mod tests {
         assert_eq!(seen.body["input"][1]["content"], "hello");
         assert!(seen.body.get("previous_response_id").is_none());
         assert!(seen.body.get("store").is_none());
+        assert!(seen.body.get("tools").is_none());
         let temp = seen.body["temperature"].as_f64().unwrap();
         assert!((temp - 0.7).abs() < 1e-9, "{temp}");
     }

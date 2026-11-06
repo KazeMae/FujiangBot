@@ -90,6 +90,12 @@ enabled = true
 # temperature = 0.7
 # max_history_turns = 20
 # timeout_secs = 60
+# max_tool_rounds = 3
+# # 工具名写成「服务.方法」。请求里的函数名把点换成下划线。内置工具的注册在 issue #11。
+# [[plugins.configs.agent.tools]]
+# name = "rank.list"
+# description = "列出当前榜"
+# parameters = { type = "object", properties = {} }
 # system_prompt = "你是福酱，西南科技大学 ACM 群助手。"
 # wake_words = ["福酱"]
 # require_at = false

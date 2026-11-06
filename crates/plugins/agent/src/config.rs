@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
+use crate::tools::ToolSpec;
+
 const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
 const DEFAULT_MODEL: &str = "deepseek-flash";
 const DEFAULT_API_KEY_ENV: &str = "FUJIANG_LLM_KEY";
@@ -9,6 +11,7 @@ const DEFAULT_TEMPERATURE: f64 = 0.7;
 const DEFAULT_MAX_HISTORY_TURNS: u32 = 20;
 const DEFAULT_SYSTEM_PROMPT: &str = "你是福酱，西南科技大学 ACM 群助手。";
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_MAX_TOOL_ROUNDS: u32 = 3;
 const DEFAULT_USER_RATE: u32 = 30;
 const DEFAULT_GROUP_RATE: u32 = 120;
 
@@ -34,6 +37,9 @@ pub struct AgentConfig {
     pub rate_limit: RateLimit,
     /// Seconds for one request. Missing or 0 means 60.
     pub timeout_secs: u64,
+    /// Tool executions allowed in one user turn. `0` runs none.
+    pub max_tool_rounds: u32,
+    pub tools: Vec<ToolSpec>,
 }
 
 impl AgentConfig {
@@ -52,6 +58,8 @@ impl AgentConfig {
             require_at: bool_field(v, "require_at", false),
             rate_limit: rate_limit_from(v),
             timeout_secs: timeout_secs_from(v),
+            max_tool_rounds: u32_field(v, "max_tool_rounds", DEFAULT_MAX_TOOL_ROUNDS),
+            tools: tools_from(v),
         }
     }
 
@@ -139,6 +147,20 @@ fn wake_words_from(v: &Value) -> Vec<String> {
     }
 }
 
+fn tools_from(v: &Value) -> Vec<ToolSpec> {
+    let Some(items) = v.get("tools").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    items.iter().filter_map(tool_spec_from).collect()
+}
+
+fn tool_spec_from(v: &Value) -> Option<ToolSpec> {
+    let name = v.get("name")?.as_str()?;
+    let description = v.get("description").and_then(Value::as_str).unwrap_or("");
+    let parameters = v.get("parameters").cloned().unwrap_or(Value::Null);
+    ToolSpec::parse(name, description, parameters)
+}
+
 fn rate_limit_from(v: &Value) -> RateLimit {
     let rates = v.get("rate_limit").unwrap_or(&Value::Null);
     RateLimit {
@@ -200,6 +222,8 @@ mod tests {
         assert_eq!(cfg.rate_limit.per_user_per_hour, 30);
         assert_eq!(cfg.rate_limit.per_group_per_hour, 120);
         assert_eq!(cfg.timeout_secs, 60);
+        assert_eq!(cfg.max_tool_rounds, 3);
+        assert!(cfg.tools.is_empty());
     }
 
     #[test]
@@ -252,7 +276,9 @@ mod tests {
             "require_at": "yes",
             "timeout_secs": 0,
             "rate_limit": { "per_user_per_hour": "nope" },
-            "personas": "nope"
+            "personas": "nope",
+            "max_tool_rounds": "nope",
+            "tools": "nope"
         }));
         assert_defaults(&cfg);
     }
@@ -295,5 +321,38 @@ mod tests {
             "你是福酱，西南科技大学 ACM 群助手。"
         );
         assert_eq!(only_named.prompt_for("strict"), Some("be strict"));
+    }
+
+    #[test]
+    fn tool_specs_and_round_cap_are_lenient() {
+        let cfg = AgentConfig::from_value(&json!({
+            "max_tool_rounds": 0,
+            "tools": [
+                {
+                    "name": " rank.list ",
+                    "description": " 榜 ",
+                    "parameters": {"type": "object", "properties": {}}
+                },
+                {"name": "nolist", "description": "no"},
+                {"name": " ", "description": "blank"},
+                "nope",
+                {"description": "missing name"}
+            ],
+            "future_tool_key": true
+        }));
+        assert_eq!(cfg.max_tool_rounds, 0);
+        assert_eq!(cfg.tools.len(), 1);
+        assert_eq!(cfg.tools[0].name(), "rank.list");
+        assert_eq!(cfg.tools[0].description(), "榜");
+        assert_eq!(cfg.tools[0].service(), "rank");
+        assert_eq!(cfg.tools[0].method(), "list");
+        assert_eq!(cfg.tools[0].wire_name(), "rank_list");
+
+        let fallback = AgentConfig::from_value(&json!({
+            "max_tool_rounds": -1,
+            "tools": {"name": "rank.list"}
+        }));
+        assert_eq!(fallback.max_tool_rounds, 3);
+        assert!(fallback.tools.is_empty());
     }
 }
