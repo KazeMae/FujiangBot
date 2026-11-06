@@ -72,44 +72,45 @@
 
 ## 阶段计划
 
-### M2 收尾（已有 Issue）
+### M2 / M2-T（已完成）
 
-| Issue | 内容 | 依赖 | 分支建议 | 状态 |
-|---|---|---|---|---|
-| #12 | 看图：`fetch_media_bytes` → 多模态 | M1；建议 #10 后 | `feat/agent-vision` | Todo |
-| #13 | 更细限流、关键词、管理员旁路 | #8 | `feat/agent-safety-limits` | Todo |
-| #14 | `usage_daily` 用量统计 | #7 | `feat/agent-usage-stats` | Todo |
-
-### M2-T 插件工具化（新建 Issue，可与 #12–#14 并行）
-
-原则：每个插件先补 `Service` + JSON 友好的方法，再在 `builtin_specs`（或配置）注册 tool；写操作默认关或要管理员。wire 名继续 `service_method`。
-
-| 波次 | 内容 | 验收要点 |
+| Issue | 内容 | 状态 |
 |---|---|---|
-| T0 | 工程底座：`spec/tla/ToolLoop.tla`（+ 可选 Session）；`cargo llvm-cov` 门槛；超 1000 行拆分门槛；debug→lint 流程写入 `docs/BRANCHING.md` 或 `docs/engineering.md` | TLC 可跑；agent 包覆盖率报告可出；CI 草稿 |
-| T1 | `rank.get` 注册进 agent；`problem` provide + tool | 假 hub / 单测；配置可关 |
-| T2 | `memo` provide + tool（list/add 策略写清） | 私有库不进主库 |
-| T3 | `fun` 只读 tool；写 tool 默认关 | 不误删图库 |
-| T4 | `luck` tool | 降级提示 |
-| T5 | 工具展示：`.agent tools`、system 注入可用工具摘要、管理口只读列表 | 人与模型都能看到清单 |
+| #12 | 看图 | Done |
+| #13 | 限流 / 关键词 / 管理员旁路 | Done |
+| #14 | `usage_daily` | Done |
+| #28 T0 | TLA+ ToolLoop、覆盖率、工程约定 | Done |
+| #29 T1 | `rank.get` + `problem` | Done |
+| #34 T2 | `memo` 工具 | Done |
+| #35 T3 | `fun` 只读工具 | Done |
+| #30 T5 | `.agent tools` / 清单注入 | Done |
+| T4 `luck` | 未建 Issue；需要时再开 | 候补 |
 
-### M3（已有 Issue，按需排期）
+### M3（进行中）
 
-#15 RAG · #16 长期记忆 · #17 管理界面 · #18 MCP（默认不做）
+| Issue | 内容 | 状态 | 第一刀 |
+|---|---|---|---|
+| #16 | 长期记忆与上下文压缩 | In Progress | 会话摘要 fold + `.agent memory` / `forget`；无 LLM 摘要；ICL 默认关（后切片） |
+| #15 | 托管知识库 / RAG | Todo | 需单独确认出网与密钥后再开工 |
+| #17 | 管理界面 / 人格与用量报表 | Todo | 跟在 #16 后；先只读用量 API |
+| #18 | MCP | 延期 | 默认不做；有真实需求文档再开 |
+
+前置：`crates/plugins/agent/src/lib.rs` 已顶格 1000 行。任何触及该文件的改动必须先拆 `command` / `plan` 再加功能。
 
 ### 版本与部署
 
 - 功能合入 `main` 不自动部署。
-- 下一生产包建议：M2 看图 + 工具化一波 + 覆盖率底座后 bump **v0.3.0**，再等用户说「部署」。
+- 下一生产包建议：M3 记忆切片可合后 bump **v0.3.0**，再等用户说「部署」。
 - 部署清单仍按 `docs/BRANCHING.md`：备份、只重启 fujiang、不碰 NapCat。
 
 ## 并行策略
 
-1. **轨道 A（体验）**：#12 识图 ↔ #13 安全（可并行，注意 `client`/`config` 冲突时 rebase）。  
-2. **轨道 B（工具）**：T1→T5 按插件拆 PR，互不改同一 Service 时可并行。  
-3. **轨道 C（质量）**：T0（TLA+、覆盖率、拆文件、lint）尽早合，给后面 PR 垫底座。  
+1. **轨道 D（记忆）**：先拆 `lib.rs`，再 #16 摘要 fold；LLM 压缩与 ICL 另 PR。  
+2. **轨道 E（管理）**：#17 只读用量 / 人格编辑，尽量不碰 agent 热路径。  
+3. **轨道 F（RAG）**：#15 等密钥与出网确认；接口先 mock。  
+4. **#18**：保持延期。
 
-每个 PR：自测 fmt/clippy/test（+ 相关 llvm-cov）→ 中文草稿 → 自审 → merge commit。不擅自部署。
+每个 PR：自测 fmt/clippy/test（+ 相关 llvm-cov）→ 中文草稿 → 自审 → merge commit。不擅自部署。`lib.rs` 顶格时先拆文件。
 
 ## 形式化验证范围
 
