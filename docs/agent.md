@@ -26,7 +26,7 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 | `.agent reset` | 删掉当前会话的对话记录。人设留下。每小时计数也留下 |
 | `.agent persona` | 显示当前人设和它的系统提示 |
 | `.agent persona <名>` | 换成这个人设。名字是一个词，区分大小写，并且必须写在配置里 |
-| `.agent status` | 显示当前人设，以及过去 3600 秒里还剩几次 |
+| `.agent status` | 显示当前人设、过去 3600 秒里还剩几次，以及今日调用和 token |
 | `.agent tools` | 列出当前启用的工具。每行是逻辑名和说明。不调用模型，也不计入每小时次数 |
 
 不认识的子命令会告诉发话人怎么看说明，然后返回 Stop。
@@ -152,11 +152,27 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
 `.agent reset` 不清这个计数。
 
+## 每日用量
+
+`usage_daily` 按 UTC 日、会话和发言人各存一行。列是 `calls`、`in_tokens`、`out_tokens`。同一天的下一次调用加进这一行。下一天另起一行。`day` 等于 Unix 时间除以 86400。日界是 UTC 0 点。
+
+`calls` 计 Responses 请求。每小时次数计的是一次发言。工具来回里的每一次模型请求都算 1 次。请求失败、超时，或响应里没有 `usage` 时，这一次仍然计入 `calls`，token 记 0。
+
+响应里有 `usage` 时，`in_tokens` 加上 `input_tokens`，`out_tokens` 加上 `output_tokens`。缺字段、负数，或不是整数时，这一项按 0。插件不记 `total_tokens`。
+
+正文解析失败时，`calls` 加 1，token 记 0。解析失败的响应里如果带了 `usage`，那些 token 不计入。
+
+`.agent status` 显示今天的发言人合计和会话合计。今日你是这个发言人在所有会话里的合计。今日会话是这个会话里所有发言人的合计。没有记录时两个合计都是 0。
+
+命令不调用模型，所以不增加这张表。`.agent reset` 不删这张表。两项每小时上限都是 0 时，模型请求仍然记入每日用量。
+
+密钥没读到、次数已经用完，或图片被拒绝时，还没有 Responses 请求，不记每日用量。
+
 ## 数据与部署
 
 这些表在插件自己的 SQLite 里，不在 `fujiang.db`。`store.db` 为 `data/fujiang.db` 时，默认实例的文件是 `data/plugin-data/agent/plugin.sqlite`。额外实例在 `share_data` 不是 true 时，目录名是 `agent__` 加上实例 id。
 
-`sessions.persona` 保存当前人设的名字。旧文件里没有这一列时，插件启动会补上，原来的行还在。`usage_events` 保存次数，列是 `session_key`、`user_id`、`ts`。
+`sessions.persona` 保存当前人设的名字。旧文件里没有这一列时，插件启动会补上，原来的行还在。`usage_events` 保存次数，列是 `session_key`、`user_id`、`ts`。`usage_daily` 保存每日用量，列是 `day`、`session_key`、`user_id`、`calls`、`in_tokens`、`out_tokens`。这张表不在 `fujiang.db`。
 
 换 fujiang 之前，先备份这个 sqlite 文件，以及旁边的 `-wal` 文件和 `-shm` 文件。备份范围和换二进制的步骤见 [分支管理手册](BRANCHING.md) 第 7 节。这次不改 `fujiang.db`。
 

@@ -29,7 +29,7 @@ const HELP: &str = "对话。@我、消息里带唤醒词（默认「福酱」�
 .agent reset        清空当前群或私聊的对话记录，人设保留\n\
 .agent persona      查看当前人设\n\
 .agent persona <名> 切换到配置里的人设\n\
-.agent status       当前人设，以及这一小时还剩几次\n\
+.agent status       当前人设、这一小时还剩几次，以及今日调用和 token\n\
 .agent tools        列出当前启用的工具\n\
 在配置里把 priority 设为 10，高于 fun。本插件接过的消息返回 Stop，fun 不会再处理同一条。\n\
 require_at 为 true 时，只认 @我或回复我，单独的唤醒词不算。";
@@ -178,6 +178,7 @@ impl AgentPlugin {
             return;
         };
         let key = session_key(msg.source);
+        let now = session::unix_now();
         // A missing key returns here and does not consume a slot.
         let client = match LlmClient::from_config(cfg, ctx.http.clone()) {
             Ok(client) => client,
@@ -186,55 +187,47 @@ impl AgentPlugin {
                 return;
             }
         };
-        let (messages, skipped) = match plan_chat(
-            &pool,
-            cfg,
-            &key,
-            msg.user_id(),
-            &user_text,
-            session::unix_now(),
-        )
-        .await
-        {
-            Ok(ChatPlan::Tip(tip)) => {
-                say(ctx, msg, tip).await;
-                return;
-            }
-            Ok(ChatPlan::Speak { mut messages }) => {
-                let medias = vision::message_images(msg);
-                match vision::image_plan(cfg.vision_enabled, medias.len()) {
-                    vision::ImagePlan::None => (messages, false),
-                    vision::ImagePlan::Skip => (messages, true),
-                    vision::ImagePlan::Load => {
-                        let mut images = Vec::with_capacity(medias.len());
-                        for media in &medias {
-                            let loaded = match ctx.fetch_media_bytes(media).await {
-                                Ok(bytes) => Ok(bytes),
-                                Err(err) => {
-                                    warn!(error = %err, "agent image");
-                                    Err(())
-                                }
-                            };
-                            match vision::loaded_part(cfg.max_image_bytes, loaded) {
-                                Ok(part) => images.push(part),
-                                Err(tip) => {
-                                    say(ctx, msg, tip).await;
-                                    return;
+        let (messages, skipped) =
+            match plan_chat(&pool, cfg, &key, msg.user_id(), &user_text, now).await {
+                Ok(ChatPlan::Tip(tip)) => {
+                    say(ctx, msg, tip).await;
+                    return;
+                }
+                Ok(ChatPlan::Speak { mut messages }) => {
+                    let medias = vision::message_images(msg);
+                    match vision::image_plan(cfg.vision_enabled, medias.len()) {
+                        vision::ImagePlan::None => (messages, false),
+                        vision::ImagePlan::Skip => (messages, true),
+                        vision::ImagePlan::Load => {
+                            let mut images = Vec::with_capacity(medias.len());
+                            for media in &medias {
+                                let loaded = match ctx.fetch_media_bytes(media).await {
+                                    Ok(bytes) => Ok(bytes),
+                                    Err(err) => {
+                                        warn!(error = %err, "agent image");
+                                        Err(())
+                                    }
+                                };
+                                match vision::loaded_part(cfg.max_image_bytes, loaded) {
+                                    Ok(part) => images.push(part),
+                                    Err(tip) => {
+                                        say(ctx, msg, tip).await;
+                                        return;
+                                    }
                                 }
                             }
+                            vision::give_images(&mut messages, images);
+                            (messages, false)
                         }
-                        vision::give_images(&mut messages, images);
-                        (messages, false)
                     }
                 }
-            }
-            Err(err) => {
-                warn!(error = %err, "agent chat");
-                say(ctx, msg, BUSY_REPLY).await;
-                return;
-            }
-        };
-        let reply = match tools::run_tool_loop(
+                Err(err) => {
+                    warn!(error = %err, "agent chat");
+                    say(ctx, msg, BUSY_REPLY).await;
+                    return;
+                }
+            };
+        let turn = tools::run_tool_loop(
             &client,
             &messages,
             &cfg.tools,
@@ -242,8 +235,21 @@ impl AgentPlugin {
             cfg.max_tool_rounds,
             ctx,
         )
+        .await;
+        if let Err(err) = session::record_daily(
+            &pool,
+            &key,
+            msg.user_id(),
+            now,
+            turn.calls,
+            turn.in_tokens,
+            turn.out_tokens,
+        )
         .await
         {
+            warn!(error = %err, "agent usage");
+        }
+        let reply = match turn.reply {
             Ok(tools::ToolReply::Text(text)) => text,
             Ok(tools::ToolReply::Degraded(text)) => {
                 if skipped {
@@ -381,7 +387,11 @@ async fn apply_command(
                 cfg.rate_limit.per_group_per_hour,
                 counts.session,
             );
-            Ok(format!("人设：{title}\n{quota}"))
+            let today = session::today_usage(pool, session_key, user_id, now).await?;
+            Ok(format!(
+                "人设：{title}\n{quota}\n{}",
+                today_sentence(today.user, today.session)
+            ))
         }
         AgentCmd::Tools => {
             let tools = log_enabled_tools(cfg);
@@ -454,6 +464,18 @@ fn seats_left(limit: u32, used: i64) -> Option<u32> {
     }
     let used = u32::try_from(used.max(0)).unwrap_or(u32::MAX);
     Some(limit.saturating_sub(used))
+}
+
+fn today_sentence(user: session::DayUsage, session: session::DayUsage) -> String {
+    format!(
+        "今日你 {uc} 次，输入 {ui}，输出 {uo}。今日会话 {sc} 次，输入 {si}，输出 {so}。",
+        uc = user.calls,
+        ui = user.in_tokens,
+        uo = user.out_tokens,
+        sc = session.calls,
+        si = session.in_tokens,
+        so = session.out_tokens,
+    )
 }
 
 fn quota_sentence(
@@ -748,7 +770,7 @@ mod tests {
         let status = run(&pool, &cfg, key, 5, &AgentCmd::Status, 1_000).await;
         assert_eq!(
             status,
-            "人设：strict\n你这一小时还剩 0 次，这个会话还剩 9 次。"
+            "人设：strict\n你这一小时还剩 0 次，这个会话还剩 9 次。\n今日你 0 次，输入 0，输出 0。今日会话 0 次，输入 0，输出 0。"
         );
 
         let blocked = plan_chat(&pool, &cfg, key, 5, "more", 1_001).await.unwrap();
@@ -790,7 +812,10 @@ mod tests {
         }
         assert_eq!(usage_rows(&pool).await, 2);
         let status = run(&pool, &open, "group:9", 9, &AgentCmd::Status, 3_010).await;
-        assert_eq!(status, "人设：default\n这一小时不限次数。");
+        assert_eq!(
+            status,
+            "人设：default\n这一小时不限次数。\n今日你 0 次，输入 0，输出 0。今日会话 0 次，输入 0，输出 0。"
+        );
 
         let user_open = cfg(0, 1);
         let spoke = plan_chat(&pool, &user_open, "group:3", 1, "a", 4_000)
@@ -804,7 +829,7 @@ mod tests {
         let status = run(&pool, &user_open, "group:3", 3, &AgentCmd::Status, 4_001).await;
         assert_eq!(
             status,
-            "人设：default\n你这一小时不限次数，这个会话还剩 0 次。"
+            "人设：default\n你这一小时不限次数，这个会话还剩 0 次。\n今日你 0 次，输入 0，输出 0。今日会话 0 次，输入 0，输出 0。"
         );
     }
 
@@ -845,6 +870,32 @@ mod tests {
                 .map(|m| m.content.as_str())
                 .collect::<Vec<_>>(),
             vec!["默认人设", "u2", "a2", "u3"]
+        );
+    }
+
+    #[tokio::test]
+    async fn status_shows_today_for_this_user_and_this_session() {
+        let pool = pool().await;
+        let cfg = cfg(0, 0);
+        let day = 86_400 * 10;
+        session::record_daily(&pool, "group:7", 5, day + 10, 1, 4, 2)
+            .await
+            .unwrap();
+        session::record_daily(&pool, "private:5", 5, day + 30, 1, 10, 1)
+            .await
+            .unwrap();
+        session::record_daily(&pool, "group:7", 8, day + 40, 1, 7, 8)
+            .await
+            .unwrap();
+        let status = run(&pool, &cfg, "group:7", 5, &AgentCmd::Status, day + 50).await;
+        assert_eq!(
+            status,
+            "人设：default\n这一小时不限次数。\n今日你 2 次，输入 14，输出 3。今日会话 2 次，输入 11，输出 10。"
+        );
+        let next = run(&pool, &cfg, "group:7", 5, &AgentCmd::Status, day + 86_400).await;
+        assert_eq!(
+            next,
+            "人设：default\n这一小时不限次数。\n今日你 0 次，输入 0，输出 0。今日会话 0 次，输入 0，输出 0。"
         );
     }
 

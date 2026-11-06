@@ -78,6 +78,14 @@ pub(crate) enum ToolReply {
     Degraded(&'static str),
 }
 
+#[derive(Debug)]
+pub(crate) struct ToolTurn {
+    pub reply: Result<ToolReply, LlmError>,
+    pub calls: i64,
+    pub in_tokens: i64,
+    pub out_tokens: i64,
+}
+
 #[async_trait]
 pub(crate) trait ToolHub: Send + Sync {
     async fn invoke(&self, service: &str, method: &str, args: Value) -> anyhow::Result<Value>;
@@ -215,10 +223,18 @@ pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
     builtins: BuiltinTools,
     max_rounds: u32,
     hub: &H,
-) -> Result<ToolReply, LlmError> {
+) -> ToolTurn {
     let tools = assemble_tools(configured, builtins);
     if tools.is_empty() {
-        return Ok(ToolReply::Text(client.complete(messages).await?));
+        return match client.complete(messages).await {
+            Ok(done) => tool_turn(
+                Ok(ToolReply::Text(done.text)),
+                1,
+                done.usage.input_tokens,
+                done.usage.output_tokens,
+            ),
+            Err(err) => tool_turn(Err(err), 1, 0, 0),
+        };
     }
     let defs: Vec<FunctionTool<'_>> = tools
         .iter()
@@ -230,24 +246,51 @@ pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
         .collect();
     let mut prior = Vec::new();
     let mut used = 0u32;
+    let mut calls = 0i64;
+    let mut in_tokens = 0i64;
+    let mut out_tokens = 0i64;
     loop {
-        match client.complete_with_tools(messages, &prior, &defs).await? {
-            ModelOutput::Text(text) => return Ok(ToolReply::Text(text)),
-            ModelOutput::Calls(calls) => {
+        let (output, usage) = match client.complete_with_tools(messages, &prior, &defs).await {
+            Ok(round) => round,
+            Err(err) => return tool_turn(Err(err), calls + 1, in_tokens, out_tokens),
+        };
+        calls += 1;
+        in_tokens += usage.input_tokens;
+        out_tokens += usage.output_tokens;
+        match output {
+            ModelOutput::Text(text) => {
+                return tool_turn(Ok(ToolReply::Text(text)), calls, in_tokens, out_tokens);
+            }
+            ModelOutput::Calls(found) => {
                 if used >= max_rounds {
                     warn!(max_tool_rounds = max_rounds, "agent tool round cap");
-                    return Ok(ToolReply::Degraded(TOOL_CAP_REPLY));
+                    return tool_turn(
+                        Ok(ToolReply::Degraded(TOOL_CAP_REPLY)),
+                        calls,
+                        in_tokens,
+                        out_tokens,
+                    );
                 }
-                for call in calls {
+                for call in found {
                     let Some(spec) = tools.iter().find(|spec| spec.wire_name == call.name) else {
                         warn!(tool = %call.name, "agent tool unknown");
-                        return Ok(ToolReply::Degraded(TOOL_FAIL_REPLY));
+                        return tool_turn(
+                            Ok(ToolReply::Degraded(TOOL_FAIL_REPLY)),
+                            calls,
+                            in_tokens,
+                            out_tokens,
+                        );
                     };
                     let args = match parse_arguments(&call.arguments) {
                         Ok(value) => value,
                         Err(err) => {
                             warn!(error = %err, tool = spec.name(), "agent tool arguments");
-                            return Ok(ToolReply::Degraded(TOOL_FAIL_REPLY));
+                            return tool_turn(
+                                Ok(ToolReply::Degraded(TOOL_FAIL_REPLY)),
+                                calls,
+                                in_tokens,
+                                out_tokens,
+                            );
                         }
                     };
                     let value = match hub.invoke(spec.service(), spec.method(), args).await {
@@ -260,7 +303,12 @@ pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
                                 method = spec.method(),
                                 "agent tool"
                             );
-                            return Ok(ToolReply::Degraded(TOOL_FAIL_REPLY));
+                            return tool_turn(
+                                Ok(ToolReply::Degraded(TOOL_FAIL_REPLY)),
+                                calls,
+                                in_tokens,
+                                out_tokens,
+                            );
                         }
                     };
                     let output = serde_json::to_string(&value).unwrap_or_else(|_| "null".into());
@@ -274,6 +322,20 @@ pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
                 used = used.saturating_add(1);
             }
         }
+    }
+}
+
+fn tool_turn(
+    reply: Result<ToolReply, LlmError>,
+    calls: i64,
+    in_tokens: i64,
+    out_tokens: i64,
+) -> ToolTurn {
+    ToolTurn {
+        reply,
+        calls,
+        in_tokens,
+        out_tokens,
     }
 }
 
