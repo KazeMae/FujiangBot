@@ -27,6 +27,7 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 | `.agent persona` | 显示当前人设和它的系统提示 |
 | `.agent persona <名>` | 换成这个人设。名字是一个词，区分大小写，并且必须写在配置里 |
 | `.agent status` | 显示当前人设，以及过去 3600 秒里还剩几次 |
+| `.agent tools` | 列出当前启用的工具。每行是逻辑名和说明。不调用模型，也不计入每小时次数 |
 
 不认识的子命令会告诉发话人怎么看说明，然后返回 Stop。
 
@@ -50,6 +51,7 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 | `enable_rank_tools` | `true` | 为 false 时，请求不带 `rank_list` 和 `rank_get`。缺省或类型不对时仍是 true |
 | `enable_contest_tools` | `true` | 为 false 时，请求不带 `contest_upcoming` 和 `contest_today`。缺省或类型不对时仍是 true |
 | `enable_problem_tools` | `true` | 为 false 时，请求不带 `problem_today`。缺省或类型不对时仍是 true |
+| `inject_tool_list` | `false` | 为 true 时，把当前启用工具的短清单追加到系统提示。缺省或类型不对时是 false |
 | `tools` | `[]` | 额外工具。每项有 `name`、`description`、`parameters`。和已启用内置工具的函数名相同时，这一项不发出去 |
 | `system_prompt` | `你是福酱，西南科技大学 ACM 群助手。` | `default` 人设的系统提示 |
 | `wake_words` | `["福酱"]` | 唤醒词。空数组表示没有唤醒词 |
@@ -109,6 +111,12 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 `[[plugins.configs.agent.tools]]` 可以再追加别的 `服务.方法`。配置项的函数名和某个已启用内置工具相同，就留下内置的那一项。这个内置工具的开关为 false 时，同名配置项会发出去。
 
 组装之后如果一个工具都没有，请求不带 `tools` 字段，插件只调用一次 `LlmClient::complete`。有工具就走工具循环。一轮发言里的执行次数不超过 `max_tool_rounds`。
+
+`.agent tools` 打印这一次会带上的工具。顺序和请求一致。内置工具在前，后面是配置追加的工具。每一行先写逻辑名，再写说明。逻辑名是 `服务.方法`，例如 `rank.list`。说明跟在全角冒号后面。请求里的函数名仍把点换成下划线，所以 `rank.list` 发出去是 `rank_list`。这条命令不调用模型。一个工具都没有时，回复「当前没有可用工具。」说明为空时，这一行只有逻辑名。
+
+`inject_tool_list` 为 true 时，插件把同一段文字追加到当次人设的系统提示后面。人设和清单之间空一行。清单以「可用工具：」起头。没有启用工具时不追加。为 false 时，系统提示保持人设原文。模型请求里的 `tools` 字段两种情况下都照旧发送。
+
+插件在 `on_start` 打一条 `info` 日志。字段 `tools` 是当时的逻辑名列表。有人发送 `.agent tools` 时再打一条。管理页不单独展示这份清单。配置改完后，下一次 `.agent tools` 用的是新配置。启动时的那条日志要等重启才更新。
 
 次数到顶而模型还要调用工具时，用户看到「要查的步骤太多了，我先停在这里。」工具名不在这一轮的列表里、参数不是 JSON，或 ServiceHub 返回错误时，用户看到「我没查成，过一会儿再问我一次。」插件不退出。到顶和调用失败都会打 `tracing::warn!`。
 
