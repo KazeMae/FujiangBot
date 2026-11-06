@@ -46,6 +46,16 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/api/plugins/instances/drop", post(drop_instance))
         .route("/api/agent/usage", get(crate::admin_agent::get_usage))
         .route("/api/agent/personas", get(crate::admin_agent::get_personas))
+        .route(
+            "/api/agent/memories",
+            get(crate::admin_memory::get_memories)
+                .put(crate::admin_memory::put_memory)
+                .delete(crate::admin_memory::delete_memory),
+        )
+        .route(
+            "/api/agent/memories/one",
+            get(crate::admin_memory::get_memory),
+        )
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
     Router::new()
         .route("/", get(index))

@@ -503,6 +503,10 @@ fujiang-core = { path = "../../fujiang-core" }
 | `POST` | `/api/plugins/{name}/disable` | 停用（dispose，动态库保留） |
 | `GET` | `/api/agent/usage?day=YYYY-MM-DD` | 只读 agent 用量。`day` 缺省为今天（UTC）。`day_id` 是 unix 秒对 86400 做 Euclidean 除法。JSON：`totals`、`by_user`、`by_session`（各最多 20 行，按 calls 降序）。读 `{store.data_dir}/plugin-data/agent/plugin.sqlite` 的 `usage_daily`。文件不在或没有这张表时 200 且全 0，不创建文件 |
 | `GET` | `/api/agent/personas` | 读内存里的 `plugins.configs.agent`。JSON：`system_prompt` 与 `personas`（`name`、`system_prompt`） |
+| `GET` | `/api/agent/memories?scope_kind=&scope_id=&limit=` | 只读列出 `layered_memories`。`scope_kind` 可选 `account` / `group` / `user`，空或省略为全部。`scope_id` 省略则不按 id 过滤；传入则精确匹配（account 只能是空串，非空为 400）。`limit` 缺省 100，范围 1–200。按 `scope_kind`、`scope_id`、`key` 升序。JSON：`rows`（`scope_kind`、`scope_id`、`key`、`value`、`updated_at`、`source`）。读 `{store.data_dir}/plugin-data/agent/plugin.sqlite`。文件不在或没有这张表时 200 且 `rows` 为空，不创建文件 |
+| `GET` | `/api/agent/memories/one?scope_kind=&scope_id=&key=` | 读一条。三个参数都要有；account 的 `scope_id` 为空串。没有这条、文件不在或没有表时 404 `{ "error": "没有这条记忆" }`，不创建文件 |
+| `PUT` | `/api/agent/memories` | 写入或覆盖一条。body：`scope_kind`、`scope_id`、`key`、`value`，可选 `source`。运维口，可写任意用户或群，不走 agent 工具的宿主注入。`key` 1–64 字，`value` 1–500 字（按 Unicode 字）。不传 `source` 时更新保留原值、新插入为 null；`source` 为 null 或空串则清空（最长 200 字）。只在写入时读写打开；没有表时只 `CREATE TABLE IF NOT EXISTS layered_memories`，不改其它表。返回写入后的那一行 |
+| `DELETE` | `/api/agent/memories` | 删除一条。查询参数或 JSON body：`scope_kind`、`scope_id`、`key`；body 里出现的字段盖过查询。JSON：`deleted`。文件或表不在时 200 且 `deleted` 为 0，不创建文件 |
 
 `GET /api/plugins` 形状（节选）：
 

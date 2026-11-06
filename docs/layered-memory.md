@@ -71,8 +71,8 @@
 ## 切片
 
 1. **T0**：schema + 工具 + 宿主注入发言者 QQ；群/私聊单测；覆盖率 ≥80%。
-2. **T1（本波）**：`usage_count` / `last_used_at`；get 和 list 返回的键各记一次使用；`memory.consolidate` 按 `memory_max_unused_days`（默认 90）和 `memory_max_entries_per_scope`（默认 200）删除。`memory_consolidate_on_start` 默认 false，为 true 时 `on_start` 整理库里每一层一次。不调第二个模型，不用 git workspace。
-3. **T2**：管理页只读浏览三层记忆。
+2. **T1**：`usage_count` / `last_used_at`；`memory.consolidate` 按未使用天数与每层上限修剪；`memory_consolidate_on_start` 默认 false。不调第二模型，不用 git workspace。
+3. **T2（本波）**：管理页浏览并编辑三层记忆（运维口，可写任意 scope；agent 工具仍注入发言者 QQ）。
 
 ## 明确不做
 

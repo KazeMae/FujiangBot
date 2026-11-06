@@ -60,7 +60,10 @@
     #banner { min-height: 1.4em; font-size: 13px; }
     #banner.ok { color: var(--ok); }
     #banner.err { color: var(--accent); }
-    #agent-usage { font-size: 13px; margin: 0 0 12px; }
+    #agent-usage, #mem-list { font-size: 13px; margin: 0 0 12px; }
+    .mem { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 8px; flex-wrap: wrap; }
+    .mem .who { flex: 1 1 200px; min-width: 0; }
+    .mem textarea { flex: 2 1 180px; min-height: 40px; }
     #login {
       display: none; position: fixed; inset: 0; background: rgba(42, 33, 24, 0.45);
       align-items: center; justify-content: center; z-index: 10;
@@ -218,6 +221,21 @@
         <button class="ghost" type="button" id="agent-add">加人设</button>
         <button class="primary" type="button" id="agent-save">保存人设</button>
       </div>
+    </section>
+    <section>
+      <h2>分层记忆</h2>
+      <p class="hint">按层查看 agent 库里的记忆，可改 value 或删除。保存不改 source。可写任意用户或群。文件不在时列表为空，不会新建库。</p>
+      <div class="row" style="margin-bottom:12px">
+        <select id="mem-kind">
+          <option value="">全部</option>
+          <option value="account">account</option>
+          <option value="group">group</option>
+          <option value="user">user</option>
+        </select>
+        <input id="mem-id" placeholder="scope_id，空则不按 id 过滤" />
+        <button class="ghost" type="button" id="mem-load">查询</button>
+      </div>
+      <div id="mem-list">记忆加载中…</div>
     </section>
     <section>
       <h2>管理页</h2>
@@ -526,6 +544,94 @@
       renderPersonas(personas);
     }
 
+    function memoryParams() {
+      const q = new URLSearchParams();
+      const kind = el("mem-kind").value;
+      const id = el("mem-id").value.trim();
+      if (kind) q.set("scope_kind", kind);
+      if (id) q.set("scope_id", id);
+      q.set("limit", "100");
+      return q;
+    }
+
+    function renderMemories(rows) {
+      const root = el("mem-list");
+      root.replaceChildren();
+      if (!rows.length) {
+        const hint = document.createElement("div");
+        hint.className = "hint";
+        hint.textContent = "无";
+        root.append(hint);
+        return;
+      }
+      rows.forEach((row) => {
+        const box = document.createElement("div");
+        box.className = "mem";
+        const who = document.createElement("div");
+        who.className = "who";
+        const title = document.createElement("div");
+        const idText = row.scope_id ? row.scope_id : "—";
+        title.textContent = row.scope_kind + " / " + idText + " / " + row.key;
+        const meta = document.createElement("div");
+        meta.className = "hint";
+        meta.textContent = (row.source || "无 source") + " · " + row.updated_at;
+        who.append(title, meta);
+        const value = document.createElement("textarea");
+        value.value = row.value || "";
+        const save = document.createElement("button");
+        save.className = "ghost";
+        save.type = "button";
+        save.textContent = "保存";
+        save.onclick = () => saveMemory(row, value.value);
+        const del = document.createElement("button");
+        del.className = "ghost";
+        del.type = "button";
+        del.textContent = "删除";
+        del.onclick = () => deleteMemory(row);
+        box.append(who, value, save, del);
+        root.append(box);
+      });
+    }
+
+    async function loadMemories() {
+      const data = await api("/api/agent/memories?" + memoryParams().toString());
+      renderMemories(data.rows || []);
+    }
+
+    async function saveMemory(row, value) {
+      try {
+        await api("/api/agent/memories", {
+          method: "PUT",
+          body: JSON.stringify({
+            scope_kind: row.scope_kind,
+            scope_id: row.scope_id,
+            key: row.key,
+            value,
+          }),
+        });
+        banner("已保存记忆 " + row.key, "ok");
+        await loadMemories();
+      } catch (e) {
+        banner(e.message, "err");
+      }
+    }
+
+    async function deleteMemory(row) {
+      if (!window.confirm("删除这条记忆？")) return;
+      try {
+        const q = new URLSearchParams({
+          scope_kind: row.scope_kind,
+          scope_id: row.scope_id,
+          key: row.key,
+        });
+        await api("/api/agent/memories?" + q.toString(), { method: "DELETE" });
+        banner("已删除记忆 " + row.key, "ok");
+        await loadMemories();
+      } catch (e) {
+        banner(e.message, "err");
+      }
+    }
+
     async function saveAgentPersonas() {
       const plugins = await api("/api/plugins");
       const entry = (plugins.entries || []).find((e) => e.name === "agent" && e.primary);
@@ -563,6 +669,7 @@
       renderStatus(view);
       await refreshDyn();
       await loadAgent();
+      await loadMemories();
       banner("已加载。密钥框里的 ******** 或空白表示不修改。", "ok");
     }
 
@@ -582,6 +689,7 @@
     el("save").onclick = () => save().catch((e) => banner(e.message, "err"));
     el("agent-add").onclick = () => addPersonaRow("", "");
     el("agent-save").onclick = () => saveAgentPersonas().catch((e) => banner(e.message, "err"));
+    el("mem-load").onclick = () => loadMemories().catch((e) => banner(e.message, "err"));
     el("dyn-load").onclick = () => dynAct("/api/plugins/load", { path: el("dyn-path").value.trim() });
     el("dyn-scan").onclick = () => dynAct("/api/plugins/scan", {});
     el("login-go").onclick = () => {
