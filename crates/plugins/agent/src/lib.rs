@@ -7,6 +7,10 @@ mod tools;
 mod trigger;
 mod vision;
 
+#[cfg(test)]
+#[path = "guard_tests.rs"]
+mod guard_tests;
+
 pub use client::{ChatMessage, LlmClient, LlmError, Role};
 pub use config::{AgentConfig, RateLimit};
 pub use tools::ToolSpec;
@@ -36,6 +40,7 @@ require_at 为 true 时，只认 @我或回复我，单独的唤醒词不算。"
 
 const USER_LIMIT_TIP: &str = "你这一小时里找福酱的次数到了，歇一会儿再来。";
 const SESSION_LIMIT_TIP: &str = "这个会话这一小时的次数到了，歇一会儿再来。";
+const BLACKLIST_TIP: &str = "这句话我不能接，换个说法再问我。";
 
 enum AgentCmd {
     Help,
@@ -50,6 +55,7 @@ enum AgentCmd {
 enum ChatPlan {
     Speak { messages: Vec<ChatMessage> },
     Tip(&'static str),
+    MissingKey,
 }
 
 pub struct AgentPlugin {
@@ -179,54 +185,64 @@ impl AgentPlugin {
         };
         let key = session_key(msg.source);
         let now = session::unix_now();
-        // A missing key returns here and does not consume a slot.
-        let client = match LlmClient::from_config(cfg, ctx.http.clone()) {
-            Ok(client) => client,
-            Err(err) => {
+        let prepared = LlmClient::from_config(cfg, ctx.http.clone());
+        let plan = plan_chat(
+            &pool,
+            cfg,
+            &key,
+            msg.user_id(),
+            &user_text,
+            now,
+            prepared.is_ok(),
+        )
+        .await;
+        let (client, messages, skipped) = match (prepared, plan) {
+            (_, Ok(ChatPlan::Tip(tip))) => {
+                say(ctx, msg, tip).await;
+                return;
+            }
+            (Err(err), Ok(ChatPlan::MissingKey)) => {
                 say(ctx, msg, llm_reply(&err)).await;
                 return;
             }
-        };
-        let (messages, skipped) =
-            match plan_chat(&pool, cfg, &key, msg.user_id(), &user_text, now).await {
-                Ok(ChatPlan::Tip(tip)) => {
-                    say(ctx, msg, tip).await;
-                    return;
-                }
-                Ok(ChatPlan::Speak { mut messages }) => {
-                    let medias = vision::message_images(msg);
-                    match vision::image_plan(cfg.vision_enabled, medias.len()) {
-                        vision::ImagePlan::None => (messages, false),
-                        vision::ImagePlan::Skip => (messages, true),
-                        vision::ImagePlan::Load => {
-                            let mut images = Vec::with_capacity(medias.len());
-                            for media in &medias {
-                                let loaded = match ctx.fetch_media_bytes(media).await {
-                                    Ok(bytes) => Ok(bytes),
-                                    Err(err) => {
-                                        warn!(error = %err, "agent image");
-                                        Err(())
-                                    }
-                                };
-                                match vision::loaded_part(cfg.max_image_bytes, loaded) {
-                                    Ok(part) => images.push(part),
-                                    Err(tip) => {
-                                        say(ctx, msg, tip).await;
-                                        return;
-                                    }
+            (Ok(client), Ok(ChatPlan::Speak { mut messages })) => {
+                let medias = vision::message_images(msg);
+                match vision::image_plan(cfg.vision_enabled, medias.len()) {
+                    vision::ImagePlan::None => (client, messages, false),
+                    vision::ImagePlan::Skip => (client, messages, true),
+                    vision::ImagePlan::Load => {
+                        let mut images = Vec::with_capacity(medias.len());
+                        for media in &medias {
+                            let loaded = match ctx.fetch_media_bytes(media).await {
+                                Ok(bytes) => Ok(bytes),
+                                Err(err) => {
+                                    warn!(error = %err, "agent image");
+                                    Err(())
+                                }
+                            };
+                            match vision::loaded_part(cfg.max_image_bytes, loaded) {
+                                Ok(part) => images.push(part),
+                                Err(tip) => {
+                                    say(ctx, msg, tip).await;
+                                    return;
                                 }
                             }
-                            vision::give_images(&mut messages, images);
-                            (messages, false)
                         }
+                        vision::give_images(&mut messages, images);
+                        (client, messages, false)
                     }
                 }
-                Err(err) => {
-                    warn!(error = %err, "agent chat");
-                    say(ctx, msg, BUSY_REPLY).await;
-                    return;
-                }
-            };
+            }
+            (_, Err(err)) => {
+                warn!(error = %err, "agent chat");
+                say(ctx, msg, BUSY_REPLY).await;
+                return;
+            }
+            _ => {
+                say(ctx, msg, BUSY_REPLY).await;
+                return;
+            }
+        };
         let scope = tools::MemoCallScope::from_source(msg.source, msg.user_id());
         let pass = tools::ToolPass {
             max_rounds: cfg.max_tool_rounds,
@@ -430,12 +446,19 @@ async fn plan_chat(
     user_id: i64,
     user_text: &str,
     now: i64,
+    key_ready: bool,
 ) -> anyhow::Result<ChatPlan> {
-    let stored = session::persona_of(pool, session_key).await?;
-    let (_, persona) = cfg.resolve_persona(stored.as_deref());
-    let enabled = tools::assemble_tools(&cfg.tools, enabled_builtins(cfg));
-    let prompt = tools::instructions_with_catalog(persona, &enabled, cfg.inject_tool_list);
-    let history = session::recent_turns(pool, session_key, cfg.max_history_turns).await?;
+    if cfg.keyword_hit(user_text) {
+        return Ok(ChatPlan::Tip(BLACKLIST_TIP));
+    }
+    if !key_ready {
+        return Ok(ChatPlan::MissingKey);
+    }
+    if cfg.is_admin(user_id) {
+        let messages = turn_messages(pool, cfg, session_key, user_text).await?;
+        return Ok(ChatPlan::Speak { messages });
+    }
+    let messages = turn_messages(pool, cfg, session_key, user_text).await?;
     let slot = session::take_slot(
         pool,
         session_key,
@@ -446,12 +469,24 @@ async fn plan_chat(
     )
     .await?;
     Ok(match slot {
-        session::Slot::Taken => ChatPlan::Speak {
-            messages: build_messages(&prompt, history, user_text.to_string()),
-        },
+        session::Slot::Taken => ChatPlan::Speak { messages },
         session::Slot::UserLimited => ChatPlan::Tip(USER_LIMIT_TIP),
         session::Slot::SessionLimited => ChatPlan::Tip(SESSION_LIMIT_TIP),
     })
+}
+
+async fn turn_messages(
+    pool: &SqlitePool,
+    cfg: &AgentConfig,
+    session_key: &str,
+    user_text: &str,
+) -> anyhow::Result<Vec<ChatMessage>> {
+    let stored = session::persona_of(pool, session_key).await?;
+    let (_, persona) = cfg.resolve_persona(stored.as_deref());
+    let enabled = tools::assemble_tools(&cfg.tools, enabled_builtins(cfg));
+    let prompt = tools::instructions_with_catalog(persona, &enabled, cfg.inject_tool_list);
+    let history = session::recent_turns(pool, session_key, cfg.max_history_turns).await?;
+    Ok(build_messages(&prompt, history, user_text.to_string()))
 }
 
 fn persona_line<'a>(cfg: &'a AgentConfig, stored: Option<&str>) -> (String, &'a str) {
@@ -711,7 +746,9 @@ mod tests {
         assert_eq!(text, "可用工具：\nmemo.list：列出备忘");
         assert!(!text.contains("memo_list"));
 
-        let quiet = plan_chat(&pool, &listed, &key, 1, "hi", 3).await.unwrap();
+        let quiet = plan_chat(&pool, &listed, &key, 1, "hi", 3, true)
+            .await
+            .unwrap();
         let ChatPlan::Speak { messages } = quiet else {
             panic!("expected a chat");
         };
@@ -731,7 +768,9 @@ mod tests {
                 "parameters": {"type": "object", "properties": {}}
             }]
         }));
-        let plan = plan_chat(&pool, &loud, &key, 1, "hi", 4).await.unwrap();
+        let plan = plan_chat(&pool, &loud, &key, 1, "hi", 4, true)
+            .await
+            .unwrap();
         let ChatPlan::Speak { messages } = plan else {
             panic!("expected a chat");
         };
@@ -781,7 +820,9 @@ mod tests {
         save_exchange(&pool, key, 5, "u1", "a1").await.unwrap();
         save_exchange(&pool, key, 5, "u2", "a2").await.unwrap();
 
-        let plan = plan_chat(&pool, &cfg, key, 5, "u3", 1_000).await.unwrap();
+        let plan = plan_chat(&pool, &cfg, key, 5, "u3", 1_000, true)
+            .await
+            .unwrap();
         let ChatPlan::Speak { messages } = plan else {
             panic!("expected a chat");
         };
@@ -797,11 +838,13 @@ mod tests {
             "人设：strict\n你这一小时还剩 0 次，这个会话还剩 9 次。\n今日你 0 次，输入 0，输出 0。今日会话 0 次，输入 0，输出 0。"
         );
 
-        let blocked = plan_chat(&pool, &cfg, key, 5, "more", 1_001).await.unwrap();
+        let blocked = plan_chat(&pool, &cfg, key, 5, "more", 1_001, true)
+            .await
+            .unwrap();
         assert!(matches!(blocked, ChatPlan::Tip(tip) if tip == USER_LIMIT_TIP));
         assert_eq!(usage_rows(&pool).await, 1);
 
-        let other = plan_chat(&pool, &cfg, "group:8", 5, "elsewhere", 1_002)
+        let other = plan_chat(&pool, &cfg, "group:8", 5, "elsewhere", 1_002, true)
             .await
             .unwrap();
         assert!(matches!(other, ChatPlan::Tip(tip) if tip == USER_LIMIT_TIP));
@@ -812,16 +855,16 @@ mod tests {
     async fn session_cap_blocks_other_users_and_a_zero_cap_stays_open() {
         let pool = pool().await;
         let capped = cfg(5, 1);
-        let first = plan_chat(&pool, &capped, "group:1", 1, "a", 2_000)
+        let first = plan_chat(&pool, &capped, "group:1", 1, "a", 2_000, true)
             .await
             .unwrap();
         assert!(matches!(first, ChatPlan::Speak { .. }));
-        let second = plan_chat(&pool, &capped, "group:1", 2, "b", 2_001)
+        let second = plan_chat(&pool, &capped, "group:1", 2, "b", 2_001, true)
             .await
             .unwrap();
         assert!(matches!(second, ChatPlan::Tip(tip) if tip == SESSION_LIMIT_TIP));
         assert_eq!(usage_rows(&pool).await, 1);
-        let elsewhere = plan_chat(&pool, &capped, "private:2", 2, "c", 2_002)
+        let elsewhere = plan_chat(&pool, &capped, "private:2", 2, "c", 2_002, true)
             .await
             .unwrap();
         assert!(matches!(elsewhere, ChatPlan::Speak { .. }));
@@ -829,7 +872,7 @@ mod tests {
 
         let open = cfg(0, 0);
         for n in 0..3 {
-            let plan = plan_chat(&pool, &open, "group:9", 9, "z", 3_000 + n)
+            let plan = plan_chat(&pool, &open, "group:9", 9, "z", 3_000 + n, true)
                 .await
                 .unwrap();
             assert!(matches!(plan, ChatPlan::Speak { .. }));
@@ -842,11 +885,11 @@ mod tests {
         );
 
         let user_open = cfg(0, 1);
-        let spoke = plan_chat(&pool, &user_open, "group:3", 1, "a", 4_000)
+        let spoke = plan_chat(&pool, &user_open, "group:3", 1, "a", 4_000, true)
             .await
             .unwrap();
         assert!(matches!(spoke, ChatPlan::Speak { .. }));
-        let full = plan_chat(&pool, &user_open, "group:3", 2, "b", 4_001)
+        let full = plan_chat(&pool, &user_open, "group:3", 2, "b", 4_001, true)
             .await
             .unwrap();
         assert!(matches!(full, ChatPlan::Tip(tip) if tip == SESSION_LIMIT_TIP));
@@ -862,14 +905,22 @@ mod tests {
         let pool = pool().await;
         let cfg = cfg(1, 10);
         let key = "group:1";
-        let spoke = plan_chat(&pool, &cfg, key, 4, "a", 10_000).await.unwrap();
+        let spoke = plan_chat(&pool, &cfg, key, 4, "a", 10_000, true)
+            .await
+            .unwrap();
         assert!(matches!(spoke, ChatPlan::Speak { .. }));
-        let inside = plan_chat(&pool, &cfg, key, 4, "b", 13_599).await.unwrap();
+        let inside = plan_chat(&pool, &cfg, key, 4, "b", 13_599, true)
+            .await
+            .unwrap();
         assert!(matches!(inside, ChatPlan::Tip(tip) if tip == USER_LIMIT_TIP));
-        let later = plan_chat(&pool, &cfg, key, 4, "c", 13_600).await.unwrap();
+        let later = plan_chat(&pool, &cfg, key, 4, "c", 13_600, true)
+            .await
+            .unwrap();
         assert!(matches!(later, ChatPlan::Speak { .. }));
         assert_eq!(usage_rows(&pool).await, 1);
-        let again = plan_chat(&pool, &cfg, key, 4, "d", 13_601).await.unwrap();
+        let again = plan_chat(&pool, &cfg, key, 4, "d", 13_601, true)
+            .await
+            .unwrap();
         assert!(matches!(again, ChatPlan::Tip(tip) if tip == USER_LIMIT_TIP));
     }
 
@@ -884,7 +935,7 @@ mod tests {
         let key = "private:3";
         save_exchange(&pool, key, 3, "u1", "a1").await.unwrap();
         save_exchange(&pool, key, 3, "u2", "a2").await.unwrap();
-        let plan = plan_chat(&pool, &cfg, key, 3, "u3", 5).await.unwrap();
+        let plan = plan_chat(&pool, &cfg, key, 3, "u3", 5, true).await.unwrap();
         let ChatPlan::Speak { messages } = plan else {
             panic!("expected a chat");
         };
