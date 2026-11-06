@@ -14,10 +14,27 @@ pub enum Role {
     Assistant,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImagePart {
+    data_url: String,
+}
+
+impl ImagePart {
+    pub(crate) fn new(data_url: String) -> Self {
+        Self { data_url }
+    }
+
+    pub(crate) fn data_url(&self) -> &str {
+        &self.data_url
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,
+    #[serde(skip)]
+    pub(crate) images: Vec<ImagePart>,
 }
 
 #[derive(Debug, Error)]
@@ -173,6 +190,10 @@ enum InputItem<'a> {
         role: &'a str,
         content: &'a str,
     },
+    UserParts {
+        role: &'a str,
+        content: Vec<ContentPart<'a>>,
+    },
     FunctionCall {
         #[serde(rename = "type")]
         kind: &'static str,
@@ -185,6 +206,21 @@ enum InputItem<'a> {
         kind: &'static str,
         call_id: &'a str,
         output: &'a str,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ContentPart<'a> {
+    Text {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        text: &'a str,
+    },
+    Image {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        image_url: &'a str,
     },
 }
 
@@ -217,6 +253,10 @@ fn responses_request<'a>(
                 }
                 instructions.push_str(&message.content);
             }
+            Role::User if !message.images.is_empty() => input.push(InputItem::UserParts {
+                role: "user",
+                content: user_parts(message),
+            }),
             Role::User => input.push(InputItem::Message {
                 role: "user",
                 content: &message.content,
@@ -261,6 +301,21 @@ fn responses_request<'a>(
         stream: false,
         tools,
     }
+}
+
+fn user_parts(message: &ChatMessage) -> Vec<ContentPart<'_>> {
+    let mut parts = Vec::with_capacity(message.images.len() + 1);
+    parts.push(ContentPart::Text {
+        kind: "input_text",
+        text: &message.content,
+    });
+    for image in &message.images {
+        parts.push(ContentPart::Image {
+            kind: "input_image",
+            image_url: image.data_url(),
+        });
+    }
+    parts
 }
 
 fn map_reqwest(err: reqwest::Error) -> LlmError {
@@ -483,22 +538,27 @@ mod tests {
                 ChatMessage {
                     role: Role::System,
                     content: "be brief".into(),
+                    images: Vec::new(),
                 },
                 ChatMessage {
                     role: Role::System,
                     content: String::new(),
+                    images: Vec::new(),
                 },
                 ChatMessage {
                     role: Role::System,
                     content: "stay kind".into(),
+                    images: Vec::new(),
                 },
                 ChatMessage {
                     role: Role::User,
                     content: "hi".into(),
+                    images: Vec::new(),
                 },
                 ChatMessage {
                     role: Role::Assistant,
                     content: "hello".into(),
+                    images: Vec::new(),
                 },
             ])
             .await
@@ -528,6 +588,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn image_turn_posts_input_image_and_returns_the_description() {
+        let bytes = b"\xff\xd8\xff\x00";
+        let part = crate::vision::image_part(bytes, 1024).expect("jpeg");
+        let rec = Rec::default();
+        let app = Router::new()
+            .route("/responses", post(describe_when_image))
+            .with_state(rec.clone());
+        let base = spawn_app(app).await;
+        let client = test_client(&base, 60);
+        let mut messages = vec![
+            ChatMessage {
+                role: Role::System,
+                content: "be brief".into(),
+                images: Vec::new(),
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "之前".into(),
+                images: Vec::new(),
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "嗯".into(),
+                images: Vec::new(),
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "看这张".into(),
+                images: Vec::new(),
+            },
+        ];
+        crate::vision::give_images(&mut messages, vec![part.clone()]);
+        let text = client.complete(&messages).await.unwrap();
+        assert_eq!(text, "图里是一只猫");
+        let seen = rec.0.lock().unwrap().take().expect("request recorded");
+        assert_eq!(seen.body["instructions"], "be brief");
+        assert_eq!(seen.body["input"][0]["content"], "之前");
+        assert_eq!(seen.body["input"][1]["content"], "嗯");
+        let parts = seen.body["input"][2]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[0]["text"], "看这张");
+        assert_eq!(parts[1]["type"], "input_image");
+        assert_eq!(parts[1]["image_url"], part.data_url());
+        assert!(parts[1]["image_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/jpeg;base64,"));
+        assert!(parts[1].get("detail").is_none());
+        assert!(parts[1].get("file_id").is_none());
+        assert_eq!(parts.len(), 2);
+        assert!(messages[1].images.is_empty());
+    }
+
+    #[tokio::test]
     async fn timeout_when_handler_sleeps() {
         let app = Router::new().route("/responses", post(slow));
         let base = spawn_app(app).await;
@@ -537,6 +651,7 @@ mod tests {
             client.complete(&[ChatMessage {
                 role: Role::User,
                 content: "hi".into(),
+                images: Vec::new(),
             }]),
         )
         .await
@@ -618,6 +733,7 @@ mod tests {
             .complete(&[ChatMessage {
                 role: Role::User,
                 content: "hi".into(),
+                images: Vec::new(),
             }])
             .await
             .unwrap();
@@ -631,6 +747,7 @@ mod tests {
             .complete(&[ChatMessage {
                 role: Role::User,
                 content: "hi".into(),
+                images: Vec::new(),
             }])
             .await
             .unwrap_err()
@@ -692,6 +809,39 @@ mod tests {
             body,
         };
         *rec.0.lock().unwrap() = Some(seen);
+    }
+
+    async fn describe_when_image(
+        State(rec): State<Rec>,
+        uri: axum::http::Uri,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        let seen = body["input"].as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item["content"].as_array().is_some_and(|parts| {
+                    parts.iter().any(|part| {
+                        part["type"] == "input_image"
+                            && part["image_url"]
+                                .as_str()
+                                .is_some_and(|url| url.starts_with("data:image/"))
+                    })
+                })
+            })
+        });
+        remember(&rec, &uri, &headers, body);
+        let text = if seen {
+            "图里是一只猫"
+        } else {
+            "没有图"
+        };
+        Json(json!({
+            "output_text": text,
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": text}]
+            }]
+        }))
     }
 
     async fn record_responses(

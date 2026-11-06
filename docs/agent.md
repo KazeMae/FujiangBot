@@ -53,6 +53,8 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 | `system_prompt` | `你是福酱，西南科技大学 ACM 群助手。` | `default` 人设的系统提示 |
 | `wake_words` | `["福酱"]` | 唤醒词。空数组表示没有唤醒词 |
 | `require_at` | `false` | 为 true 时，唤醒词不算叫到 |
+| `vision_enabled` | `false` | 为 true 时，把当前消息里的图片发给模型。缺省或类型不对时是 false |
+| `max_image_bytes` | `5242880` | 单张图片的字节上限。超过这个数就回复一句中文，不调用模型。缺省、`0` 或类型不对时是 5242880 |
 | `rate_limit.per_user_per_hour` | `30` | 每个发言人在过去 3600 秒内的次数，所有会话加在一起。`0` 表示这一项不限 |
 | `rate_limit.per_group_per_hour` | `120` | 当前会话在过去 3600 秒内的次数。一个私聊也算一个会话。`0` 表示这一项不限 |
 | `personas.<名>.system_prompt` | 无 | 额外的人设。`personas.default` 盖过顶层的 `system_prompt` |
@@ -77,7 +79,7 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
 `config.example.toml` 里的同一段是注释。抄进 `config.toml` 时不要写上密钥。
 
-客户端只走 OpenAI Responses：`POST {base_url}/responses`。system 拼进 `instructions`，其余回合放进 `input`，从 `output_text` 或 `output` 里的 `output_text` 段取出回复。没有工具时公共方法是 `LlmClient::complete`。有工具时用 `LlmClient::complete_with_tools`，仍是同一个地址。若配置里仍写着旧的 `api` 字段，会被忽略。工具规则见下文「工具」。
+客户端只走 OpenAI Responses：`POST {base_url}/responses`。system 拼进 `instructions`，其余回合放进 `input`，从 `output_text` 或 `output` 里的 `output_text` 段取出回复。没有工具时公共方法是 `LlmClient::complete`。有工具时用 `LlmClient::complete_with_tools`，仍是同一个地址。当前消息带图片并且 `vision_enabled` 为 true 时，这一条用户消息的 `content` 是数组，见下文「看图」。更早的回合仍是字符串。若配置里仍写着旧的 `api` 字段，会被忽略。工具规则见下文「工具」。
 
 ## 工具
 
@@ -104,6 +106,16 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 次数到顶而模型还要调用工具时，用户看到「要查的步骤太多了，我先停在这里。」工具名不在这一轮的列表里、参数不是 JSON，或 ServiceHub 返回错误时，用户看到「我没查成，过一会儿再问我一次。」插件不退出。到顶和调用失败都会打 `tracing::warn!`。
 
 生产环境的 agent 编进 fujiang，不从 `plugins/` 里的 `.so` 启动。部署细节见下文「数据与部署」。
+
+## 看图
+
+`vision_enabled` 为 false 时，插件不取图片。模型只看到文字。回复开头多一句「我现在还看不了图，先按文字回你。」
+
+为 true 时，插件对当前消息里的每张 `Image` 段调用 `fetch_media_bytes`。视频段不送。历史里仍只存用户原文和最终回复，不存图片字节。
+
+取图失败时，回复「这张图我没取到，过一会儿再发一次。」字节数大于 `max_image_bytes` 时，回复「这张图太大了，我看不了。」内容不是 JPEG、PNG、GIF 或 WebP 时，回复「这张图的格式我看不了。」这三种情况都不调用模型。次数已经记下的这一次仍然算进每小时次数。
+
+请求仍是 `POST {base_url}/responses`。当前这条用户消息的 `content` 变成数组。文字是 `input_text`。图片是 `input_image`，`image_url` 是 `data:` URL。不传 `detail`，也不传 `file_id`。
 
 ## 环境变量
 

@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 fujiang-core = { path = "../../fujiang-core" }
 reqwest.workspace = true
 serde.workspace = true

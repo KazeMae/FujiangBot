@@ -596,6 +596,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "base64",
  "fujiang-core",
  "reqwest",
  "serde",

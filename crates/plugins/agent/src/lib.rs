@@ -5,6 +5,7 @@ mod config;
 mod session;
 mod tools;
 mod trigger;
+mod vision;
 
 pub use client::{ChatMessage, LlmClient, LlmError, Role};
 pub use config::{AgentConfig, RateLimit};
@@ -181,7 +182,7 @@ impl AgentPlugin {
                 return;
             }
         };
-        let messages = match plan_chat(
+        let (messages, skipped) = match plan_chat(
             &pool,
             cfg,
             &key,
@@ -195,7 +196,34 @@ impl AgentPlugin {
                 say(ctx, msg, tip).await;
                 return;
             }
-            Ok(ChatPlan::Speak { messages }) => messages,
+            Ok(ChatPlan::Speak { mut messages }) => {
+                let medias = vision::message_images(msg);
+                match vision::image_plan(cfg.vision_enabled, medias.len()) {
+                    vision::ImagePlan::None => (messages, false),
+                    vision::ImagePlan::Skip => (messages, true),
+                    vision::ImagePlan::Load => {
+                        let mut images = Vec::with_capacity(medias.len());
+                        for media in &medias {
+                            let loaded = match ctx.fetch_media_bytes(media).await {
+                                Ok(bytes) => Ok(bytes),
+                                Err(err) => {
+                                    warn!(error = %err, "agent image");
+                                    Err(())
+                                }
+                            };
+                            match vision::loaded_part(cfg.max_image_bytes, loaded) {
+                                Ok(part) => images.push(part),
+                                Err(tip) => {
+                                    say(ctx, msg, tip).await;
+                                    return;
+                                }
+                            }
+                        }
+                        vision::give_images(&mut messages, images);
+                        (messages, false)
+                    }
+                }
+            }
             Err(err) => {
                 warn!(error = %err, "agent chat");
                 say(ctx, msg, BUSY_REPLY).await;
@@ -217,24 +245,38 @@ impl AgentPlugin {
         {
             Ok(tools::ToolReply::Text(text)) => text,
             Ok(tools::ToolReply::Degraded(text)) => {
-                say(ctx, msg, text).await;
+                if skipped {
+                    say(ctx, msg, fit_reply(&vision::show_reply(text, true))).await;
+                } else {
+                    say(ctx, msg, text).await;
+                }
                 return;
             }
             Err(err) => {
-                say(ctx, msg, llm_reply(&err)).await;
+                let tip = llm_reply(&err);
+                let shown = if skipped {
+                    vision::show_reply(&tip, true)
+                } else {
+                    tip
+                };
+                say(ctx, msg, shown).await;
                 return;
             }
         };
-        let visible = fit_reply(&reply);
-        if visible.is_empty() {
+        let saved = fit_reply(&reply);
+        let shown = fit_reply(&vision::show_reply(&reply, skipped));
+        if shown.is_empty() {
             say(ctx, msg, BUSY_REPLY).await;
             return;
         }
-        if let Err(err) = ctx.reply_text(msg, &visible).await {
+        if let Err(err) = ctx.reply_text(msg, &shown).await {
             warn!(error = %err, "agent reply");
             return;
         }
-        if let Err(err) = save_exchange(&pool, &key, msg.user_id(), &user_text, &visible).await {
+        if saved.is_empty() {
+            return;
+        }
+        if let Err(err) = save_exchange(&pool, &key, msg.user_id(), &user_text, &saved).await {
             warn!(error = %err, "agent save");
         }
     }
