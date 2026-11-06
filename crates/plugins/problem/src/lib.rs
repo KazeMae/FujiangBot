@@ -1,10 +1,14 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::{Local, Timelike};
-use fujiang_core::{command, BotContext, Event, Flow, Plugin, PluginScope};
-use fujiang_store::DailyProblem;
+use fujiang_core::{command, BotConfig, BotContext, Event, Flow, Plugin, PluginScope, Service};
+use fujiang_store::{DailyProblem, Store};
 use rand::seq::SliceRandom;
 use rand::{rngs::StdRng, SeedableRng};
 use serde::Deserialize;
+use serde_json::{json, Value};
+use tokio::sync::RwLock;
 
 const TAGS: &str = "binary search\nbitmasks\nbrute force\nchinese remainder theorem\ncombinatorics\nconstructive algorithms\ndata structures\ndfs and similar\ndivide and conquer\ndp\ndsu\nexpression parsing\nfft\nflows\ngames\ngeometry\ngraph matchings\ngraphs\ngreedy\nhashing\nimplementation\ninteractive\nmath\nmatrices\nmeet-in-the-middle\nnumber theory\nprobabilities\nschedules\nshortest paths\nsortings\nstring suffix structures\nstrings\nternary search\ntrees\ntwo pointers\n*special problem\nnot-seen";
 
@@ -46,6 +50,22 @@ impl Plugin for ProblemPlugin {
         &[".problem", ".cftag", ".每日一题"]
     }
 
+    fn provides(&self) -> &'static [&'static str] {
+        &["problem"]
+    }
+
+    async fn on_start(&self, ctx: &BotContext, scope: &PluginScope) -> anyhow::Result<()> {
+        ctx.provide(
+            scope,
+            "problem",
+            Arc::new(ProblemService {
+                store: ctx.store.clone(),
+                config: ctx.config.clone(),
+            }),
+        )?;
+        Ok(())
+    }
+
     async fn handle(
         &self,
         ctx: &BotContext,
@@ -80,17 +100,19 @@ impl Plugin for ProblemPlugin {
     }
 }
 
+fn daily_use_date(now: chrono::DateTime<Local>, reset_hour: u32) -> String {
+    let date = if now.hour() < reset_hour {
+        now.date_naive() - chrono::Duration::days(1)
+    } else {
+        now.date_naive()
+    };
+    date.format("%Y-%m-%d").to_string()
+}
+
 async fn daily(ctx: &BotContext) -> anyhow::Result<String> {
     let now = Local::now();
-    let date = now.date_naive().format("%Y-%m-%d").to_string();
     let reset = ctx.bot_config().await.daily_reset_hour;
-    let use_date = if now.hour() < reset {
-        (now.date_naive() - chrono::Duration::days(1))
-            .format("%Y-%m-%d")
-            .to_string()
-    } else {
-        date.clone()
-    };
+    let use_date = daily_use_date(now, reset);
 
     let existing = ctx.store.daily_for_date(&use_date).await?;
     if existing.len() >= BANDS.len() {
@@ -114,6 +136,36 @@ async fn daily(ctx: &BotContext) -> anyhow::Result<String> {
         rows.push(row);
     }
     Ok(format_daily(&use_date, &rows))
+}
+
+struct ProblemService {
+    store: Store,
+    config: Arc<RwLock<BotConfig>>,
+}
+
+fn daily_json(row: &DailyProblem) -> Value {
+    json!({
+        "date": row.date,
+        "band": row.band,
+        "contest_id": row.contest_id,
+        "idx": row.idx,
+        "url": row.url,
+    })
+}
+
+#[async_trait]
+impl Service for ProblemService {
+    async fn call(&self, method: &str, _args: Value) -> anyhow::Result<Value> {
+        match method {
+            "today" => {
+                let reset = self.config.read().await.daily_reset_hour;
+                let date = daily_use_date(Local::now(), reset);
+                let rows = self.store.daily_for_date(&date).await?;
+                Ok(Value::Array(rows.iter().map(daily_json).collect()))
+            }
+            other => anyhow::bail!("problem 没有方法 `{other}`（today）"),
+        }
+    }
 }
 
 fn format_daily(date: &str, rows: &[DailyProblem]) -> String {
@@ -252,4 +304,102 @@ struct CfProblem {
     rating: Option<i64>,
     #[serde(default)]
     tags: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn at(hour: u32) -> chrono::DateTime<Local> {
+        Local.with_ymd_and_hms(2026, 11, 6, hour, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn daily_date_rolls_back_before_the_reset_hour() {
+        assert_eq!(daily_use_date(at(3), 4), "2026-11-05");
+        assert_eq!(daily_use_date(at(4), 4), "2026-11-06");
+        assert_eq!(daily_use_date(at(0), 0), "2026-11-06");
+    }
+
+    #[test]
+    fn plugin_provides_problem() {
+        assert_eq!(ProblemPlugin.provides(), &["problem"]);
+    }
+
+    fn test_bot(reset: u32) -> BotConfig {
+        BotConfig {
+            command_prefix: ".".into(),
+            groups: Vec::new(),
+            allow_private: true,
+            clist_username: String::new(),
+            clist_api_key: String::new(),
+            clist_limit: 0,
+            contest_update_minutes: 30,
+            rank_update_minutes: 30,
+            daily_reset_hour: reset,
+            fun_allow_mutate: false,
+            fun_admins: Vec::new(),
+            fun_delete_files: false,
+        }
+    }
+
+    async fn open_store() -> (Store, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "fujiang-problem-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(dir.join("t.db").to_str().unwrap(), dir.join("img"))
+            .await
+            .unwrap();
+        (store, dir)
+    }
+
+    #[tokio::test]
+    async fn today_returns_saved_rows_for_the_daily_date() {
+        let (store, dir) = open_store().await;
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let row = DailyProblem {
+            date: today.clone(),
+            band: "800-1000".into(),
+            contest_id: 1,
+            idx: "A".into(),
+            url: "https://codeforces.com/problemset/problem/1/A".into(),
+        };
+        store.save_daily(&row).await.unwrap();
+        store
+            .save_daily(&DailyProblem {
+                date: "2000-01-01".into(),
+                band: "800-1000".into(),
+                contest_id: 2,
+                idx: "B".into(),
+                url: "https://codeforces.com/problemset/problem/2/B".into(),
+            })
+            .await
+            .unwrap();
+        let svc = ProblemService {
+            store,
+            config: Arc::new(RwLock::new(test_bot(0))),
+        };
+        let got = svc.call("today", json!({})).await.unwrap();
+        assert_eq!(
+            got,
+            json!([{
+                "date": today,
+                "band": "800-1000",
+                "contest_id": 1,
+                "idx": "A",
+                "url": "https://codeforces.com/problemset/problem/1/A"
+            }])
+        );
+        let err = svc.call("list", json!({})).await.unwrap_err();
+        assert_eq!(err.to_string(), "problem 没有方法 `list`（today）");
+        drop(svc);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
