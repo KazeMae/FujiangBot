@@ -394,7 +394,10 @@ mod tests {
             "enable_memory_tools": false
         }));
         let empty = run(&pool, &off, &key, 1, &AgentCmd::Tools, 1).await;
-        assert_eq!(empty, "当前没有可用工具。");
+        assert!(empty.starts_with("可用工具：\nskills.list："));
+        assert!(empty.contains("\nskills.open："));
+        assert!(!empty.contains("ping.pong"));
+        assert!(!empty.contains("rank.list"));
 
         let listed = AgentConfig::from_value(&json!({
             "system_prompt": "默认人设",
@@ -411,8 +414,11 @@ mod tests {
             }]
         }));
         let text = run(&pool, &listed, &key, 1, &AgentCmd::Tools, 2).await;
-        assert_eq!(text, "可用工具：\nmemo.list：列出备忘");
+        assert!(text.starts_with("可用工具：\nmemo.list：列出备忘\n"));
+        assert!(text.contains("skills.list："));
+        assert!(text.contains("skills.open："));
         assert!(!text.contains("memo_list"));
+        assert!(!text.contains("ping.pong"));
 
         let quiet = plan_chat(&pool, &listed, &key, 1, "hi", 3, true)
             .await
@@ -444,10 +450,12 @@ mod tests {
         let ChatPlan::Speak { messages } = plan else {
             panic!("expected a chat");
         };
-        assert_eq!(
-            messages[0].content,
-            "默认人设\n\n可用工具：\nmemo.list：列出备忘"
-        );
+        assert!(messages[0]
+            .content
+            .starts_with("默认人设\n\n可用工具：\nmemo.list：列出备忘\n"));
+        assert!(messages[0].content.contains("skills.list："));
+        assert!(messages[0].content.contains("skills.open："));
+        assert!(!messages[0].content.contains("ping.pong"));
         assert_eq!(messages[0].role, Role::System);
 
         let shadowed = AgentConfig::from_value(&json!({

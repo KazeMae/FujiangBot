@@ -3,6 +3,8 @@
 //! A tool name is `service.method` (split on the first `.`). Responses function
 //! names match `^[a-zA-Z0-9_-]+$`, so the request sends `.` as `_`.
 
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 use fujiang_core::{BotContext, Source};
 use serde_json::{Map, Value};
@@ -10,7 +12,13 @@ use tracing::warn;
 
 use crate::session::session_key;
 
-use crate::client::{ChatMessage, FunctionTool, LlmClient, LlmError, ModelOutput, PriorCall};
+use crate::client::{
+    ChatMessage, FunctionCall, FunctionTool, LlmClient, LlmError, ModelOutput, PriorCall,
+};
+
+mod skills;
+
+pub(crate) use skills::resident_tools;
 
 pub(crate) const TOOL_CAP_REPLY: &str = "要查的步骤太多了，我先停在这里。";
 pub(crate) const TOOL_FAIL_REPLY: &str = "我没查成，过一会儿再问我一次。";
@@ -387,33 +395,51 @@ pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
     pass: &ToolPass<'_>,
     hub: &H,
 ) -> ToolTurn {
+    tool_loop(client, messages, pass, hub, |opened| {
+        skills::round_tools(configured, builtins, opened)
+    })
+    .await
+}
+
+async fn tool_loop<H, F>(
+    client: &LlmClient,
+    messages: &[ChatMessage],
+    pass: &ToolPass<'_>,
+    hub: &H,
+    mut visible: F,
+) -> ToolTurn
+where
+    H: ToolHub + ?Sized,
+    F: FnMut(&BTreeSet<String>) -> Vec<ToolSpec>,
+{
     let max_rounds = pass.max_rounds;
-    let tools = assemble_tools(configured, builtins);
-    if tools.is_empty() {
-        return match client.complete(messages).await {
-            Ok(done) => tool_turn(
-                Ok(ToolReply::Text(done.text)),
-                1,
-                done.usage.input_tokens,
-                done.usage.output_tokens,
-            ),
-            Err(err) => tool_turn(Err(err), 1, 0, 0),
-        };
-    }
-    let defs: Vec<FunctionTool<'_>> = tools
-        .iter()
-        .map(|spec| FunctionTool {
-            name: spec.wire_name(),
-            description: spec.description(),
-            parameters: spec.parameters(),
-        })
-        .collect();
+    let mut opened = BTreeSet::new();
     let mut prior = Vec::new();
     let mut used = 0u32;
     let mut calls = 0i64;
     let mut in_tokens = 0i64;
     let mut out_tokens = 0i64;
     loop {
+        let tools = visible(&opened);
+        if tools.is_empty() && prior.is_empty() {
+            return match client.complete(messages).await {
+                Ok(done) => tool_turn(
+                    Ok(ToolReply::Text(done.text)),
+                    1,
+                    done.usage.input_tokens,
+                    done.usage.output_tokens,
+                ),
+                Err(err) => tool_turn(Err(err), 1, 0, 0),
+            };
+        }
+        let defs: Vec<FunctionTool<'_>> = tools
+            .iter()
+            .map(|spec| FunctionTool {
+                name: spec.wire_name(),
+                description: spec.description(),
+                parameters: spec.parameters(),
+            })
+            .collect();
         let (output, usage) = match client.complete_with_tools(messages, &prior, &defs).await {
             Ok(round) => round,
             Err(err) => return tool_turn(Err(err), calls + 1, in_tokens, out_tokens),
@@ -435,7 +461,38 @@ pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
                         out_tokens,
                     );
                 }
+                let opened_now = opened.clone();
                 for call in found {
+                    let args = match parse_arguments(&call.arguments) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            warn!(error = %err, tool = %call.name, "agent tool arguments");
+                            return tool_turn(
+                                Ok(ToolReply::Degraded(TOOL_FAIL_REPLY)),
+                                calls,
+                                in_tokens,
+                                out_tokens,
+                            );
+                        }
+                    };
+                    if let Some(result) = skills::exec(&call.name, &args, &opened_now, &mut opened)
+                    {
+                        match result {
+                            Ok(value) => {
+                                prior.push(prior_call(call, value));
+                            }
+                            Err(tag) => {
+                                warn!(tool = %call.name, "{tag}");
+                                return tool_turn(
+                                    Ok(ToolReply::Degraded(TOOL_FAIL_REPLY)),
+                                    calls,
+                                    in_tokens,
+                                    out_tokens,
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     let Some(spec) = tools.iter().find(|spec| spec.wire_name == call.name) else {
                         warn!(tool = %call.name, "agent tool unknown");
                         return tool_turn(
@@ -444,18 +501,6 @@ pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
                             in_tokens,
                             out_tokens,
                         );
-                    };
-                    let args = match parse_arguments(&call.arguments) {
-                        Ok(value) => value,
-                        Err(err) => {
-                            warn!(error = %err, tool = spec.name(), "agent tool arguments");
-                            return tool_turn(
-                                Ok(ToolReply::Degraded(TOOL_FAIL_REPLY)),
-                                calls,
-                                in_tokens,
-                                out_tokens,
-                            );
-                        }
                     };
                     let args = bind_memo_scope(spec.service(), pass.scope, args);
                     let args = bind_fun_scope(spec.service(), spec.method(), pass.scope, args);
@@ -493,17 +538,20 @@ pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
                             }
                         }
                     };
-                    let output = serde_json::to_string(&value).unwrap_or_else(|_| "null".into());
-                    prior.push(PriorCall {
-                        call_id: call.call_id,
-                        name: spec.wire_name.clone(),
-                        arguments: call.arguments,
-                        output,
-                    });
+                    prior.push(prior_call(call, value));
                 }
                 used = used.saturating_add(1);
             }
         }
+    }
+}
+
+fn prior_call(call: FunctionCall, value: serde_json::Value) -> PriorCall {
+    PriorCall {
+        call_id: call.call_id,
+        name: call.name,
+        arguments: call.arguments,
+        output: serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
     }
 }
 
