@@ -4,9 +4,11 @@
 //! names match `^[a-zA-Z0-9_-]+$`, so the request sends `.` as `_`.
 
 use async_trait::async_trait;
-use fujiang_core::BotContext;
-use serde_json::Value;
+use fujiang_core::{BotContext, Source};
+use serde_json::{Map, Value};
 use tracing::warn;
+
+use crate::session::session_key;
 
 use crate::client::{ChatMessage, FunctionTool, LlmClient, LlmError, ModelOutput, PriorCall};
 
@@ -103,6 +105,46 @@ pub(crate) struct BuiltinTools {
     pub rank: bool,
     pub contest: bool,
     pub problem: bool,
+    pub memo: bool,
+    pub memo_write: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MemoCallScope {
+    source_kind: String,
+    source_id: i64,
+    session: String,
+    user_id: i64,
+}
+
+impl MemoCallScope {
+    pub(crate) fn from_source(source: Source, user_id: i64) -> Self {
+        let (kind, id) = match source {
+            Source::Group { id } => ("group", id),
+            Source::Friend { id } => ("friend", id),
+        };
+        Self {
+            source_kind: kind.to_string(),
+            source_id: id,
+            session: session_key(source),
+            user_id,
+        }
+    }
+}
+
+pub(crate) struct ToolPass<'a> {
+    pub max_rounds: u32,
+    pub scope: Option<&'a MemoCallScope>,
+}
+
+#[cfg(test)]
+impl ToolPass<'static> {
+    pub(crate) fn rounds(max_rounds: u32) -> Self {
+        Self {
+            max_rounds,
+            scope: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -111,11 +153,15 @@ impl BuiltinTools {
         rank: true,
         contest: true,
         problem: true,
+        memo: true,
+        memo_write: false,
     };
     const OFF: Self = Self {
         rank: false,
         contest: false,
         problem: false,
+        memo: false,
+        memo_write: false,
     };
 }
 
@@ -209,6 +255,23 @@ fn builtin_specs(builtins: BuiltinTools) -> Vec<ToolSpec> {
             default_parameters(),
         ));
     }
+    if builtins.memo {
+        specs.push(builtin_spec(
+            "memo.list",
+            "列出当前对话已经记下的备忘。不需要参数。还没有备忘时是空数组。",
+            default_parameters(),
+        ));
+    }
+    if builtins.memo && builtins.memo_write {
+        specs.push(builtin_spec(
+            "memo.add",
+            "给当前对话新记一条备忘。字符串参数 body 是正文。正文为空或这条对话已经写满时，这次调用失败。",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "body": { "type": "string" } }
+            }),
+        ));
+    }
     specs
 }
 
@@ -221,9 +284,10 @@ pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
     messages: &[ChatMessage],
     configured: &[ToolSpec],
     builtins: BuiltinTools,
-    max_rounds: u32,
+    pass: &ToolPass<'_>,
     hub: &H,
 ) -> ToolTurn {
+    let max_rounds = pass.max_rounds;
     let tools = assemble_tools(configured, builtins);
     if tools.is_empty() {
         return match client.complete(messages).await {
@@ -293,6 +357,7 @@ pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
                             );
                         }
                     };
+                    let args = bind_memo_scope(spec.service(), pass.scope, args);
                     let value = match hub.invoke(spec.service(), spec.method(), args).await {
                         Ok(value) => value,
                         Err(err) => {
@@ -358,6 +423,24 @@ fn wire_name_ok(name: &str) -> bool {
 
 fn default_parameters() -> Value {
     serde_json::json!({"type": "object", "properties": {}})
+}
+
+fn bind_memo_scope(service: &str, scope: Option<&MemoCallScope>, args: Value) -> Value {
+    let Some(scope) = scope.filter(|_| service == "memo") else {
+        return args;
+    };
+    let mut obj = match args {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+    obj.insert(
+        "source_kind".to_string(),
+        Value::String(scope.source_kind.clone()),
+    );
+    obj.insert("source_id".to_string(), Value::from(scope.source_id));
+    obj.insert("session".to_string(), Value::String(scope.session.clone()));
+    obj.insert("user_id".to_string(), Value::from(scope.user_id));
+    Value::Object(obj)
 }
 
 fn parse_arguments(raw: &str) -> Result<Value, &'static str> {

@@ -227,12 +227,17 @@ impl AgentPlugin {
                     return;
                 }
             };
+        let scope = tools::MemoCallScope::from_source(msg.source, msg.user_id());
+        let pass = tools::ToolPass {
+            max_rounds: cfg.max_tool_rounds,
+            scope: Some(&scope),
+        };
         let turn = tools::run_tool_loop(
             &client,
             &messages,
             &cfg.tools,
             enabled_builtins(cfg),
-            cfg.max_tool_rounds,
+            &pass,
             ctx,
         )
         .await;
@@ -405,6 +410,8 @@ fn enabled_builtins(cfg: &AgentConfig) -> tools::BuiltinTools {
         rank: cfg.enable_rank_tools,
         contest: cfg.enable_contest_tools,
         problem: cfg.enable_problem_tools,
+        memo: cfg.enable_memo_tools,
+        memo_write: cfg.enable_memo_write_tools,
     }
 }
 
@@ -682,7 +689,8 @@ mod tests {
             "system_prompt": "默认人设",
             "enable_rank_tools": false,
             "enable_contest_tools": false,
-            "enable_problem_tools": false
+            "enable_problem_tools": false,
+            "enable_memo_tools": false
         }));
         let empty = run(&pool, &off, &key, 1, &AgentCmd::Tools, 1).await;
         assert_eq!(empty, "当前没有可用工具。");
@@ -692,6 +700,7 @@ mod tests {
             "enable_rank_tools": false,
             "enable_contest_tools": false,
             "enable_problem_tools": false,
+            "enable_memo_tools": false,
             "tools": [{
                 "name": "memo.list",
                 "description": "列出备忘",
@@ -714,6 +723,7 @@ mod tests {
             "enable_rank_tools": false,
             "enable_contest_tools": false,
             "enable_problem_tools": false,
+            "enable_memo_tools": false,
             "rate_limit": { "per_user_per_hour": 0, "per_group_per_hour": 0 },
             "tools": [{
                 "name": "memo.list",
@@ -745,7 +755,21 @@ mod tests {
         assert!(rank.contains("rank.get："));
         assert!(!rank.contains("别的说明"));
         assert!(!rank.contains("contest.upcoming"));
+        assert!(rank.contains("memo.list："));
+        assert!(!rank.contains("memo.add"));
         assert!(!rank.contains('_'));
+
+        let write = AgentConfig::from_value(&json!({
+            "enable_rank_tools": false,
+            "enable_contest_tools": false,
+            "enable_problem_tools": false,
+            "enable_memo_write_tools": true
+        }));
+        let both = run(&pool, &write, &key, 1, &AgentCmd::Tools, 6).await;
+        assert!(both.contains("memo.list："));
+        assert!(both.contains("memo.add："));
+        assert!(!both.contains("memo_add"));
+        assert!(!both.contains("rank.list"));
     }
 
     #[tokio::test]
