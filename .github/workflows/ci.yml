@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy -p fujiang-plugin-agent --all-targets --no-deps -- -D warnings
+      - name: Test agent
+        run: cargo test -p fujiang-plugin-agent
+      - name: Test fujiang
+        run: cargo test -p fujiang
+      - name: Agent file length
+        run: scripts/check-file-length.sh
+      - name: Install llvm-cov
+        continue-on-error: true
+        run: |
+          rustup component add llvm-tools-preview
+          cargo install cargo-llvm-cov --locked
+      - name: Coverage summary
+        continue-on-error: true
+        run: cargo llvm-cov -p fujiang-plugin-agent --summary-only
