@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
@@ -49,6 +49,8 @@ pub struct AgentConfig {
     pub tools: Vec<ToolSpec>,
     pub vision_enabled: bool,
     pub max_image_bytes: u64,
+    blacklist: Vec<String>,
+    admins: BTreeSet<i64>,
 }
 
 impl AgentConfig {
@@ -77,7 +79,19 @@ impl AgentConfig {
             tools: tools_from(v),
             vision_enabled: bool_field(v, "vision_enabled", false),
             max_image_bytes: max_image_bytes_from(v),
+            blacklist: blacklist_from(v),
+            admins: admins_from(v),
         }
+    }
+
+    pub(crate) fn keyword_hit(&self, user_text: &str) -> bool {
+        self.blacklist
+            .iter()
+            .any(|needle| user_text.contains(needle))
+    }
+
+    pub(crate) fn is_admin(&self, user_id: i64) -> bool {
+        self.admins.contains(&user_id)
     }
 
     pub fn prompt_for(&self, name: &str) -> Option<&str> {
@@ -171,6 +185,30 @@ fn wake_words_from(v: &Value) -> Vec<String> {
     }
 }
 
+fn blacklist_from(v: &Value) -> Vec<String> {
+    match v.get("blacklist") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|word| !word.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn admins_from(v: &Value) -> BTreeSet<i64> {
+    let Some(items) = v.get("admins").and_then(Value::as_array) else {
+        return BTreeSet::new();
+    };
+    items.iter().filter_map(admin_id).collect()
+}
+
+fn admin_id(v: &Value) -> Option<i64> {
+    v.as_i64().or_else(|| v.as_str()?.trim().parse().ok())
+}
+
 fn tools_from(v: &Value) -> Vec<ToolSpec> {
     let Some(items) = v.get("tools").and_then(Value::as_array) else {
         return Vec::new();
@@ -224,6 +262,8 @@ fn personas_from(v: &Value) -> (String, BTreeMap<String, String>) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use serde_json::json;
 
@@ -256,6 +296,10 @@ mod tests {
         assert!(cfg.tools.is_empty());
         assert!(!cfg.vision_enabled);
         assert_eq!(cfg.max_image_bytes, 5 * 1024 * 1024);
+        assert!(cfg.blacklist.is_empty());
+        assert!(cfg.admins.is_empty());
+        assert!(!cfg.keyword_hit("代写"));
+        assert!(!cfg.is_admin(1));
     }
 
     #[test]
@@ -320,7 +364,9 @@ mod tests {
             "inject_tool_list": "yes",
             "tools": "nope",
             "vision_enabled": "yes",
-            "max_image_bytes": "big"
+            "max_image_bytes": "big",
+            "blacklist": "nope",
+            "admins": 1
         }));
         assert_defaults(&cfg);
     }
@@ -441,5 +487,19 @@ mod tests {
         let zero = AgentConfig::from_value(&json!({ "max_image_bytes": 0 }));
         assert!(!zero.vision_enabled);
         assert_eq!(zero.max_image_bytes, 5 * 1024 * 1024);
+    }
+
+    #[test]
+    fn blacklist_keeps_trimmed_needles_and_admins_parse_ids() {
+        let cfg = AgentConfig::from_value(&json!({
+            "blacklist": [" 代写 ", "", "代写", 1],
+            "admins": [10001, "10002", " 10003 ", "x", 1.5, true]
+        }));
+        assert_eq!(cfg.blacklist, vec!["代写".to_string(), "代写".to_string()]);
+        assert_eq!(cfg.admins, BTreeSet::from([10001, 10002, 10003]));
+        assert!(cfg.keyword_hit("请代写"));
+        assert!(!cfg.keyword_hit("请写"));
+        assert!(cfg.is_admin(10002));
+        assert!(!cfg.is_admin(7));
     }
 }
