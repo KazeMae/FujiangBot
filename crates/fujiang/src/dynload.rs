@@ -408,10 +408,10 @@ impl PluginHub {
         };
 
         for (path, name) in &loaded_paths {
-            if !on_disk.iter().any(|(p, _)| p == path) {
-                if self.unload(name.0.as_str(), dispatcher, ctx).await? {
-                    changed.push(format!("unload {name}", name = name.0));
-                }
+            if !on_disk.iter().any(|(p, _)| p == path)
+                && self.unload(name.0.as_str(), dispatcher, ctx).await?
+            {
+                changed.push(format!("unload {name}", name = name.0));
             }
         }
 
@@ -572,16 +572,14 @@ fn list_plugin_files(dir: &Path) -> anyhow::Result<Vec<(PathBuf, SystemTime)>> {
 }
 
 pub fn is_plugin_lib(path: &Path) -> bool {
-    match path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "so" | "dylib" | "dll" => true,
-        _ => false,
-    }
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
+        "so" | "dylib" | "dll"
+    )
 }
 
 #[cfg(test)]

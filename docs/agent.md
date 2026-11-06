@@ -1,6 +1,6 @@
 # agent 插件
 
-agent 是动态插件。有人在群里或私聊里叫到它时，它把这个会话交给配置的模型，再把回复发回同一个会话。它处理过的消息返回 Stop，后面的插件不会再看到这条消息。
+agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫到它时，它把这个会话交给配置的模型，再把回复发回同一个会话。它处理过的消息返回 Stop，后面的插件不会再看到这条消息。
 
 ## 触发
 
@@ -35,6 +35,8 @@ agent 是动态插件。有人在群里或私聊里叫到它时，它把这个�
 ## 配置
 
 配置写在 `[plugins.configs.agent]`。缺着的字段用下表的默认值。某个字段类型不对时，只这个字段退回默认值。宿主字段 `groups`、`allow_private`、`priority`、`inject`、`provides` 的规则见 [插件说明](plugins.md)。
+
+停用时把 `agent` 写进 `plugins.disabled`。不要加 `[plugins.agent]`。
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
@@ -99,14 +101,14 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
 `sessions.persona` 保存当前人设的名字。旧文件里没有这一列时，插件启动会补上，原来的行还在。`usage_events` 保存次数，列是 `session_key`、`user_id`、`ts`。
 
-换这个版本之前，先备份这个 sqlite 文件，以及旁边的 `-wal` 文件和 `-shm` 文件。备份范围和换二进制的步骤见 [分支管理手册](BRANCHING.md) 第 7 节。这次只改插件库，不改主库。
+换 fujiang 之前，先备份这个 sqlite 文件，以及旁边的 `-wal` 文件和 `-shm` 文件。备份范围和换二进制的步骤见 [分支管理手册](BRANCHING.md) 第 7 节。这次不改 `fujiang.db`。
 
-发布构建的命令如下。
+Linux 生产把 agent 链进 fujiang，不从 `.so` 启动。`.so` 自己带一份 tokio。`on_start` 走到 `open_instance_db` 时，插件里的 `tokio::fs` 找不到宿主 runtime，进程会 abort。宿主发现内置名字 `agent` 后会拒绝用 `.so` 覆盖，扫描只打警告。不要把 `libfujiang_plugin_agent.so` 放进 `plugins/`。cdylib 热更新以后再做。
+
+发布时编宿主。
 
 ```bash
-cargo build -p fujiang-plugin-agent --release
+cargo build -p fujiang --release
 ```
 
-Linux 上的产物是 `target/release/libfujiang_plugin_agent.so`。macOS 上是同名的 `.dylib`。把它放到 `[plugins].dir`。默认目录是 `plugins/`。`plugins.watch` 为 true 时，换掉这个文件会热加载，并在启动时补上新列和新表。
-
-只换这个 `.so` 时，工作区 version 保持不动，NapCat 保持运行。`PLUGIN_ABI` 仍然是 5。
+`cargo build -p fujiang-plugin-agent --release` 仍会生成 `target/release/libfujiang_plugin_agent.so`。macOS 上是同名的 `.dylib`。这个文件留给以后的热更新，不要拷进 `plugins/`。`PLUGIN_ABI` 仍然是 5。换二进制时 NapCat 保持运行。

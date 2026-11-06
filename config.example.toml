@@ -79,8 +79,8 @@ enabled = true
 # groups = [555973858]
 # share_data = true      # 额外实例默认独立 sqlite；true 则和默认实例共用
 
-# 对话插件是动态库，不是内置插件。密钥放进程环境变量，不要写进这个文件。
-# 说明见 docs/agent.md。
+# 对话插件编进 fujiang 本体。不要把 libfujiang_plugin_agent.so 放进 plugins/。
+# 密钥放进程环境变量，不要写进这个文件。说明见 docs/agent.md。
 # [plugins.configs.agent]
 # priority = 10
 # base_url = "https://api.deepseek.com"

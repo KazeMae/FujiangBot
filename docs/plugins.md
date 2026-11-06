@@ -1,6 +1,6 @@
 # 福酱插件说明
 
-内置插件（contest / rank / problem / fun / luck）和 `plugins/` 里热插的 `.so` / `.dylib` / `.dll` 走同一套 `fujiang_core::Plugin`。业务只依赖中间层，**禁止**依赖 `napcat-sdk`。换 OneBot 实现端只加 adapter，插件不用改。
+内置插件（contest / rank / problem / fun / luck / agent）和 `plugins/` 里热插的 `.so` / `.dylib` / `.dll` 走同一套 `fujiang_core::Plugin`。业务只依赖中间层，**禁止**依赖 `napcat-sdk`。换 OneBot 实现端只加 adapter，插件不用改。
 
 最小模板：`crates/plugins/echo`（`.ping` → pong）。
 完整模板：`crates/plugins/memo`（自己的 SQLite、配置、后台清理）。约定与当前代码一致（`PLUGIN_ABI = 5`）。

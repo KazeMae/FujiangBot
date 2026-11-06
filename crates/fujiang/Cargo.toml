@@ -12,6 +12,7 @@ clap.workspace = true
 figment.workspace = true
 fujiang-adapter = { path = "../fujiang-adapter" }
 fujiang-core = { path = "../fujiang-core" }
+fujiang-plugin-agent = { path = "../plugins/agent" }
 fujiang-plugin-contest = { path = "../plugins/contest" }
 fujiang-plugin-fun = { path = "../plugins/fun" }
 fujiang-plugin-luck = { path = "../plugins/luck" }
