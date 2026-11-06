@@ -49,6 +49,9 @@ pub struct AgentConfig {
     pub enable_fun_tools: bool,
     pub enable_memory_tools: bool,
     pub enable_memory_write_tools: bool,
+    pub memory_max_unused_days: u32,
+    pub memory_max_entries_per_scope: u32,
+    pub memory_consolidate_on_start: bool,
     pub inject_tool_list: bool,
     pub tools: Vec<ToolSpec>,
     pub vision_enabled: bool,
@@ -83,6 +86,17 @@ impl AgentConfig {
             enable_fun_tools: bool_field(v, "enable_fun_tools", true),
             enable_memory_tools: bool_field(v, "enable_memory_tools", true),
             enable_memory_write_tools: bool_field(v, "enable_memory_write_tools", true),
+            memory_max_unused_days: u32_field(
+                v,
+                "memory_max_unused_days",
+                crate::memory_consolidate::DEFAULT_UNUSED_DAYS,
+            ),
+            memory_max_entries_per_scope: u32_field(
+                v,
+                "memory_max_entries_per_scope",
+                crate::memory_consolidate::DEFAULT_MAX_ENTRIES,
+            ),
+            memory_consolidate_on_start: bool_field(v, "memory_consolidate_on_start", false),
             inject_tool_list: bool_field(v, "inject_tool_list", false),
             tools: tools_from(v),
             vision_enabled: bool_field(v, "vision_enabled", false),
@@ -311,6 +325,9 @@ mod tests {
         assert!(cfg.enable_fun_tools);
         assert!(cfg.enable_memory_tools);
         assert!(cfg.enable_memory_write_tools);
+        assert_eq!(cfg.memory_max_unused_days, 90);
+        assert_eq!(cfg.memory_max_entries_per_scope, 200);
+        assert!(!cfg.memory_consolidate_on_start);
         assert!(!cfg.inject_tool_list);
         assert!(cfg.tools.is_empty());
         assert!(!cfg.vision_enabled);
@@ -383,6 +400,9 @@ mod tests {
             "enable_fun_tools": "no",
             "enable_memory_tools": "no",
             "enable_memory_write_tools": "no",
+            "memory_max_unused_days": "no",
+            "memory_max_entries_per_scope": -1,
+            "memory_consolidate_on_start": "yes",
             "inject_tool_list": "yes",
             "tools": "nope",
             "vision_enabled": "yes",
@@ -521,6 +541,22 @@ mod tests {
         }));
         assert!(read.enable_memory_tools);
         assert!(!read.enable_memory_write_tools);
+
+        let limits = AgentConfig::from_value(&json!({
+            "memory_max_unused_days": 7,
+            "memory_max_entries_per_scope": 3,
+            "memory_consolidate_on_start": true
+        }));
+        assert_eq!(limits.memory_max_unused_days, 7);
+        assert_eq!(limits.memory_max_entries_per_scope, 3);
+        assert!(limits.memory_consolidate_on_start);
+        let zero = AgentConfig::from_value(&json!({
+            "memory_max_unused_days": 0,
+            "memory_max_entries_per_scope": 0
+        }));
+        assert_eq!(zero.memory_max_unused_days, 0);
+        assert_eq!(zero.memory_max_entries_per_scope, 0);
+        assert!(!zero.memory_consolidate_on_start);
     }
 
     #[test]

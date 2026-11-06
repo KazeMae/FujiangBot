@@ -47,11 +47,17 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 
 ## 分层记忆
 
-跨会话的事实记在 agent sqlite 的 `layered_memories`，不进 `sessions.summary`。模型用 `memory.list`、`memory.get`、`memory.upsert`、`memory.forget` 读写。拼系统提示时不塞记忆全文。群聊和私聊写 `user` 层时，宿主写入当前发言人的 QQ，模型改不了这个号码。群层用当前群号。账号层的 `scope_id` 为空。
+跨会话的事实记在 agent sqlite 的 `layered_memories`，不进 `sessions.summary`。模型用 `memory.list`、`memory.get`、`memory.upsert`、`memory.forget`、`memory.consolidate` 读写。拼系统提示时不塞记忆全文。群聊和私聊写 `user` 层时，宿主写入当前发言人的 QQ，模型改不了这个号码。群层用当前群号。账号层的 `scope_id` 为空。
 
-`enable_memory_tools` 默认 true。为 false 时，四个工具都不带。`enable_memory_write_tools` 默认 true。只有它和 `enable_memory_tools` 都是 true 时，请求才带 `memory.upsert` 和 `memory.forget`。
+`enable_memory_tools` 默认 true。为 false 时，五个工具都不带。`enable_memory_write_tools` 默认 true。只有它和 `enable_memory_tools` 都是 true 时，请求才带 `memory.upsert`、`memory.forget` 和 `memory.consolidate`。
 
-设计见 [分层记忆](layered-memory.md)。这一刀不做合并、去重，也不做向量检索。
+成功的 `memory.get` 把这一条的 `usage_count` 加 1，并把 `last_used_at` 写成这次的时间。成功的 `memory.list` 对返回的每一条做同样的事。没有这条时 `memory.get` 不加。`memory.upsert` 不把用量清零。
+
+`memory.consolidate` 不调用第二个模型，也不读 git。可选字符串 `scope`。不传时整理当前能看见的层：群里是账号、本群和当前发言人，私聊是账号和当前发言人。`last_used_at` 有值且早于 `memory_max_unused_days` 的删掉。从未使用（`last_used_at` 为空）且 `updated_at` 早于同一窗口的也删掉。时间正好落在窗口上的留下。每一层再按 `memory_max_entries_per_scope` 封顶，留下 `usage_count` 更高的。用量相同则留下 `last_used_at` 和 `updated_at` 里较新的那个时间。还相同则留下 key 更小的。返回 `removed` 和 `kept`。`kept` 是这次整理过的层里剩下的条数。别的层不动。
+
+`memory_consolidate_on_start` 默认 false。为 true 时，插件在 `on_start` 用同一套规则把库里每一层整理一次。默认不整理，所以旧记忆不会在启动时被删。
+
+设计见 [分层记忆](layered-memory.md)。不做向量检索，也不做第二轮模型合并。
 
 ## 配置
 
@@ -75,8 +81,11 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 | `enable_memo_tools` | `true` | 为 false 时，请求不带 `memo_list`，也不带 `memo_add`。缺省或类型不对时仍是 true |
 | `enable_memo_write_tools` | `false` | 为 true 且 `enable_memo_tools` 为 true 时，请求才带 `memo_add`。缺省或类型不对时是 false |
 | `enable_fun_tools` | `true` | 为 false 时，请求不带 `fun_tags`、`fun_stars`、`fun_learn`、`fun_search`。缺省或类型不对时仍是 true |
-| `enable_memory_tools` | `true` | 为 false 时，请求不带四个 `memory_*`。缺省或类型不对时仍是 true |
-| `enable_memory_write_tools` | `true` | 为 true 且 `enable_memory_tools` 为 true 时，请求才带 `memory_upsert` 和 `memory_forget`。缺省或类型不对时是 true |
+| `enable_memory_tools` | `true` | 为 false 时，请求不带五个 `memory_*`。缺省或类型不对时仍是 true |
+| `enable_memory_write_tools` | `true` | 为 true 且 `enable_memory_tools` 为 true 时，请求才带 `memory_upsert`、`memory_forget` 和 `memory_consolidate`。缺省或类型不对时是 true |
+| `memory_max_unused_days` | `90` | 整理时，上次使用早于这么多天的删掉。从未使用的改看 `updated_at`。缺省或类型不对时是 90。写成 `0` 时窗口就是 0 天 |
+| `memory_max_entries_per_scope` | `200` | 每一层整理后最多留下这么多条。缺省或类型不对时是 200。写成 `0` 时这一层清空 |
+| `memory_consolidate_on_start` | `false` | 为 true 时，启动时把库里每一层整理一次。缺省或类型不对时是 false |
 | `inject_tool_list` | `false` | 为 true 时，把当前启用工具的短清单追加到系统提示。缺省或类型不对时是 false |
 | `tools` | `[]` | 额外工具。每项有 `name`、`description`、`parameters`。和已启用内置工具的函数名相同时，这一项不发出去 |
 | `system_prompt` | `你是福酱，西南科技大学 ACM 群助手。` | `default` 人设的系统提示 |
@@ -120,7 +129,7 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
 工具名的格式是 `服务.方法`。第一个 `.` 之前是服务名，之后是方法名。`rank.list` 调用 rank 的 `list`。`rank.get` 调用 rank 的 `get`。`contest.upcoming` 调用 contest 的 `upcoming`。`problem.today` 调用 problem 的 `today`。Responses 要求函数名匹配 `^[a-zA-Z0-9_-]+$`，所以请求里的 `name` 把 `.` 换成 `_`。`rank.list` 发出去是 `rank_list`。`rank.get` 发出去是 `rank_get`。
 
-默认带十四个内置工具。`memo.add` 默认不带。fun 不注册写工具，也没有删除图库的方法。分层记忆的读写默认都带。
+默认带十五个内置工具。`memo.add` 默认不带。fun 不注册写工具，也没有删除图库的方法。分层记忆的读写默认都带。
 
 | 配置名 | 请求里的函数名 | 调用 | 参数 |
 |---|---|---|---|
@@ -139,6 +148,7 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 | `memory.get` | `memory_get` | 本插件 sqlite | 字符串 `scope`、`key` |
 | `memory.upsert` | `memory_upsert` | 本插件 sqlite | 字符串 `scope`、`key`、`value`。默认注册 |
 | `memory.forget` | `memory_forget` | 本插件 sqlite | 字符串 `scope`、`key`。可选布尔 `prefix`。默认注册 |
+| `memory.consolidate` | `memory_consolidate` | 本插件 sqlite | 可选字符串 `scope`。默认注册 |
 
 `oj` 用来只看一个 OJ。例如 Codeforces、Atcoder、LuoGu、NowCoder 或 SCPC。不传则返回全部。
 
@@ -152,7 +162,7 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
 `enable_fun_tools` 默认 true。为 false 时，请求不带 `fun_tags`、`fun_stars`、`fun_learn`、`fun_search`。缺省或类型不对时仍是 true。没有 `enable_fun_write_tools`。fun 服务只有这四个读方法。`delete`、`retire`、`add` 这类名字会报错，图库行还在。
 
-`memory.list` 按层返回键。不传 `scope` 时，群里是账号、本群和当前发言人，私聊是账号和当前发言人。`memory.get` 没有这条时结果是 null。`memory.upsert` 的 `value` 最多 500 个字。`user` 的编号是当前发言人，`group` 的编号是当前群，`account` 的编号是空字符串。模型传来的 `user_id` 会被盖掉。`memory.forget` 在 `prefix` 为 true 时按前缀删除。这四个工具不走 ServiceHub。
+`memory.list` 按层返回键。不传 `scope` 时，群里是账号、本群和当前发言人，私聊是账号和当前发言人。返回的每一条都记一次使用。`memory.get` 没有这条时结果是 null，并且不加用量。读到时记一次使用。`memory.upsert` 的 `value` 最多 500 个字。`user` 的编号是当前发言人，`group` 的编号是当前群，`account` 的编号是空字符串。模型传来的 `user_id` 会被盖掉。`memory.forget` 在 `prefix` 为 true 时按前缀删除。`memory.consolidate` 的规则见上文「分层记忆」。这五个工具不走 ServiceHub。
 
 `memo.list` 返回数组。每项有 `id`、`user_id`、`body`。顺序是新的在前，最多 20 条。这个对话还没有备忘时，数组是空的。模型不传来源。宿主按当前消息写入 `source_kind`、`source_id`、`session`、`user_id`。群是 `group` 和 `group:<id>`。私聊是 `friend` 和 `private:<id>`。这和 `.memo list` 用的是同一张表、同一次会话。直接 `ctx.call("memo", "list", …)` 时可以自己传 `source_kind` 加 `source_id`，或传 `session`。
 
@@ -266,7 +276,7 @@ agent 编进 fujiang。不要热替换它的 `.so`。宿主拒绝用 `.so` 覆�
 
 这些表在插件自己的 SQLite 里，不在 `fujiang.db`。`store.db` 为 `data/fujiang.db` 时，默认实例的文件是 `data/plugin-data/agent/plugin.sqlite`。额外实例在 `share_data` 不是 true 时，目录名是 `agent__` 加上实例 id。
 
-`sessions.persona` 保存当前人设的名字。`sessions.summary` 保存这个会话的摘要。旧文件里没有这两列时，插件启动会补上，原来的行还在。`.agent reset` 清摘要。`.agent forget` 只清摘要。两次都留下人设。`layered_memories` 保存跨会话的分层记忆。列是 `scope_kind`、`scope_id`、`key`、`value`、`updated_at`、`source`。同一层同一个键只有一行。旧文件没有这张表时，插件启动会补上。`usage_events` 保存次数，列是 `session_key`、`user_id`、`ts`。`usage_daily` 保存每日用量，列是 `day`、`session_key`、`user_id`、`calls`、`in_tokens`、`out_tokens`。这张表不在 `fujiang.db`。
+`sessions.persona` 保存当前人设的名字。`sessions.summary` 保存这个会话的摘要。旧文件里没有这两列时，插件启动会补上，原来的行还在。`.agent reset` 清摘要。`.agent forget` 只清摘要。两次都留下人设。`layered_memories` 保存跨会话的分层记忆。列是 `scope_kind`、`scope_id`、`key`、`value`、`updated_at`、`source`、`usage_count`、`last_used_at`。同一层同一个键只有一行。旧文件没有这张表时，插件启动会补上。旧表没有 `usage_count` 或 `last_used_at` 时，启动会 `ALTER` 补上，原来的行还在。`usage_count` 从 0 起，`last_used_at` 为空。`usage_events` 保存次数，列是 `session_key`、`user_id`、`ts`。`usage_daily` 保存每日用量，列是 `day`、`session_key`、`user_id`、`calls`、`in_tokens`、`out_tokens`。这张表不在 `fujiang.db`。
 
 换 fujiang 之前，先备份这个 sqlite 文件，以及旁边的 `-wal` 文件和 `-shm` 文件。备份范围和换二进制的步骤见 [分支管理手册](BRANCHING.md) 第 7 节。这次不改 `fujiang.db`。
 

@@ -32,6 +32,7 @@ fn fun_reads_register_and_writes_stay_out() {
             "memory.get",
             "memory.upsert",
             "memory.forget",
+            "memory.consolidate",
         ]
     );
     for name in on
@@ -131,6 +132,8 @@ async fn fun_learn_fills_the_current_group() {
         max_rounds: 3,
         scope: Some(&scope),
         memory: None,
+        memory_unused_secs: 0,
+        memory_max_entries: 0,
     };
     let fun_only = BuiltinTools {
         fun: true,

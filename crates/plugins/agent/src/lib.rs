@@ -4,6 +4,7 @@ mod client;
 mod command;
 mod config;
 mod layered_memory;
+mod memory_consolidate;
 mod plan;
 mod session;
 mod tools;
@@ -76,8 +77,16 @@ impl Plugin for AgentPlugin {
     async fn on_start(&self, ctx: &BotContext, scope: &PluginScope) -> anyhow::Result<()> {
         let pool = ctx.open_instance_db(scope).await?;
         session::ensure_schema(&pool).await?;
-        *self.pool.lock().await = Some(pool);
         let cfg = AgentConfig::from_value(&ctx.instance_config(scope).await);
+        memory_consolidate::consolidate_if(
+            &pool,
+            cfg.memory_consolidate_on_start,
+            session::unix_now(),
+            memory_consolidate::unused_secs(cfg.memory_max_unused_days),
+            i64::from(cfg.memory_max_entries_per_scope),
+        )
+        .await?;
+        *self.pool.lock().await = Some(pool);
         log_enabled_tools(&cfg);
         Ok(())
     }
@@ -227,6 +236,8 @@ impl AgentPlugin {
             max_rounds: cfg.max_tool_rounds,
             scope: Some(&scope),
             memory: Some(&pool),
+            memory_unused_secs: memory_consolidate::unused_secs(cfg.memory_max_unused_days),
+            memory_max_entries: i64::from(cfg.memory_max_entries_per_scope),
         };
         let turn = tools::run_tool_loop(
             &client,

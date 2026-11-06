@@ -71,7 +71,8 @@ fn builtin_tools_follow_the_switches() {
             "memory_list",
             "memory_get",
             "memory_upsert",
-            "memory_forget"
+            "memory_forget",
+            "memory_consolidate"
         ]
     );
     assert_eq!(on[0].service(), "rank");
@@ -177,8 +178,8 @@ fn builtin_tools_follow_the_switches() {
 
     let extra = ToolSpec::parse("memo.search", "查备忘", json!({})).unwrap();
     let with_extra = assemble_tools(&[extra], BuiltinTools::ON);
-    assert_eq!(with_extra[14].name(), "memo.search");
-    assert_eq!(with_extra[14].wire_name(), "memo_search");
+    assert_eq!(with_extra[15].name(), "memo.search");
+    assert_eq!(with_extra[15].wire_name(), "memo_search");
 
     let write = assemble_tools(
         &[],
@@ -217,7 +218,7 @@ fn builtin_tools_follow_the_switches() {
     )
     .unwrap();
     let kept_builtin = assemble_tools(std::slice::from_ref(&configured), BuiltinTools::ON);
-    assert_eq!(kept_builtin.len(), 14);
+    assert_eq!(kept_builtin.len(), 15);
     assert_eq!(kept_builtin[0].description(), on[0].description());
     assert_eq!(kept_builtin[0].parameters(), on[0].parameters());
 
@@ -248,7 +249,8 @@ fun.search：在 tag、收藏和当前会话的学话里按原文查找。字符
 memory.list：列出分层记忆的键。可选字符串 scope：account、group 或 user。不传时群里看账号、本群和当前发言人，私聊看账号和当前发言人。还没有时是空数组。\n\
 memory.get：读取一条分层记忆。字符串 scope 和 key。没有这条时结果是 null。\n\
 memory.upsert：写入或覆盖一条分层记忆。字符串 scope、key、value。value 最多 500 个字。user 只写当前发言人，group 只写当前群。\n\
-memory.forget：删除分层记忆。字符串 scope 和 key。可选布尔 prefix 为 true 时按前缀删除。"
+memory.forget：删除分层记忆。字符串 scope 和 key。可选布尔 prefix 为 true 时按前缀删除。\n\
+memory.consolidate：整理当前可见的分层记忆。可选字符串 scope：account、group 或 user。不传时群里整理账号、本群和当前发言人，私聊整理账号和当前发言人。丢掉太久没用的，每层条数有上限。返回 removed 和 kept。"
     );
     assert!(!text.contains('_'));
     assert_eq!(tools_command_text(&[]), "当前没有可用工具。");
@@ -506,7 +508,8 @@ async fn builtin_rank_and_contest_calls_return_the_model_text() {
             "memory_list",
             "memory_get",
             "memory_upsert",
-            "memory_forget"
+            "memory_forget",
+            "memory_consolidate"
         ]
     );
     assert_eq!(

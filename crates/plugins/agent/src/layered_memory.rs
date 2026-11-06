@@ -15,12 +15,38 @@ pub(crate) async fn ensure_schema(pool: &SqlitePool) -> anyhow::Result<()> {
             value TEXT NOT NULL,
             updated_at INTEGER NOT NULL,
             source TEXT,
+            usage_count INTEGER NOT NULL DEFAULT 0,
+            last_used_at INTEGER,
             UNIQUE (scope_kind, scope_id, key)
         )",
     )
     .execute(pool)
     .await
     .context("create layered_memories")?;
+    ensure_usage_columns(pool).await?;
+    Ok(())
+}
+
+async fn ensure_usage_columns(pool: &SqlitePool) -> anyhow::Result<()> {
+    let names: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('layered_memories')")
+            .fetch_all(pool)
+            .await
+            .context("layered_memories columns")?;
+    if !names.iter().any(|name| name == "usage_count") {
+        sqlx::query(
+            "ALTER TABLE layered_memories ADD COLUMN usage_count INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(pool)
+        .await
+        .context("add layered_memories.usage_count")?;
+    }
+    if !names.iter().any(|name| name == "last_used_at") {
+        sqlx::query("ALTER TABLE layered_memories ADD COLUMN last_used_at INTEGER")
+            .execute(pool)
+            .await
+            .context("add layered_memories.last_used_at")?;
+    }
     Ok(())
 }
 
@@ -30,18 +56,49 @@ struct Caller {
     source: Option<String>,
 }
 
+#[cfg(test)]
 pub(crate) async fn call(
     pool: &SqlitePool,
     method: &str,
     args: &Value,
     now: i64,
 ) -> anyhow::Result<Value> {
+    call_limited(
+        pool,
+        method,
+        args,
+        now,
+        crate::memory_consolidate::unused_secs(crate::memory_consolidate::DEFAULT_UNUSED_DAYS),
+        i64::from(crate::memory_consolidate::DEFAULT_MAX_ENTRIES),
+    )
+    .await
+}
+
+pub(crate) async fn call_limited(
+    pool: &SqlitePool,
+    method: &str,
+    args: &Value,
+    now: i64,
+    unused_secs: i64,
+    max_entries: i64,
+) -> anyhow::Result<Value> {
     let caller = caller_from(args)?;
     match method {
-        "list" => list(pool, &caller, args).await,
-        "get" => get(pool, &caller, args).await,
+        "list" => list(pool, &caller, args, now).await,
+        "get" => get(pool, &caller, args, now).await,
         "upsert" => upsert(pool, &caller, args, now).await,
         "forget" => forget(pool, &caller, args).await,
+        "consolidate" => {
+            let pairs = match scope_arg(args) {
+                Some(scope) => vec![resolve(&caller, scope)?],
+                None => default_pairs(&caller),
+            };
+            let refs: Vec<(&str, &str)> = pairs
+                .iter()
+                .map(|(kind, id)| (*kind, id.as_str()))
+                .collect();
+            crate::memory_consolidate::run(pool, &refs, now, unused_secs, max_entries).await
+        }
         _ => bail!("unknown memory method"),
     }
 }
@@ -119,7 +176,7 @@ fn required_value(args: &Value) -> anyhow::Result<String> {
     Ok(value.to_string())
 }
 
-async fn list(pool: &SqlitePool, caller: &Caller, args: &Value) -> anyhow::Result<Value> {
+async fn list(pool: &SqlitePool, caller: &Caller, args: &Value, now: i64) -> anyhow::Result<Value> {
     let pairs = match scope_arg(args) {
         Some(scope) => vec![resolve(caller, scope)?],
         None => default_pairs(caller),
@@ -141,6 +198,7 @@ async fn list(pool: &SqlitePool, caller: &Caller, args: &Value) -> anyhow::Resul
         for row in rows {
             let key: String = row.try_get(0)?;
             let updated_at: i64 = row.try_get(1)?;
+            touch(pool, kind, &id, &key, now).await?;
             items.push(json!({
                 "scope": kind,
                 "scope_id": id,
@@ -152,7 +210,7 @@ async fn list(pool: &SqlitePool, caller: &Caller, args: &Value) -> anyhow::Resul
     Ok(Value::Array(items))
 }
 
-async fn get(pool: &SqlitePool, caller: &Caller, args: &Value) -> anyhow::Result<Value> {
+async fn get(pool: &SqlitePool, caller: &Caller, args: &Value, now: i64) -> anyhow::Result<Value> {
     let scope = scope_arg(args).context("missing scope")?;
     let key = required_key(args)?;
     let (kind, id) = resolve(caller, scope)?;
@@ -169,6 +227,7 @@ async fn get(pool: &SqlitePool, caller: &Caller, args: &Value) -> anyhow::Result
     let Some(row) = row else {
         return Ok(Value::Null);
     };
+    touch(pool, kind, &id, &key, now).await?;
     let value: String = row.try_get(0)?;
     let updated_at: i64 = row.try_get(1)?;
     let source: Option<String> = row.try_get(2)?;
@@ -232,6 +291,22 @@ async fn forget(pool: &SqlitePool, caller: &Caller, args: &Value) -> anyhow::Res
         .await
         .context("forget memory")?;
     Ok(json!({ "deleted": done.rows_affected() }))
+}
+
+async fn touch(pool: &SqlitePool, kind: &str, id: &str, key: &str, now: i64) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE layered_memories
+         SET usage_count = usage_count + 1, last_used_at = ?4
+         WHERE scope_kind = ?1 AND scope_id = ?2 AND key = ?3",
+    )
+    .bind(kind)
+    .bind(id)
+    .bind(key)
+    .bind(now)
+    .execute(pool)
+    .await
+    .context("touch memory")?;
+    Ok(())
 }
 
 fn row_json(
@@ -336,10 +411,12 @@ mod tests {
             cols,
             vec![
                 "key".to_string(),
+                "last_used_at".to_string(),
                 "scope_id".to_string(),
                 "scope_kind".to_string(),
                 "source".to_string(),
                 "updated_at".to_string(),
+                "usage_count".to_string(),
                 "value".to_string(),
             ]
         );

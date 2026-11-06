@@ -7,9 +7,9 @@
 | Codex | 福酱对应 |
 |---|---|
 | Phase 1：从单次 rollout 抽出结构化记忆 | 第一刀不做后台抽记忆；改由模型经 **tool** 决定写什么（可控、可审计） |
-| Phase 2：全局合并 / 去重 / 修剪 | 后续切片：可选 consolidation；第一刀只做 CRUD |
+| Phase 2：全局合并 / 去重 / 修剪 | T1：`memory.consolidate` 按用量和未使用天数修剪。不调第二个模型，不用 git workspace |
 | `raw_memory` + 紧凑摘要 | 每条记忆：`key` + `value`（短文本）+ `updated_at`；可选 `source` |
-| 读写分路径、引用与用量 | `memory.get` / `memory.list` 读；`memory.upsert` / `memory.forget` 写；后续再加引用计数 |
+| 读写分路径、引用与用量 | `memory.get` / `memory.list` 读并给返回的行记 `usage_count`；`memory.upsert` / `memory.forget` / `memory.consolidate` 写 |
 | 密钥脱敏 | upsert 时拒绝明显密钥形态（后续 lint）；第一刀文档约定不写密钥 |
 | 非 ephemeral、功能开关 | `layered_memory.enabled`（默认 true） |
 
@@ -40,6 +40,8 @@
 - `value`：文本，长度上限（如 500 字）
 - `updated_at`：unix 秒
 - `source`：可选，`group:{id}` / `private` 等，便于审计「这条个人记忆来自哪次群聊」
+- `usage_count`：被 `memory.get` 或 `memory.list` 返回过的次数。旧行补列后是 0
+- `last_used_at`：最近一次被 get 或 list 返回的 unix 秒。可空。旧行补列后为空
 
 主键或唯一索引：`(scope_kind, scope_id, key)`。
 
@@ -55,6 +57,7 @@
 | `memory.get` | 取一条 |
 | `memory.upsert` | 写入/更新；user 层强制当前发言者 QQ |
 | `memory.forget` | 删一条或按 key 前缀清（谨慎） |
+| `memory.consolidate` | 按未使用天数和每层条数上限删除。写开关和 upsert 一样。可选 `scope`；不传则整理当前能看见的层 |
 
 开关：`enable_memory_tools` 默认 true；写工具可另用 `enable_memory_write_tools` 默认 true（或与 memo 一样写默认开——群助场景要能记，默认开写，forget 保留）。
 
@@ -67,8 +70,8 @@
 
 ## 切片
 
-1. **T0（本波实现）**：schema + 工具 + 宿主注入发言者 QQ；群/私聊单测；覆盖率 ≥80%。
-2. **T1**：后台 consolidation（类 Phase2）、去重、用量/引用。
+1. **T0**：schema + 工具 + 宿主注入发言者 QQ；群/私聊单测；覆盖率 ≥80%。
+2. **T1（本波）**：`usage_count` / `last_used_at`；get 和 list 返回的键各记一次使用；`memory.consolidate` 按 `memory_max_unused_days`（默认 90）和 `memory_max_entries_per_scope`（默认 200）删除。`memory_consolidate_on_start` 默认 false，为 true 时 `on_start` 整理库里每一层一次。不调第二个模型，不用 git workspace。
 3. **T2**：管理页只读浏览三层记忆。
 
 ## 明确不做

@@ -139,6 +139,8 @@ pub(crate) struct ToolPass<'a> {
     pub max_rounds: u32,
     pub scope: Option<&'a MemoCallScope>,
     pub memory: Option<&'a sqlx::SqlitePool>,
+    pub memory_unused_secs: i64,
+    pub memory_max_entries: i64,
 }
 
 #[cfg(test)]
@@ -148,6 +150,10 @@ impl ToolPass<'static> {
             max_rounds,
             scope: None,
             memory: None,
+            memory_unused_secs: crate::memory_consolidate::unused_secs(
+                crate::memory_consolidate::DEFAULT_UNUSED_DAYS,
+            ),
+            memory_max_entries: i64::from(crate::memory_consolidate::DEFAULT_MAX_ENTRIES),
         }
     }
 }
@@ -357,6 +363,14 @@ fn builtin_specs(builtins: BuiltinTools) -> Vec<ToolSpec> {
                 }
             }),
         ));
+        specs.push(builtin_spec(
+            "memory.consolidate",
+            "整理当前可见的分层记忆。可选字符串 scope：account、group 或 user。不传时群里整理账号、本群和当前发言人，私聊整理账号和当前发言人。丢掉太久没用的，每层条数有上限。返回 removed 和 kept。",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "scope": { "type": "string" } }
+            }),
+        ));
     }
     specs
 }
@@ -500,7 +514,15 @@ async fn memory_value(pass: &ToolPass<'_>, method: &str, args: &Value) -> anyhow
     if pass.scope.is_none() {
         anyhow::bail!("memory scope is missing");
     }
-    crate::layered_memory::call(pool, method, args, crate::session::unix_now()).await
+    crate::layered_memory::call_limited(
+        pool,
+        method,
+        args,
+        crate::session::unix_now(),
+        pass.memory_unused_secs,
+        pass.memory_max_entries,
+    )
+    .await
 }
 
 fn tool_turn(

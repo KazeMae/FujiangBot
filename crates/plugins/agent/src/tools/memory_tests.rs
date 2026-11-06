@@ -35,6 +35,10 @@ fn pass<'a>(scope: &'a MemoCallScope, pool: Option<&'a SqlitePool>) -> ToolPass<
         max_rounds: 3,
         scope: Some(scope),
         memory: pool,
+        memory_unused_secs: crate::memory_consolidate::unused_secs(
+            crate::memory_consolidate::DEFAULT_UNUSED_DAYS,
+        ),
+        memory_max_entries: i64::from(crate::memory_consolidate::DEFAULT_MAX_ENTRIES),
     }
 }
 
@@ -47,6 +51,7 @@ fn memory_tools_follow_the_flags_and_describe_the_parameters() {
     assert!(names.contains(&"memory.get"));
     assert!(names.contains(&"memory.upsert"));
     assert!(names.contains(&"memory.forget"));
+    assert!(names.contains(&"memory.consolidate"));
     let upsert = specs
         .iter()
         .find(|spec| spec.name() == "memory.upsert")
@@ -60,6 +65,15 @@ fn memory_tools_follow_the_flags_and_describe_the_parameters() {
         .find(|spec| spec.name() == "memory.forget")
         .unwrap();
     assert!(forget.parameters()["properties"].get("prefix").is_some());
+    let consolidate = specs
+        .iter()
+        .find(|spec| spec.name() == "memory.consolidate")
+        .unwrap();
+    assert_eq!(consolidate.wire_name(), "memory_consolidate");
+    assert_eq!(consolidate.method(), "consolidate");
+    assert!(consolidate.parameters()["properties"]
+        .get("scope")
+        .is_some());
 
     let read = AgentConfig::from_value(&json!({"enable_memory_write_tools": false}));
     let read_specs = assemble_tools(&[], enabled_builtins(&read));
@@ -68,6 +82,7 @@ fn memory_tools_follow_the_flags_and_describe_the_parameters() {
     assert!(names.contains(&"memory.get"));
     assert!(!names.contains(&"memory.upsert"));
     assert!(!names.contains(&"memory.forget"));
+    assert!(!names.contains(&"memory.consolidate"));
 
     let off = AgentConfig::from_value(&json!({
         "enable_memory_tools": false,
@@ -272,6 +287,8 @@ async fn memory_failures_degrade_without_calling_the_hub() {
         max_rounds: 3,
         scope: Some(&scope),
         memory: None,
+        memory_unused_secs: 0,
+        memory_max_entries: 0,
     };
     let reply = run_tool_loop(
         &client,
@@ -294,6 +311,8 @@ async fn memory_failures_degrade_without_calling_the_hub() {
         max_rounds: 3,
         scope: None,
         memory: Some(&open),
+        memory_unused_secs: 0,
+        memory_max_entries: 0,
     };
     let reply = run_tool_loop(
         &client,
@@ -312,4 +331,59 @@ async fn memory_failures_degrade_without_calling_the_hub() {
         .await
         .unwrap();
     assert_eq!(n, 0);
+}
+
+#[tokio::test]
+async fn consolidate_tool_uses_pass_limits_and_the_bound_speaker() {
+    let pool = pool().await;
+    let now = crate::session::unix_now();
+    let old = now - 11 * 86_400;
+    for (id, key, usage, at) in [
+        ("123456", "keep", 5_i64, now),
+        ("123456", "drop", 1, now),
+        ("123456", "stale", 9, old),
+        ("1", "forged", 0, old),
+    ] {
+        sqlx::query(
+            "INSERT INTO layered_memories
+             (scope_kind, scope_id, key, value, updated_at, usage_count, last_used_at)
+             VALUES ('user', ?1, ?2, ?2, ?3, ?4, ?3)",
+        )
+        .bind(id)
+        .bind(key)
+        .bind(at)
+        .bind(usage)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let scope = MemoCallScope::from_source(Source::Group { id: 10086 }, 123456);
+    let args = bind_memory_scope(
+        "memory",
+        Some(&scope),
+        json!({"user_id": 1, "scope_id": "1", "group_id": 1}),
+    );
+    assert_eq!(args["user_id"], 123456);
+    let pass = ToolPass {
+        max_rounds: 1,
+        scope: Some(&scope),
+        memory: Some(&pool),
+        memory_unused_secs: 10 * 86_400,
+        memory_max_entries: 1,
+    };
+    let summary = super::super::memory_value(&pass, "consolidate", &args)
+        .await
+        .unwrap();
+    assert_eq!(summary["removed"].as_u64(), Some(2));
+    assert_eq!(summary["kept"].as_i64(), Some(1));
+    let left: Vec<String> = sqlx::query_scalar(
+        "SELECT scope_id || ':' || key FROM layered_memories ORDER BY scope_id, key",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        left,
+        vec!["1:forged".to_string(), "123456:keep".to_string()]
+    );
 }
