@@ -39,6 +39,8 @@ pub struct AgentConfig {
     pub timeout_secs: u64,
     /// Tool executions allowed in one user turn. `0` runs none.
     pub max_tool_rounds: u32,
+    pub enable_rank_tools: bool,
+    pub enable_contest_tools: bool,
     pub tools: Vec<ToolSpec>,
 }
 
@@ -59,6 +61,8 @@ impl AgentConfig {
             rate_limit: rate_limit_from(v),
             timeout_secs: timeout_secs_from(v),
             max_tool_rounds: u32_field(v, "max_tool_rounds", DEFAULT_MAX_TOOL_ROUNDS),
+            enable_rank_tools: bool_field(v, "enable_rank_tools", true),
+            enable_contest_tools: bool_field(v, "enable_contest_tools", true),
             tools: tools_from(v),
         }
     }
@@ -223,6 +227,8 @@ mod tests {
         assert_eq!(cfg.rate_limit.per_group_per_hour, 120);
         assert_eq!(cfg.timeout_secs, 60);
         assert_eq!(cfg.max_tool_rounds, 3);
+        assert!(cfg.enable_rank_tools);
+        assert!(cfg.enable_contest_tools);
         assert!(cfg.tools.is_empty());
     }
 
@@ -278,6 +284,8 @@ mod tests {
             "rate_limit": { "per_user_per_hour": "nope" },
             "personas": "nope",
             "max_tool_rounds": "nope",
+            "enable_rank_tools": "no",
+            "enable_contest_tools": 0,
             "tools": "nope"
         }));
         assert_defaults(&cfg);
@@ -354,5 +362,21 @@ mod tests {
         }));
         assert_eq!(fallback.max_tool_rounds, 3);
         assert!(fallback.tools.is_empty());
+    }
+
+    #[test]
+    fn builtin_tool_flags_default_on_and_can_turn_off() {
+        let off = AgentConfig::from_value(&json!({
+            "enable_rank_tools": false,
+            "enable_contest_tools": false
+        }));
+        assert!(!off.enable_rank_tools);
+        assert!(!off.enable_contest_tools);
+
+        let rank_only = AgentConfig::from_value(&json!({
+            "enable_contest_tools": false
+        }));
+        assert!(rank_only.enable_rank_tools);
+        assert!(!rank_only.enable_contest_tools);
     }
 }
