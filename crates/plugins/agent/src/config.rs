@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
@@ -23,7 +25,10 @@ pub struct AgentConfig {
     pub api_key_env: String,
     pub temperature: f64,
     pub max_history_turns: u32,
+    /// Body of the `default` persona.
     pub system_prompt: String,
+    /// Named personas other than `default`. The default body is `system_prompt`.
+    personas: BTreeMap<String, String>,
     pub wake_words: Vec<String>,
     pub require_at: bool,
     pub rate_limit: RateLimit,
@@ -34,18 +39,48 @@ pub struct AgentConfig {
 impl AgentConfig {
     /// Lenient parse. Unknown host fields (`priority`, `groups`, `allow_private`, `enabled`) and a leftover `api` key are ignored.
     pub fn from_value(v: &Value) -> Self {
+        let (system_prompt, personas) = personas_from(v);
         Self {
             base_url: base_url_from(v),
             model: string_field(v, "model", DEFAULT_MODEL),
             api_key_env: string_field(v, "api_key_env", DEFAULT_API_KEY_ENV),
             temperature: temperature_from(v),
             max_history_turns: u32_field(v, "max_history_turns", DEFAULT_MAX_HISTORY_TURNS),
-            system_prompt: string_field(v, "system_prompt", DEFAULT_SYSTEM_PROMPT),
+            system_prompt,
+            personas,
             wake_words: wake_words_from(v),
             require_at: bool_field(v, "require_at", false),
             rate_limit: rate_limit_from(v),
             timeout_secs: timeout_secs_from(v),
         }
+    }
+
+    pub fn prompt_for(&self, name: &str) -> Option<&str> {
+        if name == "default" {
+            Some(self.system_prompt.as_str())
+        } else {
+            self.personas.get(name).map(String::as_str)
+        }
+    }
+
+    pub fn persona_names(&self) -> Vec<&str> {
+        let mut names = Vec::with_capacity(self.personas.len() + 1);
+        names.push("default");
+        names.extend(self.personas.keys().map(String::as_str));
+        names
+    }
+
+    /// Stored name, or the default persona when the name is missing from config.
+    pub fn resolve_persona(&self, stored: Option<&str>) -> (&str, &str) {
+        if let Some(name) = stored {
+            if name == "default" {
+                return ("default", self.system_prompt.as_str());
+            }
+            if let Some((key, body)) = self.personas.get_key_value(name) {
+                return (key.as_str(), body.as_str());
+            }
+        }
+        ("default", self.system_prompt.as_str())
     }
 }
 
@@ -112,6 +147,35 @@ fn rate_limit_from(v: &Value) -> RateLimit {
     }
 }
 
+/// `personas.default.system_prompt` wins over the top-level `system_prompt`.
+/// The default body stays in `system_prompt`. Other names go in the map.
+fn personas_from(v: &Value) -> (String, BTreeMap<String, String>) {
+    let mut default_prompt = string_field(v, "system_prompt", DEFAULT_SYSTEM_PROMPT);
+    let mut extras = BTreeMap::new();
+    let Some(obj) = v.get("personas").and_then(Value::as_object) else {
+        return (default_prompt, extras);
+    };
+    for (name, body) in obj {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let Some(prompt) = body.get("system_prompt").and_then(Value::as_str) else {
+            continue;
+        };
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            continue;
+        }
+        if name == "default" {
+            default_prompt = prompt.to_string();
+        } else {
+            extras.insert(name.to_string(), prompt.to_string());
+        }
+    }
+    (default_prompt, extras)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +188,13 @@ mod tests {
         assert_eq!(cfg.temperature, 0.7);
         assert_eq!(cfg.max_history_turns, 20);
         assert_eq!(cfg.system_prompt, "你是福酱，西南科技大学 ACM 群助手。");
+        assert!(cfg.personas.is_empty());
+        assert_eq!(cfg.persona_names(), vec!["default"]);
+        assert_eq!(
+            cfg.prompt_for("default"),
+            Some("你是福酱，西南科技大学 ACM 群助手。")
+        );
+        assert_eq!(cfg.prompt_for("strict"), None);
         assert_eq!(cfg.wake_words, vec!["福酱".to_string()]);
         assert!(!cfg.require_at);
         assert_eq!(cfg.rate_limit.per_user_per_hour, 30);
@@ -153,7 +224,8 @@ mod tests {
             "priority": 10,
             "groups": [1],
             "allow_private": false,
-            "enabled": true
+            "enabled": true,
+            "api": "chat"
         }));
         assert_eq!(cfg.base_url, "https://example.test/v1");
         assert_eq!(cfg.model, "deepseek-chat");
@@ -161,6 +233,8 @@ mod tests {
         assert_eq!(cfg.temperature, 0.2);
         assert_eq!(cfg.max_history_turns, 4);
         assert_eq!(cfg.system_prompt, "be brief");
+        assert_eq!(cfg.prompt_for("default"), Some("be brief"));
+        assert!(cfg.personas.is_empty());
         assert_eq!(cfg.wake_words, vec!["福".to_string(), "bot".to_string()]);
         assert!(cfg.require_at);
         assert_eq!(cfg.rate_limit.per_user_per_hour, 2);
@@ -177,7 +251,8 @@ mod tests {
             "wake_words": "福酱",
             "require_at": "yes",
             "timeout_secs": 0,
-            "rate_limit": { "per_user_per_hour": "nope" }
+            "rate_limit": { "per_user_per_hour": "nope" },
+            "personas": "nope"
         }));
         assert_defaults(&cfg);
     }
@@ -186,5 +261,39 @@ mod tests {
     fn explicit_empty_wake_words_stay_empty() {
         let cfg = AgentConfig::from_value(&json!({ "wake_words": [] }));
         assert!(cfg.wake_words.is_empty());
+    }
+
+    #[test]
+    fn named_personas_overlay_the_default_prompt() {
+        let cfg = AgentConfig::from_value(&json!({
+            "system_prompt": "top",
+            "personas": {
+                "default": { "system_prompt": " from default " },
+                "strict": { "system_prompt": " be strict " },
+                "empty": { "system_prompt": "  " },
+                "bad": 1,
+                " ": { "system_prompt": "nope" }
+            }
+        }));
+        assert_eq!(cfg.system_prompt, "from default");
+        assert_eq!(cfg.prompt_for("default"), Some("from default"));
+        assert_eq!(cfg.prompt_for("strict"), Some("be strict"));
+        assert_eq!(cfg.prompt_for("missing"), None);
+        assert_eq!(cfg.persona_names(), vec!["default", "strict"]);
+        assert_eq!(cfg.resolve_persona(None), ("default", "from default"));
+        assert_eq!(cfg.resolve_persona(Some("strict")), ("strict", "be strict"));
+        assert_eq!(
+            cfg.resolve_persona(Some("missing")),
+            ("default", "from default")
+        );
+
+        let only_named = AgentConfig::from_value(&json!({
+            "personas": { "strict": { "system_prompt": "be strict" } }
+        }));
+        assert_eq!(
+            only_named.system_prompt,
+            "你是福酱，西南科技大学 ACM 群助手。"
+        );
+        assert_eq!(only_named.prompt_for("strict"), Some("be strict"));
     }
 }
