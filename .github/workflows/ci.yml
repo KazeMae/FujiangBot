@@ -10,6 +10,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install gpgv
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y gpgv gpg gpg-agent gpgconf
+      - name: Test workspace bundle
+        run: python3 scripts/test-workspace-bundle.py
+      - name: Test workspace bundle gpgv
+        run: REQUIRE_GPGV=1 python3 scripts/test-workspace-bundle-gpgv.py
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
