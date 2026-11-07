@@ -21,6 +21,11 @@ mod fun_pack;
 mod qq_read;
 mod schedule_pack;
 mod skills;
+mod workspace_pack;
+
+#[cfg(test)]
+#[path = "workspace_tests.rs"]
+mod workspace_tests;
 
 pub(crate) use schedule_pack::{command as schedule_command, tick as schedule_tick};
 pub(crate) use skills::resident_tools;
@@ -383,22 +388,58 @@ pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
     pass: &ToolPass<'_>,
     hub: &H,
 ) -> ToolTurn {
-    tool_loop(client, messages, builtins, pass, hub, |opened| {
-        skills::round_tools(configured, builtins, opened)
-    })
+    tool_loop_with(
+        client,
+        messages,
+        builtins,
+        pass,
+        hub,
+        workspace_pack::production_execute,
+        |opened| skills::round_tools(configured, builtins, opened),
+    )
     .await
 }
 
+#[cfg(test)]
 async fn tool_loop<H, F>(
     client: &LlmClient,
     messages: &[ChatMessage],
     builtins: BuiltinTools,
     pass: &ToolPass<'_>,
     hub: &H,
+    visible: F,
+) -> ToolTurn
+where
+    H: ToolHub + ?Sized,
+    F: FnMut(&BTreeSet<String>) -> Vec<ToolSpec>,
+{
+    tool_loop_with(
+        client,
+        messages,
+        builtins,
+        pass,
+        hub,
+        workspace_pack::production_execute,
+        visible,
+    )
+    .await
+}
+
+async fn tool_loop_with<H, E, F>(
+    client: &LlmClient,
+    messages: &[ChatMessage],
+    builtins: BuiltinTools,
+    pass: &ToolPass<'_>,
+    hub: &H,
+    mut execute: E,
     mut visible: F,
 ) -> ToolTurn
 where
     H: ToolHub + ?Sized,
+    E: FnMut(
+        crate::workspace::WorkspaceOwner,
+        crate::workspace_runner::Payload,
+    ) -> anyhow::Result<crate::workspace_runner::RunResult>,
     F: FnMut(&BTreeSet<String>) -> Vec<ToolSpec>,
 {
     let max_rounds = pass.max_rounds;
@@ -499,11 +540,12 @@ where
                         }
                     };
                     if crate::workspace::is_exec_wire(&call.name) {
-                        match crate::workspace::handle_tool(
+                        match workspace_pack::dispatch(
                             pass.memory,
                             pass.scope.map(MemoCallScope::workspace_turn),
                             &call.name,
                             &args,
+                            &mut execute,
                         )
                         .await
                         {

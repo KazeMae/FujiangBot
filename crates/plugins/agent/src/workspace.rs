@@ -5,6 +5,10 @@ use sqlx::SqlitePool;
 pub const RUNNER_UNAVAILABLE: &str = "没有已验收的独立 rootfs，workspace 执行不可用";
 const BASH_WIRE: &str = "workspace_bash";
 const CODE_WIRE: &str = "workspace_code";
+const MAX_SCRIPT: usize = 64 * 1024;
+
+#[cfg(test)]
+pub(crate) use crate::workspace_backend::production_available;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PersonalQq(i64);
@@ -93,12 +97,29 @@ pub async fn command(
     }
 }
 
+#[cfg(test)]
 pub async fn handle_tool(
     pool: Option<&SqlitePool>,
     turn: Option<HostTurn>,
     wire: &str,
     args: &Value,
 ) -> Result<Value, ()> {
+    handle_tool_with(pool, turn, wire, args, crate::workspace_backend::execute).await
+}
+
+pub(crate) async fn handle_tool_with<F>(
+    pool: Option<&SqlitePool>,
+    turn: Option<HostTurn>,
+    wire: &str,
+    args: &Value,
+    execute_callback: F,
+) -> Result<Value, ()>
+where
+    F: FnOnce(
+        WorkspaceOwner,
+        crate::workspace_runner::Payload,
+    ) -> anyhow::Result<crate::workspace_runner::RunResult>,
+{
     let Some(pool) = pool else {
         return Err(());
     };
@@ -110,11 +131,11 @@ pub async fn handle_tool(
     }
     let owner = resolve(pool, turn).await.map_err(|_| ())?;
     let payload = accept_script(wire, args)?;
-    match crate::workspace_backend::execute(owner, payload) {
+    match execute_callback(owner, payload) {
         Ok(result) => Ok(json!({
             "exit_code": result.exit_code,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
+            "stdout": String::from_utf8_lossy(&result.stdout),
+            "stderr": String::from_utf8_lossy(&result.stderr),
             "timed_out": result.timed_out,
             "truncated": result.truncated,
         })),
@@ -162,7 +183,7 @@ fn accept_script(wire: &str, args: &Value) -> Result<crate::workspace_runner::Pa
     let Some(script) = obj.get("script").and_then(Value::as_str) else {
         return Err(());
     };
-    if script.is_empty() || script.contains('\0') {
+    if script.is_empty() || script.len() > MAX_SCRIPT || script.contains('\0') {
         return Err(());
     }
     let lang = match obj.get("lang") {

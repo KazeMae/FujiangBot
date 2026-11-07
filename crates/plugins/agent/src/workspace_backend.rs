@@ -1,22 +1,42 @@
-const RUNNER_UNAVAILABLE: &str =
-    "runner unavailable: rootfs authority is not an implemented supplier";
+use std::os::fd::{AsFd, BorrowedFd};
+use std::path::PathBuf;
+
+const RUNNER_UNAVAILABLE: &str = "accepted official rootfs unavailable";
+
+pub(crate) use crate::workspace_store::VerifiedBase;
+
+pub(crate) fn production_available() -> bool {
+    UnacceptedRootfs.acquire().is_ok()
+}
 
 pub fn execute(
     owner: crate::workspace::WorkspaceOwner,
     payload: crate::workspace_runner::Payload,
 ) -> anyhow::Result<crate::workspace_runner::RunResult> {
-    execute_with(owner, payload, &UnacceptedRootfs)
+    execute_with(
+        owner,
+        payload,
+        &UnacceptedRootfs,
+        crate::workspace_runner::run,
+    )
 }
 
-fn execute_with(
+pub(crate) fn execute_with(
     owner: crate::workspace::WorkspaceOwner,
     payload: crate::workspace_runner::Payload,
     authority: &impl RootfsAuthority,
+    run_callback: impl FnOnce(
+        BorrowedFd<'_>,
+        BorrowedFd<'_>,
+        crate::workspace_runner::Payload,
+    ) -> anyhow::Result<crate::workspace_runner::RunResult>,
 ) -> anyhow::Result<crate::workspace_runner::RunResult> {
     let owner = map_owner(owner)?;
-    let root = authority.verified_workspace_root()?;
-    let store = crate::workspace_store::WorkspaceStore::open(&root, owner)?;
-    crate::workspace_runner::run(store.rootfs(), std::os::fd::AsFd::as_fd(&store), payload)
+    let (host, base) = authority.acquire()?;
+    let store = crate::workspace_store::WorkspaceStore::open(&host, owner, &base)?;
+    let result = run_callback(store.rootfs(), store.as_fd(), payload);
+    drop(store);
+    result
 }
 
 fn map_owner(
@@ -36,14 +56,18 @@ fn map_owner(
     }
 }
 
-trait RootfsAuthority {
-    fn verified_workspace_root(&self) -> anyhow::Result<std::path::PathBuf>;
+pub(crate) trait RootfsAuthority {
+    fn acquire(&self) -> anyhow::Result<(PathBuf, VerifiedBase)>;
 }
 
 struct UnacceptedRootfs;
 
 impl RootfsAuthority for UnacceptedRootfs {
-    fn verified_workspace_root(&self) -> anyhow::Result<std::path::PathBuf> {
+    fn acquire(&self) -> anyhow::Result<(PathBuf, VerifiedBase)> {
         Err(anyhow::anyhow!(RUNNER_UNAVAILABLE))
     }
 }
+
+#[cfg(test)]
+#[path = "workspace_backend_tests.rs"]
+mod tests;

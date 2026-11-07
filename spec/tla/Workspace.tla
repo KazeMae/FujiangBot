@@ -21,12 +21,16 @@ Init ==
 Personal ==
   /\ place = "group"
   /\ choice' = [choice EXCEPT ![group, actor] = "personal"]
-  /\ UNCHANGED <<place, actor, group, peer, ownerKind, ownerId, payload>>
+  /\ ownerKind' = "unset"
+  /\ ownerId' = 0
+  /\ UNCHANGED <<place, actor, group, peer, payload>>
 
 Restore ==
   /\ place = "group"
   /\ choice' = [choice EXCEPT ![group, actor] = "group"]
-  /\ UNCHANGED <<place, actor, group, peer, ownerKind, ownerId, payload>>
+  /\ ownerKind' = "unset"
+  /\ ownerId' = 0
+  /\ UNCHANGED <<place, actor, group, peer, payload>>
 
 SwitchActor(a) ==
   /\ a \in Actors
@@ -89,9 +93,14 @@ Spec == Init /\ [][Next]_vars
 Inv ==
   /\ payload = 0
   /\ ownerKind \in {"unset", "personal", "group", "refuse"}
-  /\ ownerKind = "personal" => ownerId = actor
-  /\ ownerKind = "group" => /\ ownerId = group
-                           /\ place = "group"
+  /\ ownerKind = "personal" =>
+       /\ ownerId = actor
+       /\ place = "private" => peer = actor
+       /\ place = "group" => choice[group, actor] = "personal"
+  /\ ownerKind = "group" =>
+       /\ ownerId = group
+       /\ place = "group"
+       /\ choice[group, actor] = "group"
   /\ ownerKind = "unset" => ownerId = 0
   /\ ownerKind = "refuse" => place = "private" /\ peer # actor /\ ownerId = 0
   /\ \A g \in Groups, a \in Actors : choice[g, a] \in {"group", "personal"}

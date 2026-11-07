@@ -49,7 +49,7 @@ impl AsFd for WorkspaceStore {
 }
 
 impl WorkspaceStore {
-    pub fn open(host: &Path, owner: Owner) -> io::Result<Self> {
+    pub fn open(host: &Path, owner: Owner, base: &VerifiedBase) -> io::Result<Self> {
         let (ns, id_s, id) = match owner {
             Owner::Personal(id) => ("personal", id.to_string(), id),
             Owner::Group(id) => ("group", id.to_string(), id),
@@ -58,11 +58,12 @@ impl WorkspaceStore {
             return Err(invalid("id must be positive"));
         }
         let host_fd = open_host(host)?;
+        workspace_seed::ensure_host_outside_base(host_fd.as_raw_fd(), base)?;
         let ns_fd = subdir(host_fd.as_raw_fd(), ns)?;
         let owner_fd = subdir(ns_fd.as_raw_fd(), &id_s)?;
         let _lock = lock_owner(owner_fd.as_raw_fd())?;
         let work = subdir(owner_fd.as_raw_fd(), "work")?;
-        let rootfs = subdir(owner_fd.as_raw_fd(), "rootfs")?;
+        let rootfs = workspace_seed::ensure_rootfs(owner_fd.as_raw_fd(), owner, base)?;
         Ok(Self {
             work,
             rootfs,
@@ -207,76 +208,52 @@ fn fstat(fd: RawFd) -> io::Result<libc::stat> {
 
 fn lock_owner(dir: RawFd) -> io::Result<OwnedFd> {
     let name = one_component(".lock")?;
-    let fd = raw_owned(unsafe {
-        libc::openat(
-            dir,
-            name.as_ptr(),
-            libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            0o600,
-        )
-    })?;
+    let mut pre: libc::stat = unsafe { std::mem::zeroed() };
+    let pre_rc = unsafe { libc::fstatat(dir, name.as_ptr(), &mut pre, libc::AT_SYMLINK_NOFOLLOW) };
+    let flags = libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+    let fd = if pre_rc != 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ENOENT) {
+            return Err(err);
+        }
+        raw_owned(unsafe {
+            libc::openat(
+                dir,
+                name.as_ptr(),
+                flags | libc::O_CREAT | libc::O_EXCL,
+                0o600,
+            )
+        })?
+    } else {
+        reject_lock_stat(&pre)?;
+        raw_owned(unsafe { libc::openat(dir, name.as_ptr(), flags, 0) })?
+    };
     let st = fstat(fd.as_raw_fd())?;
-    if (st.st_mode & libc::S_IFMT) != libc::S_IFREG || st.st_nlink != 1 {
-        return Err(invalid("lock must be a regular file with nlink 1"));
-    }
-    if st.st_uid != unsafe { libc::geteuid() } {
-        return Err(invalid("lock not owned by current uid"));
-    }
+    reject_lock_stat(&st)?;
     if unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(fd)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::symlink;
-    use std::path::PathBuf;
-
-    fn scratch() -> PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "wsstore-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&p).unwrap();
-        p
+fn reject_lock_stat(st: &libc::stat) -> io::Result<()> {
+    if (st.st_mode & libc::S_IFMT) != libc::S_IFREG
+        || st.st_nlink != 1
+        || st.st_mode & 0o7777 != 0o600
+    {
+        return Err(invalid("lock must be a regular file with nlink 1"));
     }
-
-    #[test]
-    fn rejects_symlink_host() {
-        let base = scratch();
-        let real = base.join("real");
-        std::fs::create_dir(&real).unwrap();
-        let link = base.join("link");
-        symlink(&real, &link).unwrap();
-        assert!(WorkspaceStore::open(&link, Owner::personal(1).unwrap()).is_err());
-        let _ = std::fs::remove_dir_all(&base);
+    if st.st_uid != unsafe { libc::geteuid() } {
+        return Err(invalid("lock not owned by current uid"));
     }
-
-    #[test]
-    fn owner_lock_conflict() {
-        let base = scratch();
-        let owner = Owner::personal(42).unwrap();
-        let held = WorkspaceStore::open(&base, owner).unwrap();
-        let err = WorkspaceStore::open(&base, owner).unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::WouldBlock);
-        drop(held);
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn same_number_qq_and_group_are_different_dirs() {
-        let base = scratch();
-        let qq = WorkspaceStore::open(&base, Owner::personal(7).unwrap()).unwrap();
-        let group = WorkspaceStore::open(&base, Owner::group(7).unwrap()).unwrap();
-        let ino = |fd: RawFd| fstat(fd).unwrap().st_ino;
-        assert_ne!(ino(qq.work.as_raw_fd()), ino(group.work.as_raw_fd()));
-        assert_ne!(ino(qq.rootfs.as_raw_fd()), ino(group.rootfs.as_raw_fd()));
-        let _ = std::fs::remove_dir_all(&base);
-    }
+    Ok(())
 }
+
+#[path = "workspace_seed.rs"]
+mod workspace_seed;
+
+#[cfg(test)]
+#[path = "workspace_seed_tests.rs"]
+mod workspace_seed_tests;
+
+pub(crate) use workspace_seed::VerifiedBase;

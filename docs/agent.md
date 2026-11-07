@@ -73,7 +73,11 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 
 个人 QQ 和群号是两种所有权，不会混用。私聊只绑定当前这条真实私聊，而且发言人 QQ 必须和 `Source::Friend` 的 id 相同，否则拒绝，不为别人操作。群默认绑定当前群。只有当前发言人在当前群发出 `.agent workspace personal` 或 `本人`，才会把这一对「当前群 + 当前 QQ」记成本人；`group` 或 `群` 恢复当前群。别的群、别的人不受影响。昵称、引用、摘要和模型参数都不能指定人或目录。
 
-每次工具调用用这一轮的真实 `source` 和发言人重新读选择，不缓存上一名说话人的路径。没有可用后端，配置里也不提供执行开关。`workspace.bash` 和 `workspace.code` 不进入启用清单。如果调用，只接受字符串 `script`，以及 bash 的 `sh` 或 code 的 `python`。`lang` 不是字符串就拒绝。其它字段拒绝。没有已验收 rootfs 时返回不可用，不启动进程。用 `touch` 哨兵文件的测试只说明这条路由没执行脚本，不证明隔离。准备公开签名清单的步骤在 [workspace-rootfs](workspace-rootfs.md)。
+每次工具调用从这一轮真实 `MemoCallScope` 做成 `HostTurn`，`handle_tool_with` 重新读 `workspace_choice`。不缓存上一名说话人。选择只认当前群里该 actor 显式写下的本人或群；参数、昵称、环境变量和配置都不能改 owner。
+
+`workspace.bash` 与 `workspace.code` 的规格已经存在：只接受字符串 `script`，以及 bash 的可选 `lang`（`bash` 或 `sh`，省略为 bash）或 code 必填的 `python`。其它字段拒绝。脚本按字节计，空串、含 NUL、或长于 64KiB 拒绝。解释器是 bash（`--noprofile --norc`）、`/bin/sh -c`，或 `/usr/bin/python3 -I -c`。成功结果给出 `exit_code` 和 stdout、stderr 字符串。这些规格只有 `production_available` 为真才放进当轮工具清单。该函数等于 `UnacceptedRootfs.acquire().is_ok()`，而生产 `acquire` 恒失败，所以当前不广告、调用返回不可用，且不启动进程。没有身份覆盖字段，也没有宿主 exec 降级。
+
+QQ 选择是真实 SQLite metadata，测试不打 NapCat。OS 复制与持久等夹具通过。ToolLoop 里成功路径的 runner 回调是模拟。合成不完整 root 上的原生 bwrap 对 bash 和 python3 都以 exit 1 结束（目标文件不存在），不是 shell 或 Python 成功。官方 rootfs gate 仍关闭，见 [workspace-rootfs](workspace-rootfs.md)。
 
 ## 分层记忆
 

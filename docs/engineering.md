@@ -108,3 +108,38 @@ REQUIRE_GPGV=1 python3 scripts/test-workspace-bundle-gpgv.py
 ```
 
 已测：`cargo fmt` 通过。与 CI 相同的 agent clippy（`-D warnings`）通过。`cargo test --workspace --offline` 248 项通过。`cargo llvm-cov -p fujiang-plugin-agent --summary-only` 行覆盖 87.04%，只证明 Rust。TLC：ToolLoop 54、Session 688、Workspace 640、Runner 17，无错误。已有 rootfs 准备脚本 11 个 case 通过，不是真实 crypto。11 项正式单元回归通过，包含无 writer FIFO subprocess 截止 3 秒、真实目录 FD、CLI 失败清理。本机 gpgv 9 条 skip。`REQUIRE_GPGV=1` 缺依赖时真实失败仍准确。不声称 CI 已通过。
+
+上面 248 项、87.04% 和 Workspace 640 是更早一头的记录。不能写成当前 owner 头的通过。
+
+## 2026-11-07 独立 owner 写层（当前头）
+
+基线 `32427e4` 的整体 CI 已成功：2026-11-07 18:42:18 Asia/Shanghai，https://github.com/KazeMae/FujiangBot/actions/runs/42364745250 。这只证明该基线。当前 head 没有新的 CI 结论。
+
+在仓库根目录实际跑完：
+
+```
+cargo fmt --all -- --check
+cargo clippy -p fujiang-plugin-agent --all-targets --no-deps --offline -- -D warnings
+cargo test --workspace --offline
+cargo llvm-cov -p fujiang-plugin-agent --summary-only
+scripts/run-tlc.sh
+python3 scripts/test-workspace-bundle.py
+python3 scripts/test-workspace-bundle-gpgv.py
+python3 scripts/test-workspace-rootfs.py
+scripts/check-file-length.sh
+git diff --check
+```
+
+结果（日志在 `/workspace/agent-tools/fujiang-local-20261107/`）：
+
+- `owner-clippy-final.log`：上述 clippy 通过。
+- fmt `--check` 通过。
+- `owner-workspace-final.log`：`cargo test --workspace --offline` 261 通过，其中 agent 179；0 失败，0 ignored。
+- `owner-coverage-final.log`：`TOTAL` 行覆盖 90.76%（9299 行，859 未覆盖）。同一行的 88.55% 是 region，不是行覆盖。
+- `owner-python-bundle-final.log`：24 通过。`owner-python-gpgv-final.log`：14 条因缺 gpgv 明确 SKIP。`owner-python-rootfs-final.log`：旧 stub 11 个控制流通过。SKIP 不是验签通过，stub 不是官方工件。
+- `owner-tlc-acceptance.log`：六模型无错误。distinct states：ToolLoop 54、Session 688、Workspace 512、OwnerLayer 346、Runner 17、Bundle 16。
+- 文件长度检查与 `git diff --check` 通过。
+
+范围：真实 SQLite 上的 QQ 选择，以及 OS 复制、持久、并发、硬链接、符号链接、metadata、FIFO、清理和界。全局节点预算在预取分配前计入，含清理。ToolLoop 的模拟 LLM 与成功路径的 runner 回调是模拟。`owner-agent-second.log` 里，合成不完整 owner root 上原生 bwrap 对 `/bin/bash` 和 `/usr/bin/python3` 都是 exit 1、`execvp` No such file。这不是成功的 shell、Python 或 Ubuntu。
+
+没有可用的生产已接受 base，provider 未因此打开。模型、配置、环境都不能启用。没有官方 rootfs、apt、网络、挂载或 FD 端到端。没有 NapCat 生产调用，没有从 CI 取回工件，没有宿主根绑定，没有 DNS 重试。`UnacceptedRootfs` 恒拒绝。`VerifiedBase` 只有 `cfg(test)` 工厂。运行时没有作为 Ubuntu 交付。

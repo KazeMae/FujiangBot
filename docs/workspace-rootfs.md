@@ -1,8 +1,20 @@
 # 工作区 rootfs 准备
 
-消费侧已经接到执行器。每次真实 resolve 都经 `handle_tool` 进入。唯一生产供应策略UnacceptedRootfs始终拒绝。配置和模型都不能把 rootfs 标成已接受，也不能因此启用 bash 或 code。
+消费侧已经接到执行器。每次调用用这一轮真实 `MemoCallScope` 做成 `HostTurn`，`handle_tool_with` 重新 resolve，不复用上一名说话人。群里只有当前 actor 显式选过本人（表键是群号+actor）才进个人 owner，否则是当前群。私聊 source 与 actor 不一致则拒绝。
 
-owner 目录、锁和 bwrap 原语的代码已经有。还没有真实 rootfs，没有独立写层，也没有 bash、python、apt 的验收。rootfs 供应商并未完成。`--unpack` 的有限结构切片已实现，见文末：延迟链接与有限 PAX。下一单元实现独立 owner 写层；本单元只提出 `VerifiedBase` 接口，不实现，也不启用。
+唯一生产供应策略 `UnacceptedRootfs` 的 `acquire` 恒为错误。`production_available` 只由这次 `acquire` 派生。模型、环境变量和配置都不能把它改成已接受。内部策略未接受时，`workspace.bash` 与 `workspace.code` 不进入广告清单。
+
+已实现的执行链：`RootfsAuthority::acquire` 给出 host 与 `VerifiedBase` 之后，`WorkspaceStore::open(host, typed owner, &VerifiedBase)` 在 owner 锁下准备目录，把该 owner 的 rootfs FD 与 work FD 借给既有 runner。锁随 store 活到调用结束。`VerifiedBase` 的字段是私有 `OwnedFd` 和 32 字节摘要。构造器只有 `cfg(test)` 的合成 `fixture`。生产路径不能用 receipt 造出一个 `VerifiedBase`。
+
+owner 核心在 `workspace_seed.rs`，字节复制在 `workspace_seed_copy.rs`，正式 OS 测试在 `workspace_seed_tests.rs`。三处都已完成。目录是 `personal/<id>` 或 `group/<id>`。私有 generation 里有 rootfs，以及严格 identity 文件：属当前 euid、nlink 1、mode 0600，内容含 owner 种类与 id、base 摘要和 `unaccepted` 策略。发布是锁内一次 `rename`（`RENAME_NOREPLACE`）。失败则在锁下删 stage。`work` 跨打开保留，不随 generation 重做。复制用 nofollow 的目录 FD 做字节复制：绝不硬链接 base，也绝不硬链接其他 owner；同一 owner 树内的硬链接按原链接关系保留。符号链接按原文推迟创建，宿主复制过程不解引用。`proc`、`dev`、`work`、`tmp`、`run`、`sys` 必须是真实目录，不能是链接。
+
+复制界：深度 64、节点 50000、合计 1GiB、单文件 256MiB。全局节点预算在预取分配之前计入，清理也计入；有一条很小的真实嵌套宽预算测试。来源 setuid/setgid 与特殊文件拒绝。不复制 xattr 或 capability。普通文件 0600，可执行 0700。私有 owner 包装目录 0700。guest 的 root 与上述挂载点目录可以是 0755。这些界和 runner 里已有的每进程 rlimit 只约束这一次复制和该进程。它们不是聚合文件系统配额，也不是完整的 cgroup 安全。
+
+QQ 选择走真实 SQLite metadata，测试不调用 NapCat。OS 复制、持久、并发、硬链接、符号链接、metadata、FIFO、清理和界的测试通过。ToolLoop 的模拟 LLM，以及成功路径上替换的最终 runner 回调，是模拟。合成的不完整 owner root 上，原生 runner 对 Bash 和 Python 都真实启动过 bwrap：exit 1，`bwrap: execvp /bin/bash: No such file or directory` 与 `bwrap: execvp /usr/bin/python3: No such file or directory`（`owner-agent-second.log`）。这是负向调用，不是 shell、Python 或 Ubuntu 成功。没有官方 rootfs、apt、网络、挂载或 FD 的端到端验收，也没有 NapCat 或 provider 生产测试。
+
+rootfs 供应商仍是 `UnacceptedRootfs`。明确阻塞项是：拿到真实的、已接受的官方 base，再做安全端到端。当前没有官方工件，不从 CI 传工件，不重试 DNS，不把宿主根绑定进去。生产 gate 关闭。沙箱没有完成。
+
+`--unpack` 的有限结构切片仍是当前解包实现，见文末。那一步发布的 receipt 仍然 `execution_accepted = false`，不能喂给生产 `VerifiedBase`。
 
 启动用 block-fd 握手：先阻塞，再 pin init 的 pidfd，然后才释放 payload。确认 init 死亡并回收 wrapper 之后，才 join 输出。join 可以取消。返回成功时，进程清理和 reader 回收都已经完成。清理结果未知时不能标成功。没有宿主 exec 降级。
 
@@ -64,12 +76,10 @@ receipt 的 `extracted` 为 true，`execution_accepted` 为 false。生产供应
 
 这不是完整 Ubuntu 供应，也不是 apt 可用。来源只说明工具会写出这类头：Ubuntu noble 的 livecd-rootfs `auto/build`（https://git.launchpad.net/livecd-rootfs/plain/live-build/auto/build?h=ubuntu/noble）使用 `tar -c --sort=name --xattrs`；本机 GNU tar 1.35 对同样的合成 `--xattrs` 探测会写出 mtime、atime、ctime，本地证据是 `/workspace/agent-tools/fujiang-local-20261107/pax-probe-strings.txt`；POSIX pax（https://pubs.opengroup.org/onlinepubs/9699919799/utilities/pax.html）规定记录字节长度和小数 mtime。这些都不能证明官方工件的实际元数据。官方 rootfs 仍不存在。
 
-### 下一单元（实现独立 owner 写层；本单元只提出 `VerifiedBase` 接口）
+### 当前头本地门禁
 
-引入不可伪造、当次验证新鲜的 `VerifiedBase` 租约，持有 `OwnedFd`、摘要和策略。`WorkspaceStore::open(host, owner, &VerifiedBase)` 在既有 owner 锁下，用 nofollow 的有界 copy 或 reflink 建立私有 stage。绝不硬链接 base 或其他 owner。同一 owner 内的硬链接按安全方式复制。发布是原子的。已有状态钉在 base 摘要上，不静默重新播种。
+`OwnerLayer.tla` 只证明抽象不变量：生产标志恒假、inode 与 base 及其他 owner 分离、未授权时零写入。`owner-tlc-acceptance.log` 中 346 个 distinct states，无错误。它不代替 OS 测试。
 
-把现有 `rootfs()` 与 `AsFd` 借出的 FD 交给 runner。生产 `RootfsAuthority` 在单独验收之前仍是 `UnacceptedRootfs`。
+当前头已跑完：fmt、严格 agent clippy、全工作区 261（agent 179）、行覆盖 90.76%、bundle Python 24、gpgv 14 条 SKIP、rootfs stub 11、六模型 TLC 54/688/512/346/17/16、文件长度与 `git diff --check`。命令和边界见 `docs/engineering.md`。更早记录里的 248 项与 Workspace 640 仍只属于当时那一头。
 
-拟议测试：A 的修改不能影响 B 或 base；inode 分离；同一 owner 持久；personal 与 group 名字空间分离；崩溃、锁竞争和宿主哨兵符号链接；运行时挂载、FD 和网络的负向测试分开做。
-
-下一单元实现独立 owner 写层。本单元只提出 `VerifiedBase` 接口，不实现。不部署、不合并、不重启，也不重试网络。
+不部署、不合并、不重启，也不重试网络。不声称新 head 的 CI。运行时没有作为 Ubuntu 交付。
