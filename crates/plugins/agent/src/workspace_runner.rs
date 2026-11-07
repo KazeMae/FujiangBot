@@ -16,11 +16,12 @@ use anyhow::{bail, Context, Result};
 use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde::Deserialize;
 
-const WALL: Duration = Duration::from_secs(3);
+const WALL: Duration = Duration::from_secs(300);
+const CPU_SECONDS: libc::rlim_t = 120;
 const REAP_BOUND: Duration = Duration::from_secs(1);
 const OUT_CAP: usize = 64 * 1024;
 const INFO_CAP: usize = 8 * 1024;
-const TMPFS_SIZE: &str = "16777216";
+const TMPFS_SIZE: &str = "67108864";
 const CLOSE_RANGE_CLOEXEC: libc::c_long = 4;
 #[cfg(target_arch = "x86_64")]
 const AUDIT_ARCH_X86_64: u32 = 0xc000003e;
@@ -339,7 +340,6 @@ fn push_fixed_args(
         .arg("--gid")
         .arg("0")
         .arg("--unshare-pid")
-        .arg("--unshare-net")
         .arg("--unshare-ipc")
         .arg("--unshare-uts")
         .arg("--disable-userns")
@@ -351,14 +351,13 @@ fn push_fixed_args(
         .arg("--bind-fd")
         .arg(root.to_string())
         .arg("/")
+        .arg("--chmod")
+        .arg("1777")
+        .arg("/tmp")
         .arg("--proc")
         .arg("/proc")
         .arg("--dev")
         .arg("/dev")
-        .arg("--size")
-        .arg(TMPFS_SIZE)
-        .arg("--tmpfs")
-        .arg("/tmp")
         .arg("--size")
         .arg(TMPFS_SIZE)
         .arg("--tmpfs")
@@ -445,9 +444,8 @@ fn close_from_stdio() -> io::Result<()> {
 }
 
 fn set_limits() -> io::Result<()> {
-    lim(libc::RLIMIT_CPU, 2)?;
+    lim(libc::RLIMIT_CPU, CPU_SECONDS)?;
     lim(libc::RLIMIT_AS, 512 * 1024 * 1024)?;
-    lim(libc::RLIMIT_FSIZE, 64 * 1024 * 1024)?;
     lim(libc::RLIMIT_NOFILE, 64)?;
     lim(libc::RLIMIT_CORE, 0)?;
     Ok(())
@@ -829,6 +827,15 @@ mod tests {
     use super::parse_child_pid;
 
     #[test]
+    fn package_budget_is_fixed_and_finite() {
+        assert_eq!(super::WALL, std::time::Duration::from_secs(300));
+        assert_eq!(super::CPU_SECONDS, 120);
+        assert_eq!(super::TMPFS_SIZE, "67108864");
+        assert_eq!(super::OUT_CAP, 64 * 1024);
+        assert_eq!(super::REAP_BOUND, std::time::Duration::from_secs(1));
+    }
+
+    #[test]
     fn parses_top_level_child_pid() {
         assert_eq!(
             parse_child_pid(
@@ -861,6 +868,64 @@ mod tests {
             assert_eq!(parse_child_pid(sample, true), None);
         }
         assert_eq!(parse_child_pid(br#"{"child-pid":"#, false), None);
+    }
+
+    #[test]
+    fn child_set_limits_keeps_inherited_fsize() {
+        use std::os::unix::process::CommandExt;
+
+        let mut parent = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut parent) },
+            0
+        );
+        let parent_cur = parent.rlim_cur;
+        let parent_max = parent.rlim_max;
+        let mut cmd = std::process::Command::new("/bin/true");
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        unsafe {
+            cmd.pre_exec(move || {
+                let mut inherited = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::getrlimit(libc::RLIMIT_FSIZE, &mut inherited) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if inherited.rlim_cur != parent_cur || inherited.rlim_max != parent_max {
+                    return Err(std::io::Error::other("inherited fsize differs from parent"));
+                }
+                super::set_limits()?;
+                let mut after = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::getrlimit(libc::RLIMIT_FSIZE, &mut after) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if after.rlim_cur != inherited.rlim_cur || after.rlim_max != inherited.rlim_max {
+                    return Err(std::io::Error::other("set_limits changed fsize"));
+                }
+                Ok(())
+            });
+        }
+        let status = cmd.status().expect("spawn /bin/true");
+        assert!(status.success(), "{status}");
+        let mut again = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut again) },
+            0
+        );
+        assert_eq!(again.rlim_cur, parent_cur);
+        assert_eq!(again.rlim_max, parent_max);
     }
 }
 

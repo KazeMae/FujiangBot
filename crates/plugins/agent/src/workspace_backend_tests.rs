@@ -70,6 +70,7 @@ async fn existing_runner_failclosed_on_incomplete_root() {
             .as_nanos()
     ));
     let host = root.join("host");
+    let host_path = host.clone();
     let image = root.join("image");
     std::fs::create_dir_all(&host).unwrap();
     std::fs::create_dir_all(&image).unwrap();
@@ -127,5 +128,8 @@ async fn existing_runner_failclosed_on_incomplete_root() {
         assert!(reopen.is_err());
     }
     assert_eq!(std::fs::read(&sentinel).unwrap(), b"untouched");
+    let tmp = host_path.join("group/4/generation/rootfs/tmp");
+    let mode = std::fs::metadata(&tmp).unwrap().permissions().mode();
+    assert_eq!(mode & 0o7777, 0o1777, "persistent /tmp mode {mode:#o}");
     let _ = std::fs::remove_dir_all(root);
 }

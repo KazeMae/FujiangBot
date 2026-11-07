@@ -16,6 +16,8 @@ const MOUNTS: [&str; 6] = ["proc", "dev", "work", "tmp", "run", "sys"];
 struct LiveCleanup {
     parent: OwnedFd,
     name: CString,
+    /// Held across `Drop` so startup GC cannot reclaim the live tree first.
+    lease: OwnedFd,
 }
 
 pub(crate) struct VerifiedBase {
@@ -29,6 +31,7 @@ pub(crate) struct VerifiedBase {
 impl Drop for VerifiedBase {
     fn drop(&mut self) {
         if let Some(live) = self.live.take() {
+            let _lock = live.lease.as_raw_fd();
             let _ = copy::remove_partial(live.parent.as_raw_fd(), &live.name);
         }
     }
@@ -62,6 +65,7 @@ impl VerifiedBase {
         identity: [u8; 32],
         parent: OwnedFd,
         name: CString,
+        lease: OwnedFd,
     ) -> io::Result<Self> {
         let st = fstat(root.as_raw_fd())?;
         if st.st_mode & libc::S_IFMT != libc::S_IFDIR
@@ -73,7 +77,11 @@ impl VerifiedBase {
         Ok(Self {
             root,
             identity,
-            live: Some(LiveCleanup { parent, name }),
+            live: Some(LiveCleanup {
+                parent,
+                name,
+                lease,
+            }),
             check_tree: true,
         })
     }
@@ -136,7 +144,7 @@ fn open_published(
     private_dir(generation.as_raw_fd())?;
     validate_identity(generation.as_raw_fd(), owner, &base.identity)?;
     let rootfs = open_dir(generation.as_raw_fd(), &one_component("rootfs")?)?;
-    assert_owned_dir(rootfs.as_raw_fd())?;
+    guest_root(rootfs.as_raw_fd())?;
     reject_mount_links(rootfs.as_raw_fd())?;
     Ok(rootfs)
 }
@@ -166,7 +174,7 @@ fn seed(
             return Err(io::Error::last_os_error());
         }
         let rootfs = open_dir(stage_fd.as_raw_fd(), &one_component("rootfs")?)?;
-        assert_owned_dir(rootfs.as_raw_fd())?;
+        guest_root(rootfs.as_raw_fd())?;
         copy::populate(base.root.as_raw_fd(), rootfs.as_raw_fd())?;
         // Directory FD does not freeze bytes. Hash the clone before mount dirs exist.
         if base.check_tree {
@@ -322,6 +330,15 @@ fn meta_bytes(owner: Owner, identity: &[u8; 32]) -> Vec<u8> {
         hex.push_str(&format!("{byte:02x}"));
     }
     format!("v1\n{kind}\n{id}\n{hex}\nunaccepted\n").into_bytes()
+}
+
+fn guest_root(fd: RawFd) -> io::Result<()> {
+    assert_owned_dir(fd)?;
+    let st = fstat(fd)?;
+    if st.st_mode & 0o7777 != 0o755 {
+        return Err(invalid("rootfs mode"));
+    }
+    Ok(())
 }
 
 fn private_dir(fd: RawFd) -> io::Result<()> {

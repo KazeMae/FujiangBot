@@ -59,7 +59,7 @@ fn hex_digest(root: &Path) -> [u8; 32] {
 
 #[test]
 fn fixture_matches_python_bytes() {
-    const EXPECTED: &str = "62cd8e8eb2f1b715820a4dddff98fd471429dd7a7e16ba471c47b0a732e66f59";
+    const EXPECTED: &str = "d4c7888733e446897db069da80dbd6dc00fc402689b3050f98ac36bc295d8dca";
     let root = scratch();
     golden(&root);
     let got = hex_digest(&root);
@@ -170,4 +170,69 @@ fn hardlink_alias_uses_unique_byte_budget() {
     let ent = files.values().next().unwrap();
     assert_eq!(ent.paths.len(), 2);
     let _ = fs::remove_dir_all(&root);
+}
+
+fn chmod(path: &Path, mode: u32) {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+fn mode_only_file_644_to_600_and_dir_755_to_700_change_digest() {
+    let root = scratch();
+    let dir = root.join("e");
+    fs::create_dir(&dir).unwrap();
+    chmod(&dir, 0o755);
+    write_mode(&dir.join("payload"), b"data", 0o644);
+    chmod(&dir.join("payload"), 0o644);
+    let fd = open_dir(&root);
+    let file_644 = super::digest(fd.as_raw_fd()).unwrap();
+    chmod(&dir.join("payload"), 0o600);
+    let file_600 = super::digest(fd.as_raw_fd()).unwrap();
+    assert_ne!(file_644, file_600);
+    chmod(&dir, 0o700);
+    let dir_700 = super::digest(fd.as_raw_fd()).unwrap();
+    assert_ne!(file_600, dir_700);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn ordinary_rwx_modes_hash_and_setid_sticky_unreadable_reject() {
+    let ok = scratch();
+    write_mode(&ok.join("rw"), b"data", 0o644);
+    chmod(&ok.join("rw"), 0o664);
+    fs::create_dir(ok.join("dx")).unwrap();
+    chmod(&ok.join("dx"), 0o775);
+    write_mode(&ok.join("dx/inner"), b"x", 0o644);
+    chmod(&ok.join("dx/inner"), 0o755);
+    fs::create_dir(ok.join("sticky")).unwrap();
+    chmod(&ok.join("sticky"), 0o1777);
+    fs::create_dir(ok.join("priv")).unwrap();
+    chmod(&ok.join("priv"), 0o700);
+    assert!(super::digest(open_dir(&ok).as_raw_fd()).is_ok());
+
+    let setid = scratch();
+    write_mode(&setid.join("f"), b"x", 0o644);
+    chmod(&setid.join("f"), 0o4755);
+    assert!(super::digest(open_dir(&setid).as_raw_fd()).is_err());
+
+    let sticky_file = scratch();
+    write_mode(&sticky_file.join("f"), b"x", 0o644);
+    chmod(&sticky_file.join("f"), 0o1644);
+    assert!(super::digest(open_dir(&sticky_file).as_raw_fd()).is_err());
+
+    let unread_file = scratch();
+    write_mode(&unread_file.join("f"), b"x", 0o600);
+    chmod(&unread_file.join("f"), 0o200);
+    assert!(super::digest(open_dir(&unread_file).as_raw_fd()).is_err());
+
+    let unread_dir = scratch();
+    fs::create_dir(unread_dir.join("d")).unwrap();
+    chmod(&unread_dir.join("d"), 0o300);
+    assert!(super::digest(open_dir(&unread_dir).as_raw_fd()).is_err());
+
+    let _ = fs::remove_dir_all(&ok);
+    let _ = fs::remove_dir_all(&setid);
+    let _ = fs::remove_dir_all(&sticky_file);
+    let _ = fs::remove_dir_all(&unread_file);
+    let _ = fs::remove_dir_all(&unread_dir);
 }

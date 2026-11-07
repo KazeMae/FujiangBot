@@ -259,6 +259,7 @@ fn stdout_cap_is_total_across_pumps() {
         Instant::now() + Duration::from_secs(2),
         8192,
         65536,
+        None,
     )
     .expect_err("capped");
     assert!(err.to_string().contains("verifier"), "{err}");
@@ -276,6 +277,7 @@ fn closed_pipes_then_sleep_is_reaped_on_deadline() {
         Instant::now() + Duration::from_millis(400),
         8192,
         65536,
+        None,
     )
     .expect_err("timeout");
     assert!(started.elapsed() < Duration::from_secs(3), "{err}");
@@ -296,6 +298,7 @@ fn failing_child_is_reaped() {
         Instant::now() + Duration::from_secs(2),
         8192,
         65536,
+        None,
     )
     .expect_err("exit");
     assert!(err.to_string().contains("verifier"), "{err}");
@@ -313,6 +316,7 @@ fn timeout_kills_process_group_descendant() {
         Instant::now() + Duration::from_millis(500),
         8192,
         65536,
+        None,
     )
     .expect_err("group");
     let pid: i32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
@@ -336,4 +340,174 @@ fn esrch(pid: i32) -> bool {
         return false;
     }
     std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[test]
+fn import_lease_preserves_active_and_unmarked() {
+    let root = scratch();
+    let trust = root.join("trust");
+    dir(&trust);
+    dir(&trust.join("legacy-import"));
+    file(&trust.join("legacy-import/sentinel"), b"legacy");
+    dir(&trust.join("r2-2"));
+    file(&trust.join("r2-2/sentinel"), b"mode");
+    mode(&trust.join("r2-2"), 0o755);
+    symlink("legacy-import", trust.join("r3-3")).unwrap();
+    dir(&trust.join("r4-4"));
+    file(&trust.join("r4-4/lease"), b"forged-marker-not-v1\n");
+    file(&trust.join("r4-4/sentinel"), b"forged");
+    dir(&trust.join("r5-5"));
+    file(&trust.join("r5-5/lease"), b"fujiang-import-lease-v1\n");
+    file(&trust.join("r5-5/sentinel"), b"nlink");
+    fs::hard_link(trust.join("r5-5/lease"), trust.join("lease-alias")).unwrap();
+    file(&trust.join("r9-1"), b"blocked");
+    let trust_fd = super::open_mode(&trust, 0o700).unwrap();
+    assert!(super::leases::create_owned(trust_fd.as_raw_fd(), "r9-1").is_err());
+    assert_eq!(fs::read(trust.join("r9-1")).unwrap(), b"blocked");
+    let bin = unsafe {
+        libc::open(
+            c"/bin".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    assert!(bin >= 0);
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::fstat(bin, &mut st) }, 0);
+    unsafe { libc::close(bin) };
+    if unsafe { libc::geteuid() } != 0 {
+        assert_ne!(st.st_uid, unsafe { libc::geteuid() });
+    }
+    assert!(!super::leases::owned_private_dir(&st));
+    let active = super::leases::create_owned(trust_fd.as_raw_fd(), "r8-8").unwrap();
+    file(&trust.join("r8-8/sentinel"), b"active");
+    let live = super::leases::create_owned(trust_fd.as_raw_fd(), "live-9-9").unwrap();
+    assert_eq!(
+        unsafe { libc::mkdirat(live.dir_fd(), c"rootfs".as_ptr(), 0o700) },
+        0
+    );
+    let root_name = std::ffi::CString::new("rootfs").unwrap();
+    let rootfs = super::open_dir(live.dir_fd(), &root_name).unwrap();
+    let base = live.into_base(rootfs, [9u8; 32]).unwrap();
+    let path = trust.clone();
+    let concurrent = std::thread::spawn(move || {
+        let fd = super::open_mode(&path, 0o700).unwrap();
+        super::leases::reclaim(fd.as_raw_fd()).unwrap()
+    });
+    let raced = concurrent.join().unwrap();
+    assert_eq!(raced.reclaimed, 0);
+    let report = super::leases::reclaim(trust_fd.as_raw_fd()).unwrap();
+    assert_eq!(report.reclaimed, 0, "{report:?}");
+    assert_eq!(fs::read(trust.join("r8-8/sentinel")).unwrap(), b"active");
+    assert!(trust.join("live-9-9").is_dir());
+    assert_eq!(
+        fs::read(trust.join("legacy-import/sentinel")).unwrap(),
+        b"legacy"
+    );
+    assert_eq!(fs::read(trust.join("r2-2/sentinel")).unwrap(), b"mode");
+    assert_eq!(fs::read(trust.join("r4-4/sentinel")).unwrap(), b"forged");
+    assert_eq!(fs::read(trust.join("r5-5/sentinel")).unwrap(), b"nlink");
+    assert!(trust
+        .join("r3-3")
+        .symlink_metadata()
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(!report.truncated, "{report:?}");
+    drop(active);
+    drop(base);
+    assert!(
+        !trust.join("r8-8").exists(),
+        "normal lease drop left its wrapper"
+    );
+    assert!(
+        !trust.join("live-9-9").exists(),
+        "normal base drop left its wrapper"
+    );
+    let gone = super::leases::reclaim(trust_fd.as_raw_fd()).unwrap();
+    assert_eq!(gone.reclaimed, 0, "{gone:?}");
+    let stale_held = super::leases::create_owned(trust_fd.as_raw_fd(), "r1-1").unwrap();
+    file(&trust.join("r1-1/sentinel"), b"stale");
+    stale_held.abandon();
+    let stale = super::leases::reclaim(trust_fd.as_raw_fd()).unwrap();
+    assert!(stale.reclaimed >= 1, "{stale:?}");
+    assert!(!trust.join("r1-1").exists());
+    assert_eq!(
+        fs::read(trust.join("legacy-import/sentinel")).unwrap(),
+        b"legacy"
+    );
+    assert_eq!(fs::read(trust.join("r2-2/sentinel")).unwrap(), b"mode");
+    assert_eq!(fs::read(trust.join("r4-4/sentinel")).unwrap(), b"forged");
+    assert_eq!(fs::read(trust.join("r5-5/sentinel")).unwrap(), b"nlink");
+    assert_eq!(fs::read(trust.join("r9-1")).unwrap(), b"blocked");
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn writer_lease_outlives_parent_then_gc() {
+    if std::env::var_os("FUJIANG_LEASE_HELPER").is_some() {
+        let trust = PathBuf::from(std::env::var("FUJIANG_LEASE_TRUST").unwrap());
+        let namefile = PathBuf::from(std::env::var("FUJIANG_LEASE_NAME").unwrap());
+        let pidfile = PathBuf::from(std::env::var("FUJIANG_LEASE_PID").unwrap());
+        let trust_fd = super::open_mode(&trust, 0o700).unwrap();
+        let name = format!("r{}-{}", std::process::id(), super::nanos().unwrap());
+        let held = super::leases::create_owned(trust_fd.as_raw_fd(), &name).unwrap();
+        let child = super::leases::spawn_writer(held.lease_fd(), &pidfile).unwrap();
+        fs::write(&namefile, &name).unwrap();
+        std::mem::forget(child);
+        held.leak_for_child();
+        std::process::exit(0);
+    }
+    let root = scratch();
+    let trust = root.join("trust");
+    dir(&trust);
+    let namefile = root.join("name");
+    let pidfile = root.join("pid");
+    let helper = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("workspace_store::acceptance::tests::writer_lease_outlives_parent_then_gc")
+        .env("FUJIANG_LEASE_HELPER", "1")
+        .env("FUJIANG_LEASE_TRUST", &trust)
+        .env("FUJIANG_LEASE_NAME", &namefile)
+        .env("FUJIANG_LEASE_PID", &pidfile)
+        .output()
+        .unwrap();
+    assert!(
+        helper.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&helper.stdout),
+        String::from_utf8_lossy(&helper.stderr)
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !pidfile.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let name = fs::read_to_string(&namefile).unwrap();
+    let pid: i32 = fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let trust_fd = super::open_mode(&trust, 0o700).unwrap();
+    let report = super::leases::reclaim(trust_fd.as_raw_fd()).unwrap();
+    assert_eq!(report.reclaimed, 0, "{report:?}");
+    assert!(trust.join(name.trim()).is_dir(), "active writer removed");
+    assert!(alive(pid), "{pid}");
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+    let end = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < end && !esrch(pid) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(esrch(pid), "{pid}");
+    let mut reclaimed = false;
+    let stop = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < stop {
+        let again = super::leases::reclaim(trust_fd.as_raw_fd()).unwrap();
+        if again.reclaimed >= 1 && !trust.join(name.trim()).exists() {
+            reclaimed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(reclaimed, "stale wrapper survived the writer");
+    fs::remove_dir_all(&root).unwrap();
 }

@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use super::{fstat, invalid, openat2};
 
-const POLICY: &[u8] = b"workspace-rootfs-runtime-v1\0";
+const POLICY: &[u8] = b"workspace-rootfs-runtime-v2\0";
 const MOUNTS: [&[u8]; 6] = [b"proc", b"dev", b"work", b"tmp", b"run", b"sys"];
 const MAX_DEPTH: u32 = 64;
 const MAX_NODES: u64 = 50_000;
@@ -17,7 +17,7 @@ const MAX_PATH: usize = 4096;
 const MAX_TARGET: usize = 4096;
 
 struct FileEnt {
-    exe: u8,
+    perm: u16,
     size: u64,
     sha: [u8; 32],
     nlink: u64,
@@ -44,8 +44,8 @@ fn digest_limited(root: RawFd, nodes: u64) -> io::Result<[u8; 32]> {
             return Err(invalid("inode share"));
         }
         let first = &ent.paths[0];
-        let mut extra = Vec::with_capacity(1 + 8 + 32);
-        extra.push(ent.exe);
+        let mut extra = Vec::with_capacity(2 + 8 + 32);
+        extra.extend_from_slice(&ent.perm.to_be_bytes());
         extra.extend_from_slice(&ent.size.to_be_bytes());
         extra.extend_from_slice(&ent.sha);
         rows.push(frame(b'f', first, &extra));
@@ -106,14 +106,9 @@ fn walk(
             rows.push(frame(b's', &path, &extra));
             continue;
         }
-        if mode & (libc::S_IWGRP | libc::S_IWOTH | libc::S_ISUID | libc::S_ISGID) != 0 {
-            return Err(invalid("mode"));
-        }
         if kind == libc::S_IFDIR {
-            if mode & 0o777 != 0o700 && mode & 0o777 != 0o755 {
-                return Err(invalid("mode"));
-            }
-            rows.push(frame(b'd', &path, b""));
+            let perm = ordinary_mode(mode, true)?;
+            rows.push(frame(b'd', &path, &perm.to_be_bytes()));
             let child = openat2(
                 dir,
                 &name,
@@ -135,11 +130,11 @@ fn walk(
             )?;
             continue;
         }
-        let perm = mode & 0o777;
         let size = u64::try_from(st.st_size).map_err(|_| invalid("size"))?;
-        if kind != libc::S_IFREG || (perm != 0o600 && perm != 0o700) || size > MAX_FILE {
+        if kind != libc::S_IFREG || size > MAX_FILE {
             return Err(invalid("tree"));
         }
+        let perm = ordinary_mode(mode, false)?;
         let key = (st.st_dev as u64, st.st_ino as u64);
         if let Some(ent) = files.get_mut(&key) {
             if ent.size != size || ent.nlink != st.st_nlink as u64 {
@@ -155,7 +150,7 @@ fn walk(
             files.insert(
                 key,
                 FileEnt {
-                    exe: u8::from(perm == 0o700),
+                    perm,
                     size,
                     sha,
                     nlink: st.st_nlink as u64,
@@ -341,6 +336,23 @@ fn fstat_at(dir: RawFd, name: &CString) -> io::Result<libc::stat> {
         return Err(io::Error::last_os_error());
     }
     Ok(st)
+}
+
+fn ordinary_mode(mode: u32, dir: bool) -> io::Result<u16> {
+    if mode & (libc::S_ISUID | libc::S_ISGID) != 0 {
+        return Err(invalid("mode"));
+    }
+    let perm = mode & 0o7777;
+    if dir {
+        if perm & 0o500 != 0o500 {
+            return Err(invalid("mode"));
+        }
+        return Ok((perm & 0o1777) as u16);
+    }
+    if perm & 0o1000 != 0 || perm & 0o400 == 0 {
+        return Err(invalid("mode"));
+    }
+    Ok((perm & 0o777) as u16)
 }
 
 fn euid() -> libc::uid_t {

@@ -8,10 +8,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::workspace_seed::{self, VerifiedBase};
-use super::{fstat, invalid, one_component, open_host, openat2, raw_owned, tree_digest};
+use super::{fstat, invalid, one_component, open_host, openat2, tree_digest};
 
 const PRIMARY: &str = "843938DF228D22F7B3742BC0D94AA3F0EFE21092";
-const POLICY: &str = "workspace-rootfs-runtime-v1";
+const POLICY: &str = "workspace-rootfs-runtime-v2";
 const EMBEDDED_VERIFIER: &str = include_str!("../../../../scripts/verify-workspace-bundle.py");
 
 struct Approval {
@@ -34,7 +34,7 @@ struct Receipt {
 }
 
 pub(super) fn acquire(trust_path: &Path) -> io::Result<(PathBuf, VerifiedBase)> {
-    let name = format!("w{}-{}", std::process::id(), nanos()?);
+    let name = format!("r{}-{}", std::process::id(), nanos()?);
     acquire_named(trust_path, &name)
 }
 
@@ -42,15 +42,19 @@ fn acquire_named(trust_path: &Path, wrapper: &str) -> io::Result<(PathBuf, Verif
     let trust = open_mode(trust_path, 0o700)?;
     let approval = read_approval(trust.as_raw_fd())?;
     let _host = open_mode(Path::new(&approval.host), 0o700)?;
-    let wrapper_name = one_component(wrapper)?;
-    if unsafe { libc::mkdirat(trust.as_raw_fd(), wrapper_name.as_ptr(), 0o700) } != 0 {
-        return Err(io::Error::last_os_error());
+    let gc = leases::reclaim(trust.as_raw_fd())?;
+    if gc.truncated {
+        return Err(invalid("lease"));
     }
+    let held = leases::create_owned(trust.as_raw_fd(), wrapper)?;
     let outcome = (|| {
-        let wrapper_fd = open_dir(trust.as_raw_fd(), &wrapper_name)?;
         let snap_name = one_component("snapshot")?;
-        let stdout = run_verifier(&approval.source, &trust_path.join(wrapper).join("snapshot"))?;
-        let snap_fd = open_dir(wrapper_fd.as_raw_fd(), &snap_name)?;
+        let stdout = run_verifier(
+            &approval.source,
+            &trust_path.join(wrapper).join("snapshot"),
+            held.lease_fd(),
+        )?;
+        let snap_fd = open_dir(held.dir_fd(), &snap_name)?;
         let filed = read_exact_file(snap_fd.as_raw_fd(), "receipt.json", 8192)?;
         let from_file = parse_receipt(&filed)?;
         let from_out = parse_receipt(&stdout)?;
@@ -61,7 +65,7 @@ fn acquire_named(trust_path: &Path, wrapper: &str) -> io::Result<(PathBuf, Verif
         let unpacked = open_dir(snap_fd.as_raw_fd(), &one_component("rootfs")?)?;
         seal(trust.as_raw_fd(), unpacked.as_raw_fd(), approval.tree)
     })();
-    let _ = workspace_seed::remove_tree(trust.as_raw_fd(), &wrapper_name);
+    drop(held);
     outcome.map(|base| (approval.host, base))
 }
 
@@ -89,18 +93,13 @@ fn bind(approval: &Approval, receipt: &Receipt) -> io::Result<()> {
 }
 
 fn seal(trust: RawFd, source: RawFd, approved: [u8; 32]) -> io::Result<VerifiedBase> {
-    let name = one_component(&format!("live-{}-{}", std::process::id(), nanos()?))?;
-    if unsafe { libc::mkdirat(trust, name.as_ptr(), 0o700) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let sealed = (|| {
-        let parent = open_dir(trust, &name)?;
-        if unsafe { libc::mkdirat(parent.as_raw_fd(), one_component("rootfs")?.as_ptr(), 0o700) }
-            != 0
-        {
+    let name = format!("live-{}-{}", std::process::id(), nanos()?);
+    let held = leases::create_owned(trust, &name)?;
+    (|| {
+        if unsafe { libc::mkdirat(held.dir_fd(), one_component("rootfs")?.as_ptr(), 0o700) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        let dest = open_dir(parent.as_raw_fd(), &one_component("rootfs")?)?;
+        let dest = open_dir(held.dir_fd(), &one_component("rootfs")?)?;
         workspace_seed::copy_tree(source, dest.as_raw_fd())?;
         let got = tree_digest(dest.as_raw_fd())?;
         if got != approved {
@@ -110,12 +109,8 @@ fn seal(trust: RawFd, source: RawFd, approved: [u8; 32]) -> io::Result<VerifiedB
         if again != got {
             return Err(invalid("tree"));
         }
-        VerifiedBase::from_sealed(dest, approved, dup_fd(trust)?, name.clone())
-    })();
-    if sealed.is_err() {
-        let _ = workspace_seed::remove_tree(trust, &name);
-    }
-    sealed
+        held.into_base(dest, approved)
+    })()
 }
 
 fn read_approval(trust: RawFd) -> io::Result<Approval> {
@@ -218,7 +213,7 @@ fn json_object(
     }
 }
 
-fn run_verifier(source: &Path, target: &Path) -> io::Result<Vec<u8>> {
+fn run_verifier(source: &Path, target: &Path, lease: RawFd) -> io::Result<Vec<u8>> {
     let mut cmd = Command::new("/usr/bin/python3");
     cmd.arg("-I")
         .arg("-c")
@@ -229,7 +224,13 @@ fn run_verifier(source: &Path, target: &Path) -> io::Result<Vec<u8>> {
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .current_dir("/");
-    collect_command(cmd, Instant::now() + Duration::from_secs(40), 8192, 65536)
+    collect_command(
+        cmd,
+        Instant::now() + Duration::from_secs(40),
+        8192,
+        65536,
+        Some(lease),
+    )
 }
 
 fn collect_command(
@@ -237,11 +238,17 @@ fn collect_command(
     deadline: Instant,
     out_cap: usize,
     err_cap: usize,
+    lease: Option<RawFd>,
 ) -> io::Result<Vec<u8>> {
     cmd.process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(lease) = lease {
+        unsafe {
+            cmd.pre_exec(move || clear_cloexec(lease));
+        }
+    }
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(_) => return Err(invalid("verifier")),
@@ -487,10 +494,6 @@ fn open_dir(parent: RawFd, name: &CString) -> io::Result<OwnedFd> {
     Ok(fd)
 }
 
-fn dup_fd(fd: RawFd) -> io::Result<OwnedFd> {
-    raw_owned(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })
-}
-
 fn set_nonblock(fd: RawFd) -> io::Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
@@ -548,6 +551,20 @@ fn parse_hex32(text: &str) -> io::Result<[u8; 32]> {
     }
     Ok(out)
 }
+
+fn clear_cloexec(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[path = "workspace_leases.rs"]
+mod leases;
 
 #[cfg(test)]
 #[path = "workspace_acceptance_tests.rs"]

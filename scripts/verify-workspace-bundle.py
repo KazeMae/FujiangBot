@@ -1,4 +1,4 @@
-import datetime, fcntl, gzip, hashlib, json, os, re, resource, shutil, signal, stat, subprocess, sys, tarfile, tempfile, time
+import datetime, fcntl, gzip, hashlib, json, os, re, resource, signal, stat, subprocess, sys, tarfile, tempfile, time
 MAX_EXPANDED = 1024 * 1024 * 1024
 MAX_RATIO = 200
 MAX_ENTRIES = 50000
@@ -18,28 +18,21 @@ class BundleError(Exception):
 MAX_LINK_HOPS = 40
 MAX_LINK_STEPS = 1000000
 def _symlink_check(path, syms, files, budget):
-    pending = list(path)
-    index = 0
-    stack = []
-    hops = 0
+    pending, index, stack, hops = list(path), 0, [], 0
     while index < len(pending):
         comp = pending[index]
         index += 1
         budget[0] -= 1
         if budget[0] < 0:
             raise BundleError()
-        if comp == "" or comp == ".":
+        if comp in ("", "."):
             continue
         if comp == "..":
             if not stack:
                 raise BundleError()
             stack.pop()
             continue
-        if (
-            len(comp) > 255
-            or not comp.isascii()
-            or any(ord(c) < 32 or ord(c) > 126 or c in "/\\" for c in comp)
-        ):
+        if len(comp) > 255 or not comp.isascii() or any(ord(c) < 32 or ord(c) > 126 or c in "/\\" for c in comp):
             raise BundleError()
         stack.append(comp)
         if sum(len(p) for p in stack) + len(stack) - 1 > 4096:
@@ -50,19 +43,12 @@ def _symlink_check(path, syms, files, budget):
             if hops > MAX_LINK_HOPS:
                 raise BundleError()
             raw = syms[key]
-            if (
-                not isinstance(raw, str)
-                or raw == ""
-                or len(raw) > 4096
-                or "\\" in raw
-                or any(ord(c) < 32 or ord(c) == 127 for c in raw)
-            ):
+            if not isinstance(raw, str) or raw == "" or len(raw) > 4096 or "\\" in raw or any(ord(c) < 32 or ord(c) == 127 for c in raw):
                 raise BundleError()
             stack.pop()
-            parts = raw.split("/")
             if raw.startswith("/"):
                 stack = []
-            pending = parts + pending[index:]
+            pending = raw.split("/") + pending[index:]
             index = 0
         elif key in files and index < len(pending):
             raise BundleError()
@@ -189,6 +175,10 @@ def _tar_path(member):
         raise BundleError()
     if member.mode & 0o6000:
         raise BundleError()
+    if kind == tarfile.DIRTYPE and (member.mode & 0o500) != 0o500:
+        raise BundleError()
+    if kind in (tarfile.REGTYPE, tarfile.AREGTYPE) and (member.mode & 0o1400) != 0o400:
+        raise BundleError()
     linkname = member.linkname
     if kind in _LINK_TYPES:
         if member.size != 0 or type(linkname) is not str or linkname == "" or len(linkname) > 4096:
@@ -228,7 +218,7 @@ def _tar_dir(parent_fd, name, path, created):
         os.mkdir(name, 0o700, dir_fd=parent_fd)
         created.add(path)
         return os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
-def _tar_write(root_fd, member, parts, created, read):
+def _tar_write(root_fd, member, parts, created, read, dir_modes):
     if parts == ():
         return
     fd = os.dup(root_fd)
@@ -239,10 +229,10 @@ def _tar_write(root_fd, member, parts, created, read):
             fd = nxt
         if member.type == tarfile.DIRTYPE:
             dfd = _tar_dir(fd, parts[-1], parts, created)
-            try:
-                return
-            finally:
-                os.close(dfd)
+            os.close(dfd)
+            if parts and member is not _DIR_INFO:
+                dir_modes[parts] = member.mode & 0o1777
+            return
         if len(created) >= MAX_ENTRIES:
             raise BundleError()
         ffd = os.open(parts[-1], _FILE_FLAGS, 0o600, dir_fd=fd)
@@ -262,7 +252,7 @@ def _tar_write(root_fd, member, parts, created, read):
                         raise BundleError()
                     off += w
                 left -= n
-            os.fchmod(ffd, 0o700 if member.mode & 0o111 else 0o600)
+            os.fchmod(ffd, member.mode & 0o777)
         finally:
             os.close(ffd)
         pad = (-member.size) % 512
@@ -290,6 +280,7 @@ def _unpack_stream(archive_fd, root_fd, compressed_size):
                 return chunk
             seen = set()
             created = set()
+            dir_modes = {}
             regular = set()
             links = {}
             pending_pax = False
@@ -308,6 +299,7 @@ def _unpack_stream(archive_fd, root_fd, compressed_size):
                         tail = read(65536)
                         if tail == b"":
                             _tar_links(root_fd, links, created, regular)
+                            _apply_dirs(root_fd, dir_modes)
                             return
                         if tail != b"\x00" * len(tail):
                             raise BundleError()
@@ -342,13 +334,13 @@ def _unpack_stream(archive_fd, root_fd, compressed_size):
                 if member.type in _LINK_TYPES:
                     if parts in created:
                         raise BundleError()
-                    _tar_write(root_fd, _DIR_INFO, parts[:-1], created, read)
+                    _tar_write(root_fd, _DIR_INFO, parts[:-1], created, read, dir_modes)
                     if len(created) >= MAX_ENTRIES:
                         raise BundleError()
                     created.add(parts)
                     links[parts] = (member.type, member.linkname)
                 else:
-                    _tar_write(root_fd, member, parts, created, read)
+                    _tar_write(root_fd, member, parts, created, read, dir_modes)
                     if member.type in (tarfile.REGTYPE, tarfile.AREGTYPE):
                         regular.add(parts)
         finally:
@@ -742,8 +734,42 @@ def _unpack_verified(snapshot_fd, name, digest, compressed_size):
                     if wr is not None:
                         os.close(wr)
                     if made:
-                        shutil.rmtree(".rootfs-partial", dir_fd=snapshot_fd)
-_TREE_POLICY = "workspace-rootfs-runtime-v1"
+                        _rm(snapshot_fd, ".rootfs-partial")
+_TREE_POLICY = "workspace-rootfs-runtime-v2"
+_CLEAN_NODES = 54096
+def _apply_dirs(root, modes):
+    for parts in sorted(modes, key=len, reverse=True):
+        fd = os.dup(root)
+        try:
+            for name in parts:
+                nxt = os.open(name, _DIR_FLAGS, dir_fd=fd)
+                os.close(fd)
+                fd = nxt
+            os.fchmod(fd, modes[parts])
+        finally:
+            os.close(fd)
+def _rm(parent, name, depth=0, budget=None):
+    if budget is None:
+        budget = [_CLEAN_NODES]
+    if depth > 72 or budget[0] <= 0:
+        raise BundleError()
+    budget[0] -= 1
+    try:
+        fd = os.open(name, _OD, dir_fd=parent)
+    except OSError:
+        os.unlink(name, dir_fd=parent)
+        return
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o6000:
+            raise BundleError()
+        if (st.st_mode & 0o200) == 0:
+            os.fchmod(fd, 0o700)
+        for kid in [ent.name for ent in os.scandir(fd)]:
+            _rm(fd, kid, depth + 1, budget)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=parent)
 _MOUNTS = (b"proc", b"dev", b"work", b"tmp", b"run", b"sys")
 _OD = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _OF = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -813,28 +839,30 @@ def _walk(fd, prefix, depth, left, total, files, rows):
                 raise BundleError()
             rows.append(_frame(ord("s"), path, len(tgt).to_bytes(4, "big") + tgt))
             continue
-        if mode & (stat.S_IWGRP | stat.S_IWOTH | stat.S_ISUID | stat.S_ISGID):
+        if mode & (stat.S_ISUID | stat.S_ISGID):
             raise BundleError()
         if stat.S_ISDIR(mode):
-            if mode & 0o777 not in (0o700, 0o755):
+            perm = mode & 0o7777
+            if (perm & 0o500) != 0o500:
                 raise BundleError()
-            rows.append(_frame(ord("d"), path))
+            rows.append(_frame(ord("d"), path, (perm & 0o1777).to_bytes(2, "big")))
             child = os.open(name, _OD, dir_fd=fd)
             try:
                 left, total = _walk(child, path, depth + 1, left, total, files, rows)
             finally:
                 os.close(child)
             continue
-        perm, size = mode & 0o777, st.st_size
-        if not stat.S_ISREG(mode) or perm not in (0o600, 0o700) or size > 256 << 20:
+        perm, size = mode & 0o7777, st.st_size
+        if not stat.S_ISREG(mode) or perm & 0o1000 or (perm & 0o400) == 0 or size > 256 << 20:
             raise BundleError()
+        perm &= 0o777
         key = (st.st_dev, st.st_ino)
         got = files.get(key)
         if got is None:
             if total > (1 << 30) - size:
                 raise BundleError()
             total += size
-            files[key] = [int(perm == 0o700), size, _file_sha(fd, name, size), st.st_nlink, [path]]
+            files[key] = [perm, size, _file_sha(fd, name, size), st.st_nlink, [path]]
         elif (got[1], got[3]) != (size, st.st_nlink):
             raise BundleError()
         else:
@@ -849,10 +877,10 @@ def tree_sha256(root_fd, nodes=50000):
             raise BundleError()
         first = aliases[0]
         extra = len(first).to_bytes(4, "big") + first
-        rows.append(_frame(ord("f"), first, bytes((int(exe),)) + int(size).to_bytes(8, "big") + sha))
+        rows.append(_frame(ord("f"), first, int(exe).to_bytes(2, "big") + int(size).to_bytes(8, "big") + sha))
         rows.extend(_frame(ord("h"), alias, extra) for alias in aliases[1:])
     rows.sort(key=lambda rec: rec[5:5 + int.from_bytes(rec[1:5], "big")])
-    digest = hashlib.sha256(b"workspace-rootfs-runtime-v1\0")
+    digest = hashlib.sha256((_TREE_POLICY + "\0").encode("ascii"))
     for rec in rows:
         digest.update(rec)
     return digest.hexdigest()
@@ -892,16 +920,14 @@ def verify_bundle(source, target, unpack=False):
                 nxt = os.open("..", flags, dir_fd=cur)
                 try:
                     up = os.fstat(nxt)
-                    up_key = (up.st_dev, up.st_ino)
                 except Exception:
                     os.close(nxt)
                     raise
-                if up_key == key:
+                if (up.st_dev, up.st_ino) == key:
                     os.close(nxt)
                     break
-                prev = cur
+                os.close(cur)
                 cur = nxt
-                os.close(prev)
         finally:
             os.close(cur)
         os.mkdir(base, 0o700, dir_fd=parent_fd)
@@ -928,72 +954,42 @@ def verify_bundle(source, target, unpack=False):
             receipt["tree_sha256"] = tree_hex
             receipt["tree_policy"] = _TREE_POLICY
         payload = (json.dumps(receipt, separators=(",", ":")) + "\n").encode("ascii")
-        rfd = None
+        rfd = os.open("receipt.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=snapshot_fd)
         try:
-            rfd = os.open(
-                "receipt.json",
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                0o600,
-                dir_fd=snapshot_fd,
-            )
-            view = memoryview(payload)
-            off = 0
+            view, off = memoryview(payload), 0
             while off < len(view):
                 n = os.write(rfd, view[off:])
-                if n <= 0:
-                    raise BundleError()
+                if n <= 0: raise BundleError()
                 off += n
         finally:
-            if rfd is not None:
-                os.close(rfd)
+            os.close(rfd)
         created = False
         return receipt
     finally:
+        if snapshot_fd is not None: os.close(snapshot_fd)
         try:
-            try:
-                if snapshot_fd is not None:
-                    os.close(snapshot_fd)
-                    snapshot_fd = None
-            finally:
-                if created and parent_fd is not None:
-                    shutil.rmtree(base, dir_fd=parent_fd)
+            if created and parent_fd is not None: _rm(parent_fd, base)
         finally:
-            try:
-                if parent_fd is not None:
-                    os.close(parent_fd)
-            finally:
-                if source_fd is not None:
-                    os.close(source_fd)
+            if parent_fd is not None: os.close(parent_fd)
+            if source_fd is not None: os.close(source_fd)
 def main():
-    unpack = False
-    if len(sys.argv) == 4 and sys.argv[1] == "--unpack":
-        source = sys.argv[2]
-        target = sys.argv[3]
-        unpack = True
-    elif len(sys.argv) == 3:
-        source = sys.argv[1]
-        target = sys.argv[2]
+    unpack = len(sys.argv) == 4 and sys.argv[1] == "--unpack"
+    if unpack: source, target = sys.argv[2], sys.argv[3]
+    elif len(sys.argv) == 3: source, target = sys.argv[1], sys.argv[2]
     else:
-        try:
-            os.write(2, b"error\n")
-        except Exception:
-            pass
+        try: os.write(2, b"error\n")
+        except Exception: pass
         return 1
     try:
-        receipt = verify_bundle(source, target, unpack)
-        payload = (json.dumps(receipt, separators=(",", ":")) + "\n").encode("ascii")
-        view = memoryview(payload)
+        view = memoryview((json.dumps(verify_bundle(source, target, unpack), separators=(",", ":")) + "\n").encode("ascii"))
         off = 0
         while off < len(view):
             n = os.write(1, view[off:])
-            if n <= 0:
-                raise OSError()
+            if n <= 0: raise OSError()
             off += n
     except Exception:
-        try:
-            os.write(2, b"error\n")
-        except Exception:
-            pass
+        try: os.write(2, b"error\n")
+        except Exception: pass
         return 1
     return 0
 if __name__ == "__main__":

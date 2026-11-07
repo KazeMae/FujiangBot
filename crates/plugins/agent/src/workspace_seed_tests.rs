@@ -2,11 +2,13 @@ use std::fs::{self, File};
 use std::io::ErrorKind;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{Owner, VerifiedBase, WorkspaceStore};
 
@@ -274,6 +276,27 @@ fn sequential_same_base_distinct_owner_inodes_persist() {
     let b = WorkspaceStore::open(&host, other, &base).unwrap();
     let g = WorkspaceStore::open(&host, group, &base).unwrap();
     assert!(a.as_fd().as_raw_fd() >= 0 && a.rootfs().as_raw_fd() >= 0);
+    let generation = owner_path(&host, personal).join("generation");
+    assert_eq!(
+        fs::metadata(&generation).unwrap().permissions().mode() & 0o7777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(generation.join("rootfs"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o755
+    );
+    assert_eq!(
+        fs::metadata(owner_path(&host, personal))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o700
+    );
     for store in [&a, &b, &g] {
         assert_tree(store.rootfs().as_raw_fd());
     }
@@ -304,6 +327,130 @@ fn sequential_same_base_distinct_owner_inodes_persist() {
         fs::metadata(&personal_tool).unwrap().ino(),
         fs::metadata(&group_tool).unwrap().ino()
     );
+}
+
+#[test]
+fn owner_lock_releases_while_unrelated_child_blocked_before_exec() {
+    let tmp = scratch();
+    let base_path = tmp.0.join("base");
+    seed_base(&base_path);
+    let base = fixture(&base_path, [0x61; 32]);
+    let host = host_dir(&tmp.0);
+    let owner = Owner::personal(61).unwrap();
+    let store = WorkspaceStore::open(&host, owner, &base).unwrap();
+    let flags = unsafe { libc::fcntl(store._lock.as_raw_fd(), libc::F_GETFD) };
+    assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+
+    let mut ready = [0; 2];
+    let mut release = [0; 2];
+    assert_eq!(
+        unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) },
+        0
+    );
+    assert_eq!(
+        unsafe { libc::pipe2(release.as_mut_ptr(), libc::O_CLOEXEC) },
+        0
+    );
+    let ready_r = unsafe { OwnedFd::from_raw_fd(ready[0]) };
+    let _ready_w = unsafe { OwnedFd::from_raw_fd(ready[1]) };
+    let ready_w = _ready_w.as_raw_fd();
+    let _release_r = unsafe { OwnedFd::from_raw_fd(release[0]) };
+    let release_r = _release_r.as_raw_fd();
+    let release_w = unsafe { OwnedFd::from_raw_fd(release[1]) };
+
+    let spawned = thread::spawn(move || {
+        let mut cmd = Command::new("/bin/true");
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            cmd.pre_exec(move || {
+                let mut one = [0u8; 1];
+                loop {
+                    let n = libc::write(ready_w, one.as_ptr() as *const libc::c_void, 1);
+                    if n == 1 {
+                        break;
+                    }
+                    if n < 0 && *libc::__errno_location() == libc::EINTR {
+                        continue;
+                    }
+                    libc::_exit(71);
+                }
+                loop {
+                    let n = libc::read(release_r, one.as_mut_ptr() as *mut libc::c_void, 1);
+                    if n == 1 {
+                        break;
+                    }
+                    if n < 0 && *libc::__errno_location() == libc::EINTR {
+                        continue;
+                    }
+                    libc::_exit(71);
+                }
+                Ok(())
+            });
+        }
+        cmd.spawn()
+    });
+    struct Reap {
+        release: RawFd,
+        thread: Option<thread::JoinHandle<std::io::Result<std::process::Child>>>,
+    }
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            let byte = [0u8; 1];
+            unsafe { libc::write(self.release, byte.as_ptr() as *const libc::c_void, 1) };
+            if let Some(handle) = self.thread.take() {
+                if let Ok(Ok(mut child)) = handle.join() {
+                    let _ = child.wait();
+                }
+            }
+        }
+    }
+    impl Reap {
+        fn finish(mut self) -> std::io::Result<std::process::ExitStatus> {
+            let byte = [0u8; 1];
+            unsafe { libc::write(self.release, byte.as_ptr() as *const libc::c_void, 1) };
+            let handle = self.thread.take().expect("spawn thread");
+            let mut child = handle.join().expect("spawn thread panicked")?;
+            child.wait()
+        }
+    }
+    let reap = Reap {
+        release: release_w.as_raw_fd(),
+        thread: Some(spawned),
+    };
+    let ready_fd = ready_r.as_raw_fd();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut saw = false;
+    while Instant::now() < deadline {
+        let mut pfd = libc::pollfd {
+            fd: ready_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let rc = unsafe { libc::poll(&mut pfd, 1, 50) };
+        if rc > 0 {
+            let mut one = [0u8; 1];
+            let n = unsafe { libc::read(ready_fd, one.as_mut_ptr() as *mut libc::c_void, 1) };
+            assert_eq!(n, 1);
+            saw = true;
+            break;
+        }
+    }
+    assert!(saw, "child did not reach pre_exec");
+    drop(store);
+    let reopened = WorkspaceStore::open(&host, owner, &base);
+    assert!(
+        !reap.thread.as_ref().expect("thread").is_finished(),
+        "child left pre_exec before the reopen"
+    );
+    let status = reap.finish().expect("reap");
+    assert!(
+        reopened.is_ok(),
+        "owner lock still held after critical section: {reopened:?}"
+    );
+    assert!(status.success(), "{status}");
+    drop(reopened);
 }
 
 #[test]
@@ -572,4 +719,62 @@ fn mountpoints_are_real_dirs_and_proc_symlink_rejects() {
     assert!(WorkspaceStore::open(&host, owner, &fixture(&linked, DIGEST)).is_err());
     gone(&owner_path(&host, owner).join("generation"));
     gone(&owner_path(&host, owner).join(".stage"));
+}
+
+fn perm_bits(path: &Path) -> u32 {
+    fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
+}
+
+#[test]
+fn copy_preserves_ordinary_modes_and_readonly_dir_cleans() {
+    let tmp = scratch();
+    let src = tmp.0.join("src");
+    dir(&src);
+    for (name, bits) in [
+        ("d755", 0o755),
+        ("d700", 0o700),
+        ("d775", 0o775),
+        ("d1777", 0o1777),
+    ] {
+        let path = src.join(name);
+        dir(&path);
+        mode(&path, bits);
+    }
+    for (name, bits) in [("f644", 0o644), ("f664", 0o664), ("f700", 0o700)] {
+        let path = src.join(name);
+        fs::write(&path, b"payload").unwrap();
+        mode(&path, bits);
+    }
+    let dst = tmp.0.join("dst");
+    dir(&dst);
+    let src_fd = File::open(&src).unwrap();
+    let dst_fd = File::open(&dst).unwrap();
+    super::workspace_seed::copy_tree(src_fd.as_raw_fd(), dst_fd.as_raw_fd()).unwrap();
+    for (name, bits) in [
+        ("d755", 0o755),
+        ("d700", 0o700),
+        ("d775", 0o775),
+        ("d1777", 0o1777),
+        ("f644", 0o644),
+        ("f664", 0o664),
+        ("f700", 0o700),
+    ] {
+        assert_eq!(perm_bits(&dst.join(name)), bits, "{name}");
+        assert_eq!(fs::read(dst.join(name)).unwrap_or_default(), {
+            if name.starts_with('f') {
+                b"payload".to_vec()
+            } else {
+                Vec::new()
+            }
+        });
+    }
+    let parent = tmp.0.join("clean");
+    dir(&parent);
+    let locked = parent.join("locked");
+    dir(&locked);
+    fs::write(locked.join("secret"), b"keep-until-clean").unwrap();
+    mode(&locked, 0o555);
+    let parent_fd = File::open(&parent).unwrap();
+    super::workspace_seed::remove_tree(parent_fd.as_raw_fd(), &cstr("locked")).unwrap();
+    gone(&locked);
 }

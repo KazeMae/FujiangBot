@@ -39,7 +39,26 @@ impl Owner {
 pub struct WorkspaceStore {
     work: OwnedFd,
     rootfs: OwnedFd,
-    _lock: OwnedFd,
+    _lock: OwnerLock,
+}
+
+/// Owner critical section. `LOCK_UN` on drop so a forked child that still
+/// shares this open-file description cannot keep the lock until exec.
+#[derive(Debug)]
+struct OwnerLock {
+    fd: OwnedFd,
+}
+
+impl AsRawFd for OwnerLock {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+impl Drop for OwnerLock {
+    fn drop(&mut self) {
+        unsafe { libc::flock(self.fd.as_raw_fd(), libc::LOCK_UN) };
+    }
 }
 
 impl AsFd for WorkspaceStore {
@@ -206,7 +225,7 @@ fn fstat(fd: RawFd) -> io::Result<libc::stat> {
     Ok(st)
 }
 
-fn lock_owner(dir: RawFd) -> io::Result<OwnedFd> {
+fn lock_owner(dir: RawFd) -> io::Result<OwnerLock> {
     let name = one_component(".lock")?;
     let mut pre: libc::stat = unsafe { std::mem::zeroed() };
     let pre_rc = unsafe { libc::fstatat(dir, name.as_ptr(), &mut pre, libc::AT_SYMLINK_NOFOLLOW) };
@@ -233,7 +252,7 @@ fn lock_owner(dir: RawFd) -> io::Result<OwnedFd> {
     if unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(fd)
+    Ok(OwnerLock { fd })
 }
 
 fn reject_lock_stat(st: &libc::stat) -> io::Result<()> {

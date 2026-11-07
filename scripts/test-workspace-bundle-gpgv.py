@@ -297,7 +297,7 @@ class WorkspaceBundleGpgvTests(unittest.TestCase):
         self.assertEqual(rec["primary"], self.alpha)
         self.assertIs(rec["extracted"], True)
         self.assertIs(rec["execution_accepted"], False)
-        self.assertEqual(rec["tree_policy"], "workspace-rootfs-runtime-v1")
+        self.assertEqual(rec["tree_policy"], "workspace-rootfs-runtime-v2")
         root_fd = os.open(os.path.join(self.target, "rootfs"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             self.assertEqual(rec["tree_sha256"], verify.tree_sha256(root_fd))
@@ -403,7 +403,7 @@ class WorkspaceBundleGpgvTests(unittest.TestCase):
         rec = verify.verify_bundle(self.source, self.target, unpack=True)
         self.assertIs(rec["extracted"], True)
         self.assertIs(rec["execution_accepted"], False)
-        self.assertEqual(rec["tree_policy"], "workspace-rootfs-runtime-v1")
+        self.assertEqual(rec["tree_policy"], "workspace-rootfs-runtime-v2")
         root_fd = os.open(os.path.join(self.target, "rootfs"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             self.assertEqual(rec["tree_sha256"], verify.tree_sha256(root_fd))
@@ -419,7 +419,7 @@ class WorkspaceBundleGpgvTests(unittest.TestCase):
             self.assertEqual(fh.read(), tool)
         self.assertFalse(os.path.islink(proof_path))
         self.assertFalse(os.path.islink(tool_path))
-        self.assertEqual(os.lstat(tool_path).st_mode & 0o777, 0o700)
+        self.assertEqual(os.lstat(tool_path).st_mode & 0o777, 0o755)
         self.assertEqual(os.readlink(os.path.join(base, "bin")), "usr/bin")
         self.assertEqual(os.readlink(os.path.join(base, "etc", "tool")), "/bin/tool")
         self.assertEqual(os.lstat(tool_path).st_ino, os.lstat(hard_path).st_ino)

@@ -160,6 +160,7 @@ fn copy_dir(fds: CopyFds, depth: u32, rel: &[CString], ctx: &mut CopyCtx<'_>) ->
             if !same_inode(&st, &opened) || !is_dir(&opened) || has_setid(&opened) {
                 return Err(invalid("directory changed"));
             }
+            let want = guest_mode(&opened)?;
             let dst_child = open_dir(fds.dst, &name)?;
             let dst_meta = fstat(dst_child.as_raw_fd())?;
             if !is_dir(&dst_meta) || dst_meta.st_uid != euid() || mode_bits(&dst_meta) != 0o700 {
@@ -176,6 +177,9 @@ fn copy_dir(fds: CopyFds, depth: u32, rel: &[CString], ctx: &mut CopyCtx<'_>) ->
                 &child_rel,
                 ctx,
             )?;
+            if unsafe { libc::fchmod(dst_child.as_raw_fd(), want) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
             fsync_fd(dst_child.as_raw_fd())?;
         } else if kind == libc::S_IFREG {
             copy_reg(fds, &name, &st, rel, ctx)?;
@@ -217,21 +221,20 @@ fn copy_reg(
     {
         return Err(invalid("source file changed"));
     }
-    let mode = if before.st_mode & 0o111 != 0 {
-        0o700
-    } else {
-        0o600
-    };
-    let dst = openat2(fds.dst, name, DST_FILE_FLAGS, mode)?;
+    let want = guest_mode(&before)?;
+    let dst = openat2(fds.dst, name, DST_FILE_FLAGS, 0o600)?;
     let created = fstat(dst.as_raw_fd())?;
     if !is_reg(&created)
         || created.st_nlink != 1
-        || mode_bits(&created) != mode
+        || mode_bits(&created) != 0o600
         || created.st_size != 0
     {
         return Err(invalid("new file"));
     }
     copy_exact(src.as_raw_fd(), dst.as_raw_fd(), size)?;
+    if unsafe { libc::fchmod(dst.as_raw_fd(), want) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
     let after = fstat(src.as_raw_fd())?;
     if !same_inode(&before, &after)
         || !is_reg(&after)
@@ -241,7 +244,11 @@ fn copy_reg(
         return Err(invalid("source file changed"));
     }
     let wrote = fstat(dst.as_raw_fd())?;
-    if !is_reg(&wrote) || wrote.st_size as u64 != size || wrote.st_nlink < 1 {
+    if !is_reg(&wrote)
+        || wrote.st_size as u64 != size
+        || wrote.st_nlink < 1
+        || mode_bits(&wrote) != want
+    {
         return Err(invalid("copied file"));
     }
     fsync_fd(dst.as_raw_fd())?;
@@ -425,6 +432,11 @@ fn remove_at(
             return Err(invalid("cleanup directory changed"));
         }
         require_private_dir(&opened)?;
+        if opened.st_mode & libc::S_IWUSR == 0
+            && unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
         let children = list_dir(dir.as_raw_fd(), budget)?;
         for child in children {
             remove_at(dir.as_raw_fd(), &child, depth + 1, budget, false)?;
@@ -451,10 +463,27 @@ fn remove_at(
 }
 
 fn require_private_dir(st: &libc::stat) -> io::Result<()> {
-    if !is_dir(st) || st.st_uid != euid() || st.st_mode & (libc::S_IWGRP | libc::S_IWOTH) != 0 {
+    if !is_dir(st) || st.st_uid != euid() || has_setid(st) {
         return Err(invalid("cleanup directory"));
     }
     Ok(())
+}
+
+fn guest_mode(st: &libc::stat) -> io::Result<libc::mode_t> {
+    if has_setid(st) {
+        return Err(invalid("setid"));
+    }
+    let perm = mode_bits(st);
+    if is_dir(st) {
+        if perm & 0o500 != 0o500 {
+            return Err(invalid("mode"));
+        }
+        return Ok((perm & 0o1777) as libc::mode_t);
+    }
+    if !is_reg(st) || perm & 0o1000 != 0 || perm & 0o400 == 0 {
+        return Err(invalid("mode"));
+    }
+    Ok((perm & 0o777) as libc::mode_t)
 }
 
 fn open_dir(parent: RawFd, name: &CString) -> io::Result<OwnedFd> {
@@ -502,7 +531,7 @@ fn same_inode(a: &libc::stat, b: &libc::stat) -> bool {
 }
 
 fn mode_bits(st: &libc::stat) -> u32 {
-    st.st_mode & 0o777
+    st.st_mode & 0o7777
 }
 
 fn euid() -> libc::uid_t {

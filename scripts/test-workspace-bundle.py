@@ -327,7 +327,7 @@ def _unpack(entries, expect_success=False, check=None, **kw):
             root = snap / "rootfs"
             proof = root / "etc" / "proof"
             assert proof.read_bytes() == b"proof"
-            for rel, mode in (("etc", 0o700), ("etc/proof", 0o600)):
+            for rel, mode in (("etc", 0o755), ("etc/proof", 0o644)):
                 st = os.stat(root / rel)
                 assert st.st_mode & 0o777 == mode
                 assert st.st_uid == os.getuid()
@@ -375,9 +375,36 @@ class UnpackTests(unittest.TestCase):
             h2 = os.stat(root / "usr/bin/h2", follow_symlinks=False)
             self.assertEqual(tool.st_ino, h1.st_ino)
             self.assertEqual(h1.st_ino, h2.st_ino)
-            self.assertEqual(tool.st_mode & 0o777, 0o700)
+            self.assertEqual(tool.st_mode & 0o777, 0o755)
 
         _unpack(entries, expect_success=True, check=check)
+
+    def test_readonly_dir_ordinary_modes_and_error_cleanup(self):
+        reg, sym, lnk, dire = tarfile.REGTYPE, tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.DIRTYPE
+        entries = _OK + (
+            ("ro", dire, b"", 0o555, None),
+            ("ro/payload", reg, b"data", 0o644, None),
+            ("ro/alias", lnk, b"", 0o644, "ro/payload"),
+            ("ro/rel", sym, b"", 0o777, "payload"),
+            ("tmp", dire, b"", 0o1777, None),
+            ("tmp/note", reg, b"n", 0o664, None),
+            ("usr/bin/tool", reg, b"tool", 0o755, None),
+        )
+
+        def check(root):
+            self.assertEqual(os.lstat(root / "ro").st_mode & 0o7777, 0o555)
+            payload = os.lstat(root / "ro" / "payload")
+            alias = os.lstat(root / "ro" / "alias")
+            self.assertEqual(payload.st_mode & 0o777, 0o644)
+            self.assertEqual(payload.st_ino, alias.st_ino)
+            self.assertEqual(os.readlink(root / "ro" / "rel"), "payload")
+            self.assertEqual(os.lstat(root / "tmp").st_mode & 0o7777, 0o1777)
+            self.assertEqual(os.lstat(root / "tmp" / "note").st_mode & 0o777, 0o664)
+            self.assertEqual(os.lstat(root / "usr" / "bin" / "tool").st_mode & 0o777, 0o755)
+
+        _unpack(entries, expect_success=True, check=check)
+        with self.assertRaises((V.BundleError, OSError)):
+            _unpack(entries + (("ABS", reg, b"x", 0o644, None),))
 
     def test_bad_table(self):
         reg, dire = tarfile.REGTYPE, tarfile.DIRTYPE
@@ -571,7 +598,7 @@ class UnpackTests(unittest.TestCase):
                 _unpack(_OK)
 
 
-_GOLDEN = "62cd8e8eb2f1b715820a4dddff98fd471429dd7a7e16ba471c47b0a732e66f59"
+_GOLDEN = "d4c7888733e446897db069da80dbd6dc00fc402689b3050f98ac36bc295d8dca"
 
 
 def _root(path):

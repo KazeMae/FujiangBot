@@ -184,11 +184,50 @@ fn push_fixed_args_block_fd_unshare_without_as_pid_1() {
     for flag in [
         "--unshare-user",
         "--unshare-pid",
-        "--unshare-net",
         "--unshare-ipc",
         "--unshare-uts",
+        "--clearenv",
+        "--cap-drop",
     ] {
         assert!(args.iter().any(|arg| arg == flag));
     }
+    assert!(args
+        .windows(2)
+        .any(|pair| pair[0] == "--cap-drop" && pair[1] == "ALL"));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair[0] == "--size" && pair[1] == "67108864"));
+    assert!(args
+        .windows(2)
+        .all(|pair| !(pair[0] == "--tmpfs" && pair[1] == "/tmp")));
+    let chmod = args
+        .windows(3)
+        .position(|triple| triple[0] == "--chmod" && triple[1] == "1777" && triple[2] == "/tmp")
+        .expect("chmod 1777 /tmp");
+    let root_bind = args
+        .windows(3)
+        .position(|triple| triple[0] == "--bind-fd" && triple[1] == "10" && triple[2] == "/")
+        .expect("root bind");
+    assert!(root_bind < chmod);
+    assert!(args
+        .windows(2)
+        .any(|pair| pair[0] == "--tmpfs" && pair[1] == "/run"));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair[0] == "--tmpfs" && pair[1] == "/sys"));
+    assert_eq!(
+        args.iter().filter(|arg| arg.as_str() == "--tmpfs").count(),
+        2
+    );
+    assert_eq!(
+        args.iter()
+            .filter(|arg| arg.as_str() == "--bind-fd")
+            .count(),
+        2
+    );
+    assert!(args
+        .windows(2)
+        .any(|pair| pair[0] == "--bind-fd" && pair[1] == "11"));
+    assert!(args.iter().all(|arg| arg != "--unshare-net"));
     assert!(args.iter().all(|arg| arg != "--as-pid-1"));
 }
