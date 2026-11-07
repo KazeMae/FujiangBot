@@ -42,8 +42,35 @@ Write ==
   /\ phase' = "writing"
   /\ UNCHANGED <<verified, sealed, published, usable, executionAccepted, cleaned>>
 
-ReapSuccess ==
+ValidateLinks ==
   /\ phase = "writing"
+  /\ verified = TRUE
+  /\ sealed = TRUE
+  /\ worker = "writing"
+  /\ published = FALSE
+  /\ phase' = "links_validated"
+  /\ UNCHANGED <<verified, sealed, worker, published, usable, executionAccepted, cleaned>>
+
+Hardlinks ==
+  /\ phase = "links_validated"
+  /\ verified = TRUE
+  /\ sealed = TRUE
+  /\ worker = "writing"
+  /\ published = FALSE
+  /\ phase' = "hardlinks"
+  /\ UNCHANGED <<verified, sealed, worker, published, usable, executionAccepted, cleaned>>
+
+Symlinks ==
+  /\ phase = "hardlinks"
+  /\ verified = TRUE
+  /\ sealed = TRUE
+  /\ worker = "writing"
+  /\ published = FALSE
+  /\ phase' = "links_done"
+  /\ UNCHANGED <<verified, sealed, worker, published, usable, executionAccepted, cleaned>>
+
+ReapSuccess ==
+  /\ phase = "links_done"
   /\ verified = TRUE
   /\ sealed = TRUE
   /\ worker = "writing"
@@ -74,7 +101,7 @@ PublishFail ==
   /\ UNCHANGED <<verified, sealed, worker, published, executionAccepted>>
 
 Kill ==
-  /\ phase = "writing"
+  /\ phase \in {"writing", "links_validated", "hardlinks", "links_done"}
   /\ verified = TRUE
   /\ worker = "writing"
   /\ published = FALSE
@@ -117,6 +144,9 @@ Next ==
   \/ FreshVerify
   \/ Seal
   \/ Write
+  \/ ValidateLinks
+  \/ Hardlinks
+  \/ Symlinks
   \/ ReapSuccess
   \/ Publish
   \/ PublishFail
@@ -130,15 +160,17 @@ Spec == Init /\ [][Next]_vars
 
 Inv ==
   /\ executionAccepted = FALSE
-  /\ phase \in {"pending", "verified", "sealed", "writing", "reaped", "killed",
-                "reaped_error", "published", "failed"}
+  /\ phase \in {"pending", "verified", "sealed", "writing", "links_validated",
+                "hardlinks", "links_done", "reaped", "killed", "reaped_error",
+                "published", "failed"}
   /\ worker \in {"none", "writing", "reaped", "killed", "reaped_error"}
   /\ phase = "pending" => verified = FALSE /\ sealed = FALSE /\ worker = "none"
-  /\ phase \in {"verified", "sealed", "writing", "reaped", "killed", "reaped_error",
-                "published"} => verified = TRUE
+  /\ phase \in {"verified", "sealed", "writing", "links_validated", "hardlinks",
+                "links_done", "reaped", "killed", "reaped_error", "published"}
+       => verified = TRUE
   /\ sealed = TRUE => phase # "pending" /\ phase # "verified"
   /\ worker = "writing" =>
-       /\ phase = "writing"
+       /\ phase \in {"writing", "links_validated", "hardlinks", "links_done"}
        /\ verified = TRUE
        /\ sealed = TRUE
        /\ published = FALSE

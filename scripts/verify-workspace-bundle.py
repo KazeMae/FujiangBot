@@ -22,19 +22,208 @@ MAX_FILE = 256 * 1024 * 1024
 UNPACK_WALL_SECONDS = 15
 _DIR_FLAGS = os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-_COMP_RE = re.compile(r"[A-Za-z0-9+@=._-]+")
+_COMP_RE = re.compile(r"[ -~]+")
+_PAX_TIME_RE = re.compile(rb"-?[0-9]{1,20}(\.[0-9]{1,9})?")
+_LINK_TYPES = (tarfile.SYMTYPE, tarfile.LNKTYPE)
+_DIR_INFO = tarfile.TarInfo("d")
+_DIR_INFO.type = tarfile.DIRTYPE
 
 OFFICIAL_PRIMARY = "843938DF228D22F7B3742BC0D94AA3F0EFE21092"
 
 class BundleError(Exception):
     pass
 
-def _tar_path(member):
-    if member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE):
+MAX_LINK_HOPS = 40
+MAX_LINK_STEPS = 1000000
+
+
+def _symlink_check(path, syms, files, budget):
+    pending = list(path)
+    index = 0
+    stack = []
+    hops = 0
+    while index < len(pending):
+        comp = pending[index]
+        index += 1
+        budget[0] -= 1
+        if budget[0] < 0:
+            raise BundleError()
+        if comp == "" or comp == ".":
+            continue
+        if comp == "..":
+            if not stack:
+                raise BundleError()
+            stack.pop()
+            continue
+        if (
+            len(comp) > 255
+            or not comp.isascii()
+            or any(ord(c) < 32 or ord(c) > 126 or c in "/\\" for c in comp)
+        ):
+            raise BundleError()
+        stack.append(comp)
+        if sum(len(p) for p in stack) + len(stack) - 1 > 4096:
+            raise BundleError()
+        key = tuple(stack)
+        if key in syms:
+            hops += 1
+            if hops > MAX_LINK_HOPS:
+                raise BundleError()
+            raw = syms[key]
+            if (
+                not isinstance(raw, str)
+                or raw == ""
+                or len(raw) > 4096
+                or "\\" in raw
+                or any(ord(c) < 32 or ord(c) == 127 for c in raw)
+            ):
+                raise BundleError()
+            stack.pop()
+            parts = raw.split("/")
+            if raw.startswith("/"):
+                stack = []
+            pending = parts + pending[index:]
+            index = 0
+        elif key in files and index < len(pending):
+            raise BundleError()
+
+
+def _hard_target(path, hard, regular, syms, budget):
+    current = path
+    hops = 0
+    while True:
+        hops += 1
+        budget[0] -= 1
+        if budget[0] < 0 or hops > MAX_LINK_HOPS:
+            raise BundleError()
+        target = hard[current]
+        if (
+            not isinstance(target, str)
+            or target == ""
+            or len(target) > 4096
+            or target.startswith("/")
+            or "\\" in target
+            or any(ord(c) < 32 or ord(c) == 127 for c in target)
+        ):
+            raise BundleError()
+        rel = target[2:] if target.startswith("./") else target
+        if rel == "" or rel.startswith("./") or rel.startswith("/"):
+            raise BundleError()
+        parts = rel.split("/")
+        if any(p == "" or p == "." or p == ".." or len(p) > 255 for p in parts):
+            raise BundleError()
+        canon = tuple(parts)
+        for i in range(1, len(canon)):
+            prefix = canon[:i]
+            if prefix in syms or prefix in hard:
+                raise BundleError()
+        if canon in syms:
+            raise BundleError()
+        if canon in regular:
+            return canon
+        if canon in hard:
+            current = canon
+            continue
         raise BundleError()
-    if member.pax_headers or member.sparse is not None or member.linkname:
+
+
+def _link_dir(root_fd, parts):
+    fd = os.dup(root_fd)
+    try:
+        for part in parts:
+            nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _tar_links(root_fd, links, created, regular):
+    syms = {p: t for p, (kind, t) in links.items() if kind == tarfile.SYMTYPE}
+    hard = {p: t for p, (kind, t) in links.items() if kind == tarfile.LNKTYPE}
+    if len(syms) + len(hard) != len(links):
+        raise BundleError()
+    for node in created:
+        if any(node[:i] in links for i in range(1, len(node))):
+            raise BundleError()
+    for path in links:
+        if not path or path in regular or path not in created:
+            raise BundleError()
+        for i in range(1, len(path)):
+            pre = path[:i]
+            if pre not in created or pre in regular or pre in links:
+                raise BundleError()
+    budget = [MAX_LINK_STEPS]
+    files = regular | set(hard)
+    for path in syms:
+        _symlink_check(path, syms, files, budget)
+    resolved = {p: _hard_target(p, hard, regular, syms, budget) for p in hard}
+    for path, src in resolved.items():
+        sfd = dfd = None
+        try:
+            sfd = _link_dir(root_fd, src[:-1])
+            dfd = _link_dir(root_fd, path[:-1])
+            mode = os.stat(src[-1], dir_fd=sfd, follow_symlinks=False).st_mode
+            if not stat.S_ISREG(mode):
+                raise BundleError()
+            os.link(src[-1], path[-1], src_dir_fd=sfd, dst_dir_fd=dfd, follow_symlinks=False)
+        finally:
+            for fd in (sfd, dfd):
+                if fd is not None:
+                    os.close(fd)
+    for path, raw in syms.items():
+        fd = _link_dir(root_fd, path[:-1])
+        try:
+            os.symlink(raw, path[-1], dir_fd=fd)
+        finally:
+            os.close(fd)
+
+
+def _pax_times(data):
+    if type(data) is not bytes or len(data) < 1 or len(data) > 65536:
+        raise BundleError()
+    seen = set()
+    i = 0
+    n = len(data)
+    while i < n:
+        sp = data.find(b" ", i, i + 6)
+        if sp <= i:
+            raise BundleError()
+        digits = data[i:sp]
+        if len(digits) > 5 or not digits.isdigit() or digits[:1] == b"0":
+            raise BundleError()
+        length = int(digits)
+        end = i + length
+        if length < sp - i + 1 or end > n or data[end - 1:end] != b"\n":
+            raise BundleError()
+        body = data[sp + 1:end - 1]
+        eq = body.find(b"=")
+        if eq <= 0:
+            raise BundleError()
+        key = body[:eq]
+        if key not in (b"atime", b"mtime", b"ctime") or key in seen:
+            raise BundleError()
+        if _PAX_TIME_RE.fullmatch(body[eq + 1:]) is None:
+            raise BundleError()
+        seen.add(key)
+        i = end
+
+
+def _tar_path(member):
+    kind = member.type
+    if kind not in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE) + _LINK_TYPES:
+        raise BundleError()
+    if member.pax_headers or member.sparse is not None:
         raise BundleError()
     if member.mode & 0o6000:
+        raise BundleError()
+    linkname = member.linkname
+    if kind in _LINK_TYPES:
+        if member.size != 0 or type(linkname) is not str or linkname == "" or len(linkname) > 4096:
+            raise BundleError()
+    elif linkname:
         raise BundleError()
     size = member.size
     if type(size) is not int or size < 0 or size > MAX_FILE:
@@ -42,13 +231,15 @@ def _tar_path(member):
     name = member.name
     if type(name) is not str or len(name) > 4096 or "\\" in name or name.startswith("/"):
         raise BundleError()
-    if member.type == tarfile.DIRTYPE:
+    if kind == tarfile.DIRTYPE:
         if size != 0:
             raise BundleError()
         if name in (".", "./"):
             return ()
         if name.endswith("/"):
             name = name[:-1]
+    elif name in (".", "./"):
+        raise BundleError()
     if name.startswith("./"):
         name = name[2:]
     parts = name.split("/")
@@ -132,30 +323,67 @@ def _unpack_stream(archive_fd, root_fd, compressed_size):
 
             seen = set()
             created = set()
+            regular = set()
+            links = {}
+            pending_pax = False
             count = 0
             while True:
                 header = read(512)
                 if len(header) != 512:
                     raise BundleError()
                 if header == b"\x00" * 512:
+                    if pending_pax:
+                        raise BundleError()
                     second = read(512)
                     if len(second) != 512 or second != b"\x00" * 512:
                         raise BundleError()
                     while True:
                         tail = read(65536)
                         if tail == b"":
+                            _tar_links(root_fd, links, created, regular)
                             return
                         if tail != b"\x00" * len(tail):
                             raise BundleError()
                 member = tarfile.TarInfo.frombuf(header, "ascii", "strict")
+                count += 1
+                if count > MAX_ENTRIES:
+                    raise BundleError()
+                if member.type == tarfile.XHDTYPE:
+                    if pending_pax:
+                        raise BundleError()
+                    size = member.size
+                    if type(size) is not int or size < 1 or size > 65536:
+                        raise BundleError()
+                    payload = read(size)
+                    if len(payload) != size:
+                        raise BundleError()
+                    pad = (-size) % 512
+                    if pad:
+                        chunk = read(pad)
+                        if len(chunk) != pad or chunk != b"\x00" * pad:
+                            raise BundleError()
+                    _pax_times(payload)
+                    pending_pax = True
+                    continue
+                pending_pax = False
                 parts = _tar_path(member)
                 if parts in seen:
                     raise BundleError()
                 seen.add(parts)
-                count += 1
-                if count > MAX_ENTRIES:
+                if any(parts[:i] in links for i in range(1, len(parts))):
                     raise BundleError()
-                _tar_write(root_fd, member, parts, created, read)
+                if member.type in _LINK_TYPES:
+                    if parts in created:
+                        raise BundleError()
+                    _tar_write(root_fd, _DIR_INFO, parts[:-1], created, read)
+                    if len(created) >= MAX_ENTRIES:
+                        raise BundleError()
+                    created.add(parts)
+                    links[parts] = (member.type, member.linkname)
+                else:
+                    _tar_write(root_fd, member, parts, created, read)
+                    if member.type in (tarfile.REGTYPE, tarfile.AREGTYPE):
+                        regular.add(parts)
         finally:
             gz.close()
     finally:

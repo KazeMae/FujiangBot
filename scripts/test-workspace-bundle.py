@@ -290,7 +290,7 @@ def _archive(entries, fmt=tarfile.USTAR_FORMAT, pax=None, cut=0, tail=b"", plain
     return gzip.compress(raw + tail)
 
 
-def _unpack(entries, expect_success=False, **kw):
+def _unpack(entries, expect_success=False, check=None, **kw):
     with tempfile.TemporaryDirectory() as raw:
         os.chmod(raw, 0o700)
         base = Path(raw)
@@ -330,6 +330,8 @@ def _unpack(entries, expect_success=False, **kw):
                 st = os.stat(root / rel)
                 assert st.st_mode & 0o777 == mode
                 assert st.st_uid == os.getuid()
+            if check is not None:
+                check(root)
         finally:
             os.close(fd)
             assert outside.read_bytes() == b"HOST"
@@ -346,6 +348,36 @@ class UnpackTests(unittest.TestCase):
     def test_normal_members(self):
         _unpack(_OK, expect_success=True)
 
+    def test_distro_links(self):
+        reg, sym, lnk = tarfile.REGTYPE, tarfile.SYMTYPE, tarfile.LNKTYPE
+        entries = _OK + (
+            ("usr/bin/tool", reg, b"tool", 0o755, None),
+            ("bin", sym, b"", 0o777, "usr/bin"),
+            ("etc/alternatives/tool", sym, b"", 0o777, "../../usr/bin/tool"),
+            ("etc/tool", sym, b"", 0o777, "alternatives/tool"),
+            ("etc/abs", sym, b"", 0o777, "/bin/tool"),
+            ("etc/mtab", sym, b"", 0o777, "/proc/mounts"),
+            ("etc/root", sym, b"", 0o777, ".."),
+            ("usr/bin/h2", lnk, b"", 0o644, "usr/bin/h1"),
+            ("usr/bin/h1", lnk, b"", 0o644, "usr/bin/tool"),
+        )
+
+        def check(root):
+            self.assertEqual(os.readlink(root / "bin"), "usr/bin")
+            self.assertEqual(os.readlink(root / "etc/alternatives/tool"), "../../usr/bin/tool")
+            self.assertEqual(os.readlink(root / "etc/tool"), "alternatives/tool")
+            self.assertEqual(os.readlink(root / "etc/abs"), "/bin/tool")
+            self.assertEqual(os.readlink(root / "etc/mtab"), "/proc/mounts")
+            self.assertEqual(os.readlink(root / "etc/root"), "..")
+            tool = os.stat(root / "usr/bin/tool", follow_symlinks=False)
+            h1 = os.stat(root / "usr/bin/h1", follow_symlinks=False)
+            h2 = os.stat(root / "usr/bin/h2", follow_symlinks=False)
+            self.assertEqual(tool.st_ino, h1.st_ino)
+            self.assertEqual(h1.st_ino, h2.st_ino)
+            self.assertEqual(tool.st_mode & 0o777, 0o700)
+
+        _unpack(entries, expect_success=True, check=check)
+
     def test_bad_table(self):
         reg, dire = tarfile.REGTYPE, tarfile.DIRTYPE
         cases = {
@@ -361,7 +393,7 @@ class UnpackTests(unittest.TestCase):
                 ("jump", tarfile.SYMTYPE, b"", 0o777, "../../"),
                 ("jump/outside", reg, b"x", 0o644, None),
             ),
-            "hardlink": (("a", reg, b"a", 0o644, None), ("b", tarfile.LNKTYPE, b"", 0o644, "a")),
+            "hardlink": (("a", reg, b"a", 0o644, None), ("b", tarfile.LNKTYPE, b"", 0o644, "../outside")),
             "chr": (("d", tarfile.CHRTYPE, b"", 0o644, None),),
             "blk": (("d", tarfile.BLKTYPE, b"", 0o644, None),),
             "fifo": (("d", tarfile.FIFOTYPE, b"", 0o644, None),),
@@ -420,6 +452,112 @@ class UnpackTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 1)
         with self.assertRaises(ChildProcessError):
             os.waitpid(-1, os.WNOHANG)
+
+    def test_link_rejects(self):
+        reg, sym, lnk = tarfile.REGTYPE, tarfile.SYMTYPE, tarfile.LNKTYPE
+
+        def s(name, target):
+            return (name, sym, b"", 0o777, target)
+
+        def h(name, target):
+            return (name, lnk, b"", 0o777, target)
+
+        def r(name):
+            return (name, reg, b"x", 0o644, None)
+
+        cases = {
+            "sym-root-dotdot": (s("out", "../outside"),),
+            "sym-abs-dotdot": (s("out", "/../../outside"),),
+            "sym-parent-file": (s("jump", "usr"), r("jump/file")),
+            "sym-file-parent": (r("jump/file"), s("jump", "usr")),
+            "sym-parent-child": (s("jump", "usr"), s("jump/child", "etc")),
+            "sym-self": (s("a", "a"),),
+            "sym-cycle": (s("a", "b"), s("b", "a")),
+            "hard-cycle": (h("a", "b"), h("b", "a")),
+            "hard-missing": (h("a", "missing"),),
+            "hard-dir": (h("a", "etc"),),
+            "hard-abs": (h("a", "/etc/proof"),),
+            "hard-dotdot": (h("a", "../outside"),),
+            "hard-to-sym": (s("a", "etc/proof"), h("h", "a")),
+            "hard-through-sym": (s("a", "etc"), h("h", "a/proof")),
+            "sym-dup": (s("a", "etc"), s("./a", "etc")),
+            "link-file-same": (s("a", "etc"), r("a")),
+            "sym-dotdot-mid": (s("a", "etc/proof/../x"),),
+            "sym-expand-dotdot": (
+                s("safe/deep", "/"),
+                s("etc/gadget", "../safe/deep/../../outside"),
+            ),
+        }
+        for label, entries in cases.items():
+            with self.subTest(label=label):
+                with self.assertRaises((V.BundleError, OSError)):
+                    _unpack(_OK + entries)
+
+    def test_link_bounds(self):
+        sym = tarfile.SYMTYPE
+        hops = (
+            ("etc/a", sym, b"", 0o777, "b"),
+            ("etc/b", sym, b"", 0o777, "proof"),
+        )
+        with unittest.mock.patch.object(V, "MAX_LINK_HOPS", 1):
+            with self.assertRaises((V.BundleError, OSError)):
+                _unpack(_OK + hops)
+        step = (("etc/a", sym, b"", 0o777, "proof"),)
+        with unittest.mock.patch.object(V, "MAX_LINK_STEPS", 1):
+            with self.assertRaises((V.BundleError, OSError)):
+                _unpack(_OK + step)
+
+    def test_printable_names(self):
+        reg = tarfile.REGTYPE
+        entries = _OK + (
+            ("usr/bin/[", reg, b"[", 0o644, None),
+            ("var/lib/dpkg/info/libc6:amd64.list", reg, b"list", 0o644, None),
+        )
+        _unpack(entries, expect_success=True)
+
+    def test_pax_safe_times(self):
+        pax = {"mtime": "1.25", "atime": "2", "ctime": "3.0"}
+        _unpack(_OK, expect_success=True, fmt=tarfile.PAX_FORMAT, pax=pax)
+
+    def test_pax_rejects(self):
+        bad = (
+            {"path": "etc/proof"},
+            {"linkpath": "etc/proof"},
+            {"size": "1"},
+            {"SCHILY.xattr.security.capability": "\x00"},
+            {"GNU.sparse.map": "0,0"},
+            {"VENDOR.unknown": "x"},
+            {"mtime": "nan"},
+            {"mtime": "1e2"},
+        )
+        for pax in bad:
+            with self.subTest(pax=tuple(pax)):
+                with self.assertRaises((V.BundleError, OSError)):
+                    _unpack(_OK, fmt=tarfile.PAX_FORMAT, pax=pax)
+
+    def test_pax_framing(self):
+        base = gzip.decompress(_archive(_OK))
+        valid = b"11 mtime=1\n"
+        payloads = (
+            b"0 mtime=1\n",
+            b"99 mtime=1\n",
+            valid * 2,
+            valid + b"x",
+            b"11 mtime=\x00\n",
+            b"x" * 65537,
+        )
+        frames = [(tarfile.XHDTYPE, payload, base) for payload in payloads]
+        frames.append((tarfile.XGLTYPE, valid, base))
+        frames.append((tarfile.XHDTYPE, valid, b"\0" * 1024))
+        for kind, payload, tail in frames:
+            info = tarfile.TarInfo("PaxHeaders/proof")
+            info.type = kind
+            info.size = len(payload)
+            raw = info.tobuf(format=tarfile.USTAR_FORMAT)
+            raw += payload + b"\0" * (-len(payload) % 512) + tail
+            with self.subTest(kind=kind, n=len(payload), tail=len(tail)):
+                with self.assertRaises((V.BundleError, OSError)):
+                    _unpack((), plain=gzip.compress(raw))
 
 
 if __name__ == "__main__":

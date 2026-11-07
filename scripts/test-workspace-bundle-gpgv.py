@@ -264,9 +264,9 @@ class WorkspaceBundleGpgvTests(unittest.TestCase):
             verify.verify_bundle(self.source, self.target)
         self._assert_no_residue()
 
-    def _ustar(self, write):
+    def _ustar(self, write, fmt=tarfile.USTAR_FORMAT):
         bio = io.BytesIO()
-        with tarfile.open(fileobj=bio, mode="w:gz", format=tarfile.USTAR_FORMAT) as tf:
+        with tarfile.open(fileobj=bio, mode="w:gz", format=fmt) as tf:
             write(tf)
         self.payload = bio.getvalue()
         self.digest = hashlib.sha256(self.payload).hexdigest()
@@ -359,6 +359,83 @@ class WorkspaceBundleGpgvTests(unittest.TestCase):
         self._assert_no_residue()
         with open(sentinel, "rb") as fh:
             self.assertEqual(fh.read(), marker)
+
+    def test_unpack_pax_synthetic_distro_links(self):
+        proof = b"pax-proof\n"
+        tool = b"#!/bin/sh\necho tool\n"
+        root = self._dot()
+        root.pax_headers = {"mtime": "1700000000.0", "atime": "1700000000.5", "ctime": "1700000001.25"}
+
+        def write(tf):
+            tf.addfile(root)
+            info = tarfile.TarInfo("./etc/proof")
+            info.type = tarfile.REGTYPE
+            info.mode = 0o644
+            info.size = len(proof)
+            tf.addfile(info, io.BytesIO(proof))
+            exe = tarfile.TarInfo("usr/bin/tool")
+            exe.type = tarfile.REGTYPE
+            exe.mode = 0o755
+            exe.size = len(tool)
+            tf.addfile(exe, io.BytesIO(tool))
+            bindir = tarfile.TarInfo("bin")
+            bindir.type = tarfile.SYMTYPE
+            bindir.linkname = "usr/bin"
+            tf.addfile(bindir)
+            etc_tool = tarfile.TarInfo("etc/tool")
+            etc_tool.type = tarfile.SYMTYPE
+            etc_tool.linkname = "/bin/tool"
+            tf.addfile(etc_tool)
+            hard = tarfile.TarInfo("usr/bin/hard")
+            hard.type = tarfile.LNKTYPE
+            hard.linkname = "usr/bin/tool"
+            tf.addfile(hard)
+
+        self._ustar(write, fmt=tarfile.PAX_FORMAT)
+        self._fill()
+        rec = verify.verify_bundle(self.source, self.target, unpack=True)
+        self.assertIs(rec["extracted"], True)
+        self.assertIs(rec["execution_accepted"], False)
+        base = os.path.join(self.target, "rootfs")
+        proof_path = os.path.join(base, "etc", "proof")
+        tool_path = os.path.join(base, "usr", "bin", "tool")
+        hard_path = os.path.join(base, "usr", "bin", "hard")
+        with open(proof_path, "rb") as fh:
+            self.assertEqual(fh.read(), proof)
+        with open(tool_path, "rb") as fh:
+            self.assertEqual(fh.read(), tool)
+        self.assertFalse(os.path.islink(proof_path))
+        self.assertFalse(os.path.islink(tool_path))
+        self.assertEqual(os.lstat(tool_path).st_mode & 0o777, 0o755)
+        self.assertEqual(os.readlink(os.path.join(base, "bin")), "usr/bin")
+        self.assertEqual(os.readlink(os.path.join(base, "etc", "tool")), "/bin/tool")
+        self.assertEqual(os.lstat(tool_path).st_ino, os.lstat(hard_path).st_ino)
+        self.assertEqual(os.lstat(tool_path).st_dev, os.lstat(hard_path).st_dev)
+
+    def test_unpack_rejects_symlink_cycle(self):
+        proof = b"before-cycle\n"
+
+        def write(tf):
+            tf.addfile(self._dot())
+            info = tarfile.TarInfo("./etc/proof")
+            info.type = tarfile.REGTYPE
+            info.mode = 0o644
+            info.size = len(proof)
+            tf.addfile(info, io.BytesIO(proof))
+            a = tarfile.TarInfo("./a")
+            a.type = tarfile.SYMTYPE
+            a.linkname = "b"
+            tf.addfile(a)
+            b = tarfile.TarInfo("./b")
+            b.type = tarfile.SYMTYPE
+            b.linkname = "a"
+            tf.addfile(b)
+
+        self._ustar(write)
+        self._fill()
+        with self.assertRaises(verify.BundleError):
+            verify.verify_bundle(self.source, self.target, unpack=True)
+        self._assert_no_residue()
 
     def test_concatenated_valid_signatures_rejected(self):
         manifest = self._manifest()
