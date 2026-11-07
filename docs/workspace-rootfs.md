@@ -1,6 +1,6 @@
 # 工作区 rootfs 准备
 
-**检查点（2026-11-07）：** 本地 `cargo test --workspace --offline` 三次各 298 通过（agent 216），Python 28，六模型 TLC 已过。代码 `107aca9` 的 CI `42378216946` 在 Test agent 失败，exit 101；gpgv、fmt、clippy 通过，后面的步骤跳过。失败名字尚未从注解读出，不把这次 CI 写成全绿。生产关闭。runner 已接标准 uidmap、`fd:N`、核对过的 namespace FD、bwrap `--userns` 和五个命名空间 capability。本机没有 04755 辅助程序，没有真实完整映射、官方 rootfs 或 apt。
+**检查点（2026-11-07）：** 协调者独立门禁已过且 exit 0：`cargo fmt --all -- --check`；agent 全部 target、`--no-deps --offline`、`-D warnings` clippy；`cargo test --workspace --offline` 连续三次，每次 299 个唯一正式用例通过（agent 217，0 失败、0 ignored）。4 个 `--exact` 原生子进程不要重复算成 303。Python 归档 28 通过，rootfs stub 通过，gpgv 14 条明确 SKIP，六模型 TLC 通过，userns 987 行与文件长度、`git diff --check` 通过。298×3（agent 216）是历史。`d221e59` / `42379013349` 的五个失败已在这份代码里修掉：写着的 ELF FD 造成 ETXTBSY、`/bin/false` 与 `/bin/sleep` 的 `O_NOFOLLOW` 得到 ELOOP、单 ID 映射在 ready 前写 `setgroups`、并行 fork 拿着无关 flock、超时路径重复 kill。另外超时只由 `wait_timeout` 回收一次，seccomp 父进程先关掉自己的写端，真实 `bootstrap` 分成失败关闭与成功时核对 namespace FD 两条路径。解包根 0755 的怀疑已撤回，不是这次的修复。新 CI 还没有，推送后由协调者核验，不能写成已绿。生产关闭。runner 已接标准 uidmap、`fd:N`、核对过的 namespace FD、bwrap `--userns` 和五个命名空间 capability。本机没有 04755 辅助程序，没有真实完整映射、官方 rootfs 或 apt。
 
 消费侧已经接到执行器。每次调用用这一轮真实 `MemoCallScope` 做成 `HostTurn`，`handle_tool_with` 重新 resolve，不复用上一名说话人。群里只有当前 actor 显式选过本人（表键是群号+actor）才进个人 owner，否则是当前群。私聊 source 与 actor 不一致则拒绝。
 
@@ -112,7 +112,9 @@ python3 scripts/verify-workspace-bundle.py --unpack /绝对source /私有parent/
 
 历史（不是当前门禁）：曾有 `cargo test --workspace --offline` 284 通过（agent 202）。其后一轮 agent 201 通过、1 失败，失败项 `existing_runner_failclosed_on_incomplete_root`，owner lock EAGAIN。该失败已由 `OwnerLock` 的 `LOCK_UN` 修掉，并包含在下面的 286 里。
 
-本地基线：三次 workspace 各 298 通过（agent 216）。`107aca9` CI `42378216946` Test agent exit 101，不是全绿。Python 28 与六模型 TLC 在这次失败之前已经通过。缺辅助程序时没有真实完整映射或 apt。
+历史本地计数：三次 workspace 各 298 通过（agent 216）。那不是当前门禁。
+
+当前门禁：`cargo fmt --all -- --check` 通过。agent 严格 clippy（全部 target、`--no-deps --offline -D warnings`）通过。`cargo test --workspace --offline` 连续三次，每次 299 个唯一正式用例通过（agent 217，0 失败、0 ignored）。4 个 `--exact` 子进程不另算。Python 归档 28 通过。rootfs stub 通过。本机 gpgv 14 条明确 SKIP。六模型 TLC 通过。userns 987 行，文件长度与 `git diff --check` 通过。证据是 `final-verified-*.log`。`d221e59` CI `42379013349` 的五个失败（ETXTBSY、`/bin` 符号链接 ELOOP、单 ID 映射顺序、并行 flock，以及随后收紧的单次超时回收、seccomp EOF、真实 bootstrap 双路径）已包含在这 299 里。新 CI 待推送后核验，这里不写成全绿。缺辅助程序时没有真实完整映射或 apt。审批前的真实 rootfs 运行验收 harness 仍是未实现的代码，不是只剩环境。官方 rootfs 的危险 metadata 是否能进口、以及真实 bash、Python、apt、NapCat，都还没验收。导入仍拒绝 setid 和 capability，所以不能保证 Ubuntu 工件能进来。解包根 0755 的怀疑已撤回，不记成修复。
 
 三条验收，分开算：
 
@@ -121,3 +123,23 @@ python3 scripts/verify-workspace-bundle.py --unpack /绝对source /私有parent/
 3. 工具路由：`tools/mod.rs` 把当前 `MemoCallScope` 交给 `handle_tool_with`。成功终态回调在测试里是替换的，不是真 bash。
 
 没有真实 bash、Python、Ubuntu 或 apt 的生产端到端。`acceptance.json` 不会由准备脚本自动写成 `approved: true`。
+
+## 本机管理员准备
+
+本机是 Debian 13。已有 `gpg`、`gpg-agent`、`gpgconf`、`bwrap`、`python3`、`unshare`。缺 `/usr/bin/newuidmap`、`/usr/bin/newgidmap` 和 `gpgv`。`/etc/subuid` 与 `/etc/subgid` 的 `box:100000:65536` 不要改。网络正式恢复并且正常批准之后，由管理员自己运行，不给 payload 宿主 root，这一轮不执行、不重试 DNS：
+
+```sh
+sudo apt-get install --no-install-recommends uidmap gpgv
+stat -c '%U:%G %a %h %n' /usr/bin/newuidmap /usr/bin/newgidmap
+```
+
+官方工件只来自 `scripts/prepare-workspace-rootfs.sh` 里的常量：`https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release` 上的 `SHA256SUMS` 与 `SHA256SUMS.gpg`，公钥 `https://archive.ubuntu.com/ubuntu/project/ubuntu-archive-keyring.gpg`。归档文件名由签过名的 manifest 决定，不写死 point 版本，不用 cloud-minimal xz。
+
+已有命令用新的绝对目录，父目录私有且为 0700：
+
+```sh
+scripts/prepare-workspace-rootfs.sh /绝对/新目录
+python3 scripts/verify-workspace-bundle.py --unpack /绝对/source /绝对/私有父/新snapshot
+```
+
+没有 runtime acceptance 脚本。审批前用真实 rootfs 跑 runner 的 harness 仍然没有，这是未实现的代码，不能说只差装包。官方工件的危险 metadata、真实 bash、Python、apt 和 NapCat 都未验收。生产门禁保持关闭。

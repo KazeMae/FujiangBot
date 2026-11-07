@@ -30,7 +30,7 @@ pub(super) fn bootstrap() -> io::Result<OwnedFd> {
     {
         return Err(invalid("helper replaced"));
     }
-    let mut holder = fork_holder(false)?;
+    let mut holder = fork_holder()?;
     let proc_dir = pin_proc_dir(holder.pidfd.as_raw_fd(), holder.pid)?;
     let spec = format!("fd:{}", proc_dir.as_raw_fd());
     let euid = unsafe { libc::geteuid() }.to_string();
@@ -203,9 +203,10 @@ impl Drop for Holder {
     }
 }
 
-/// Close every FD >= 3 except two pipe ends. Flags 0 actually close; CLOEXEC would not.
+/// Close every FD >= 3 except one kept FD, or two when the arguments differ.
+/// Flags 0 actually close; CLOEXEC would not.
 fn close_except(keep_a: RawFd, keep_b: RawFd) -> bool {
-    if keep_a < 3 || keep_b < 3 || keep_a == keep_b {
+    if keep_a < 3 || keep_b < 3 {
         return false;
     }
     let low = u32::try_from(keep_a.min(keep_b)).unwrap_or(u32::MAX);
@@ -236,7 +237,7 @@ fn close_span(first: u32, last: u32) -> bool {
     }
 }
 
-fn fork_holder(deny_setgroups: bool) -> io::Result<Holder> {
+fn fork_holder() -> io::Result<Holder> {
     let mut ready = [-1; 2];
     let mut release = [-1; 2];
     if unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
@@ -274,21 +275,6 @@ fn fork_holder(deny_setgroups: bool) -> io::Result<Holder> {
             }
             if libc::unshare(libc::CLONE_NEWUSER) != 0 {
                 libc::_exit(72);
-            }
-            if deny_setgroups {
-                let setgroups = libc::open(
-                    c"/proc/self/setgroups".as_ptr(),
-                    libc::O_WRONLY | libc::O_CLOEXEC,
-                );
-                let deny = b"deny\n";
-                if setgroups < 0
-                    || libc::write(setgroups, deny.as_ptr() as *const libc::c_void, deny.len())
-                        as usize
-                        != deny.len()
-                {
-                    libc::_exit(73);
-                }
-                libc::close(setgroups);
             }
             let one = [1u8; 1];
             if libc::write(ready[1], one.as_ptr() as *const libc::c_void, 1) != 1 {
@@ -329,8 +315,15 @@ fn fork_holder(deny_setgroups: bool) -> io::Result<Holder> {
         alive: true,
     };
     if !wait_byte(ready_r.as_raw_fd(), Duration::from_secs(2))? {
-        holder.kill();
-        return Err(invalid("userns holder"));
+        let status = match wait_timeout(pid, Duration::from_secs(2), false) {
+            Ok(code) => format!("exit {code}"),
+            Err(err) => err.to_string(),
+        };
+        holder.alive = false;
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("userns holder {status}"),
+        ));
     }
     if fdinfo_pid(holder.pidfd.as_raw_fd())? != pid {
         holder.kill();
@@ -374,13 +367,9 @@ fn run_pinned(
             if libc::getppid() != expect_ppid || libc::setpgid(0, 0) != 0 {
                 libc::_exit(81);
             }
-            let rc = libc::syscall(
-                libc::SYS_close_range,
-                3 as libc::c_long,
-                u32::MAX as libc::c_long,
-                4 as libc::c_long,
-            );
-            if rc != 0 {
+            let helper_fd = fd.as_raw_fd();
+            let keep_b = proc_dir.unwrap_or(helper_fd);
+            if !close_except(helper_fd, keep_b) {
                 libc::_exit(82);
             }
             if let Some(dir) = proc_dir {
@@ -407,17 +396,11 @@ fn run_pinned(
             libc::_exit(127);
         }
     }
-    match wait_timeout(child, limit, group) {
-        Ok(0) => Ok(()),
-        Ok(_) => Err(invalid("helper")),
-        Err(err) => {
-            if group {
-                unsafe { libc::kill(-child, libc::SIGKILL) };
-            }
-            unsafe { libc::kill(child, libc::SIGKILL) };
-            let _ = wait_timeout(child, Duration::from_secs(2), false);
-            Err(err)
-        }
+    let status = wait_timeout(child, limit, group)?;
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(invalid("helper"))
     }
 }
 
@@ -771,13 +754,7 @@ mod tests {
 
     #[test]
     fn helper_timeout_kills_the_process_group() {
-        let fd = raw_owned(unsafe {
-            libc::open(
-                c"/bin/sleep".as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            ) as libc::c_long
-        })
-        .unwrap();
+        let fd = open_public_tool(c"/bin/sleep");
         let started = Instant::now();
         let err = run_pinned(
             &fd,
@@ -795,13 +772,7 @@ mod tests {
 
     #[test]
     fn helper_failure_is_reaped() {
-        let fd = raw_owned(unsafe {
-            libc::open(
-                c"/bin/false".as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            ) as libc::c_long
-        })
-        .unwrap();
+        let fd = open_public_tool(c"/bin/false");
         let err =
             run_pinned(&fd, None, "false", "1", &[], Duration::from_secs(2), true).unwrap_err();
         assert!(err.to_string().contains("helper"), "{err}");
@@ -809,7 +780,7 @@ mod tests {
 
     #[test]
     fn production_holder_leaves_setgroups_allow_and_drop_reaps() {
-        let holder = fork_holder(false).unwrap();
+        let holder = fork_holder().unwrap();
         let pid = holder.pid;
         let dir = pin_proc_dir(holder.pidfd.as_raw_fd(), pid).unwrap();
         assert_eq!(read_at(dir.as_raw_fd(), c"setgroups").unwrap(), "allow\n");
@@ -821,13 +792,14 @@ mod tests {
 
     #[test]
     fn kernel_single_map_is_not_the_full_map_and_ns_fd_is_checked() {
-        let mut holder = fork_holder(true).expect("unshare");
+        let mut holder = fork_holder().expect("unshare");
         let dir = pin_proc_dir(holder.pidfd.as_raw_fd(), holder.pid).unwrap();
-        assert_eq!(read_at(dir.as_raw_fd(), c"setgroups").unwrap(), "deny\n");
         let euid = unsafe { libc::geteuid() };
         let egid = unsafe { libc::getegid() };
+        write_at(dir.as_raw_fd(), c"setgroups", "deny\n").unwrap();
         write_at(dir.as_raw_fd(), c"uid_map", &format!("0 {euid} 1\n")).unwrap();
         write_at(dir.as_raw_fd(), c"gid_map", &format!("0 {egid} 1\n")).unwrap();
+        assert_eq!(read_at(dir.as_raw_fd(), c"setgroups").unwrap(), "deny\n");
         assert!(!maps_from_dir(dir.as_raw_fd()).unwrap());
         let uid = read_at(dir.as_raw_fd(), c"uid_map").unwrap();
         assert!(uid.split_whitespace().any(|col| col == "1"));
@@ -869,6 +841,17 @@ mod tests {
 
     #[test]
     fn holder_releases_unrelated_flock_while_still_alive() {
+        if std::env::var_os("FUJIANG_FLOCK_ISOLATED").is_none() {
+            let current = std::thread::current();
+            let name = current.name().expect("test name");
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--test-threads=1"])
+                .env("FUJIANG_FLOCK_ISOLATED", "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "{name}");
+            return;
+        }
         let path = std::env::temp_dir().join(format!("userns-flock-{}", std::process::id()));
         let _ = fs::remove_file(&path);
         let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
@@ -884,7 +867,7 @@ mod tests {
             unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
             0
         );
-        let holder = fork_holder(false).unwrap();
+        let holder = fork_holder().unwrap();
         drop(held);
         let again = raw_owned(unsafe {
             libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) as libc::c_long
@@ -898,13 +881,87 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_does_not_claim_a_real_full_map() {
-        let err = bootstrap().expect_err("helpers or allocation");
-        let text = err.to_string();
-        assert!(
-            text.contains("helper") || text.contains("subid") || text.contains("map"),
-            "{text}"
+    fn timeout_reap_belongs_only_to_wait_timeout() {
+        let mut ready = [0; 2];
+        assert_eq!(
+            unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
         );
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe {
+                libc::close(ready[0]);
+                if libc::setpgid(0, 0) != 0 || !close_except(ready[1], ready[1]) {
+                    libc::_exit(81);
+                }
+                let one = [1u8];
+                if libc::write(ready[1], one.as_ptr() as *const libc::c_void, 1) != 1 {
+                    libc::_exit(82);
+                }
+                loop {
+                    libc::pause();
+                }
+            }
+        }
+        unsafe { libc::close(ready[1]) };
+        let mut saw = [0u8; 1];
+        let n = unsafe { libc::read(ready[0], saw.as_mut_ptr() as *mut libc::c_void, 1) };
+        if n != 1 {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            let _ = wait_timeout(pid, Duration::from_secs(2), false);
+            assert_eq!(n, 1);
+        }
+        unsafe { libc::close(ready[0]) };
+        let err = wait_timeout(pid, Duration::from_millis(40), true).unwrap_err();
+        assert!(err.to_string().contains("timeout"), "{err}");
+        let rc = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+        assert_eq!(rc, -1);
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[test]
+    fn bootstrap_records_a_real_namespace_or_the_closed_error() {
+        match bootstrap() {
+            Err(err) => {
+                let text = err.to_string();
+                assert!(
+                    text.contains("helper")
+                        || text.contains("subid")
+                        || text.contains("map")
+                        || text.contains("nnp"),
+                    "{text}"
+                );
+            }
+            Ok(fd) => {
+                require_user_ns(fd.as_raw_fd()).unwrap();
+                require_owner(fd.as_raw_fd()).unwrap();
+                let mine = raw_owned(unsafe {
+                    libc::open(
+                        c"/proc/self/ns/user".as_ptr(),
+                        libc::O_RDONLY | libc::O_CLOEXEC,
+                    ) as libc::c_long
+                })
+                .unwrap();
+                let got = fstat(fd.as_raw_fd()).unwrap();
+                let host = fstat(mine.as_raw_fd()).unwrap();
+                assert_ne!(got.st_ino, host.st_ino);
+                eprintln!("bootstrap returned a verified user namespace");
+            }
+        }
+    }
+
+    fn open_public_tool(path: &CStr) -> OwnedFd {
+        let fd = raw_owned(unsafe {
+            libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) as libc::c_long
+        })
+        .unwrap();
+        let st = fstat(fd.as_raw_fd()).unwrap();
+        assert_eq!(st.st_mode & libc::S_IFMT, libc::S_IFREG);
+        fd
     }
 
     fn write_at(dir: RawFd, name: &CStr, data: &str) -> io::Result<()> {

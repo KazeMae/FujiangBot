@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{Error, ErrorKind};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -45,10 +45,34 @@ fn fixture_dir() -> TestDir {
     }
 }
 
+fn alone() -> bool {
+    if std::env::var_os("FUJIANG_STAGE_ISOLATED").is_some() {
+        return false;
+    }
+    let current = std::thread::current();
+    let name = current.name().expect("test name");
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--test-threads=1"])
+        .env("FUJIANG_STAGE_ISOLATED", "1")
+        .status()
+        .unwrap();
+    assert!(status.success(), "{name}");
+    true
+}
+
 fn stage(name: &str) -> (TestDir, PathBuf) {
     let dir = fixture_dir();
     let bin = dir.path().join(name);
-    fs::copy(PathBuf::from("/usr/bin").join(name), &bin).unwrap();
+    {
+        let src_path = PathBuf::from("/usr/bin").join(name);
+        let mut src = fs::File::open(&src_path).unwrap();
+        let mode = src.metadata().unwrap().permissions().mode();
+        let mut dst = fs::File::create(&bin).unwrap();
+        std::io::copy(&mut src, &mut dst).unwrap();
+        dst.set_permissions(fs::Permissions::from_mode(mode & 0o777))
+            .unwrap();
+        dst.sync_all().unwrap();
+    }
     (dir, bin)
 }
 
@@ -87,6 +111,9 @@ fn assert_echild(pid: u32) {
 
 #[test]
 fn true_polls_pidfd_before_wait_and_finish_reaps() {
+    if alone() {
+        return;
+    }
     let (dir, bin) = stage("true");
     let child = Command::new(&bin)
         .env_clear()
@@ -115,6 +142,9 @@ fn true_polls_pidfd_before_wait_and_finish_reaps() {
 
 #[test]
 fn sleep_wait_wall_deadline_reaps() {
+    if alone() {
+        return;
+    }
     let (dir, bin) = stage("sleep");
     let child = Command::new(&bin)
         .arg("5")
@@ -143,6 +173,9 @@ fn sleep_wait_wall_deadline_reaps() {
 
 #[test]
 fn finish_without_pidfd_stays_armed_and_drop_reaps() {
+    if alone() {
+        return;
+    }
     let (dir, bin) = stage("sleep");
     let child = Command::new(&bin)
         .arg("5")
@@ -280,6 +313,29 @@ fn child_only_seccomp_denies_namespace_ops_and_allows_fork() {
     if pid == 0 {
         unsafe {
             libc::close(pipes[0]);
+            let keep = pipes[1];
+            if keep < 3 {
+                libc::_exit(91);
+            }
+            if keep > 3
+                && libc::syscall(
+                    libc::SYS_close_range,
+                    3 as libc::c_long,
+                    (keep - 1) as libc::c_long,
+                    0 as libc::c_long,
+                ) != 0
+            {
+                libc::_exit(91);
+            }
+            if libc::syscall(
+                libc::SYS_close_range,
+                (keep + 1) as libc::c_long,
+                u32::MAX as libc::c_long,
+                0 as libc::c_long,
+            ) != 0
+            {
+                libc::_exit(91);
+            }
             let mut out = [-1i32; 5];
             let nnp = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
             let fprog = libc::sock_fprog {
@@ -320,6 +376,7 @@ fn child_only_seccomp_denies_namespace_ops_and_allows_fork() {
             libc::_exit(0);
         }
     }
+    unsafe { libc::close(pipes[1]) };
     let mut buf = [0u8; 20];
     let mut got = 0;
     while got < buf.len() {
@@ -330,13 +387,14 @@ fn child_only_seccomp_denies_namespace_ops_and_allows_fork() {
                 buf.len() - got,
             )
         };
-        assert!(n > 0);
+        if n <= 0 {
+            let mut status = 0;
+            let _ = unsafe { libc::waitpid(pid, &mut status, 0) };
+            assert!(n > 0, "child closed the pipe early");
+        }
         got += n as usize;
     }
-    unsafe {
-        libc::close(pipes[0]);
-        libc::close(pipes[1]);
-    }
+    unsafe { libc::close(pipes[0]) };
     let mut status = 0;
     assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
     let words = buf
