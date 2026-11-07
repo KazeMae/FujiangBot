@@ -1,6 +1,10 @@
 # 工作区 rootfs 准备
 
-**检查点（2026-11-07）：** 当前本地门禁已独立跑完且 exit 0，证据 `final-fsetid-*.log`：fmt、agent 严格 clippy、连续三次 workspace 各 299 个唯一用例（agent 217，0 失败、0 ignored，4 个 `--exact` 子进程不另算）、Python 28、rootfs stub、六模型 TLC、userns 999 行、`git diff --check`。这三次包含 `CAP_FSETID`。命名空间能力是 CHOWN、DAC_OVERRIDE、FOWNER、FSETID、SETUID、SETGID。生产门禁关闭。没有真实完整映射，也没有 Ubuntu、bash、Python 或 apt。审批前的真实 rootfs 运行验收 harness 仍未实现。新 CI 推送后由协调者核验，这里不写成已绿。历史 CI 见文末。
+**检查点（2026-11-07）：** 当前门禁证据是 `runtime-final-*.log`，三次 `cargo test --workspace --offline` 各 308 个唯一通过（agent 226，0 失败，1 个 ignored 的真实 rootfs 管理入口）。4 个 `--exact` 嵌套子进程不另算。fmt、agent 严格 clippy、Python bundle 28、rootfs stub、六模型 TLC、探针 879 行、`git diff --check` 都通过。本机真实 gpgv 14 条因缺 `gpgv` 而 SKIP。299×3（agent 217，0 ignored）是 `feb96d0` / CI `42381451032` 的历史计数，那次 CI 已绿，且不含这一探针。新 CI 还没推、没核，不写成已绿。
+
+生产关闭：`FUJIANG_WORKSPACE_ACCEPTANCE` 未设置，没有 `acceptance.json`。普通网络，没有 `--unshare-net`。9 个夹具通过不是真实验收。独立调用一次完整 ignored 名字，Rust exit 101：缺 `/usr/bin/gpgv`、`/usr/bin/newuidmap`、`/usr/bin/newgidmap` 以及官方 metadata 和 archive；八个用例 `unrun`；工作叶子没创建；临时预检父目录已删。这是 `unavailable`，不是通过，也没有跑到 runtime 或 apt。
+
+三条仍分开且未验收：QQ 绑定是真代码，无 NapCat 在线；owner 持久是文件系统夹具，无官方 Ubuntu Base；工具路由是真代码，成功回调是模拟。导入仍拒绝 setid 和 capability，官方工件能否进来还没验证。
 
 消费侧已经接到执行器。每次调用用这一轮真实 `MemoCallScope` 做成 `HostTurn`，`handle_tool_with` 重新 resolve，不复用上一名说话人。群里只有当前 actor 显式选过本人（表键是群号+actor）才进个人 owner，否则是当前群。私聊 source 与 actor 不一致则拒绝。
 
@@ -114,7 +118,26 @@ python3 scripts/verify-workspace-bundle.py --unpack /绝对source /私有parent/
 
 历史本地计数：三次 workspace 各 298 通过（agent 216）。那不是当前门禁。
 
-当前门禁证据是 `final-fsetid-*.log`，包含 `CAP_FSETID` 之后的三次：fmt、严格 clippy、workspace 各 299 个唯一用例（agent 217，0 失败、0 ignored，4 个 `--exact` 子进程不另算）、Python 28、rootfs stub、六模型 TLC、userns 999 行、`git diff --check`，全 exit 0。本机 gpgv 14 条仍明确 SKIP。`95c435b` / `42380383930` 是更早的红 CI，当时只剩 `helper_timeout_kills_the_process_group`，其后步骤跳过。新 CI 推送后由协调者核验，这里不写成全绿。缺辅助程序时没有真实完整映射或 apt。审批前的真实 rootfs 运行验收 harness 仍是未实现的代码，不是只剩环境。官方 rootfs 的危险 metadata、真实 bash、Python、apt 和 NapCat 都还没验收。导入仍拒绝 setid 和 capability，所以不能保证 Ubuntu 工件能进来。真实跨 GID 的 SGID 没有测过。解包根 0755 的怀疑已撤回，不记成修复。
+历史计数：`final-fsetid-*.log` 的 299×3（agent 217，0 ignored）属于 `feb96d0`，不是当前门禁。`95c435b` / `42380383930` 是更早的红 CI。
+
+当前非生产探针的完整名字是 `workspace_store::acceptance::rootfs_probe::admin_real_rootfs_acceptance`。命令是：
+
+```sh
+FUJIANG_ROOTFS_SOURCE=/绝对/私有0700源 FUJIANG_ROOTFS_WORK=/绝对/0700父目录下尚不存在的叶子 \
+  cargo test -p fujiang-plugin-agent --lib --offline \
+  workspace_store::acceptance::rootfs_probe::admin_real_rootfs_acceptance \
+  -- --ignored --exact --test-threads=1
+```
+
+短名字加 `--exact` 会匹配 0 个测试，不算这次调用。
+
+预检在创建叶子之前完成，且不写 `acceptance.json`、不设置生产变量：
+
+- 源和工作父目录必须是调用者拥有的 0700。拒绝符号链接、`..`，以及与生产信任目录重叠。叶子已存在则拒绝，不删除。
+- 预检工具是 `/usr/bin/gpgv`、`/usr/bin/newuidmap`、`/usr/bin/newgidmap`、`/usr/bin/bwrap`、`/usr/bin/python3`，加上官方 metadata。归档只要求有普通 `.tar.gz`；签名文件名和 24.04 版本仍由现有验证器选择。
+- 缺件时八个用例都是 `unrun`，进程非 0。本机这次独立调用的 Rust exit 101，列出缺的 gpgv、newuidmap、newgidmap、metadata 和 archive。工作叶子没创建。临时预检父目录已删除。这是 `unavailable`，不是真实验收。9 个夹具也不是真实正向结果。
+
+用例顺序是 shell、persist、isolate、apt、python、proc-fd、maps-caps、sgid。apt 必须先打出客人里单独一行 `MISSING_PYTHON`（不能把这一行当成缺 apt），再用 `Acquire::Retries=0` 安装尚不存在的 `hello` 和 `python3-minimal`，然后才跑客人 Python、FD、映射和 SGID。源归档不改。nonce 和 sentinel 只放在新建任务目录里。apt 一旦尝试或 SGID 已开始，清理走同一 runner：Python 尚未成功时用 `chown -hRP` 与 `find -P`，只动该任务的 `/tmp`、`/var`、`/work`。清理失败要留下 residual，并且保留原来的失败。这些运行时步骤本机没有执行。导入仍拒绝 setid 和 capability，官方工件兼容性未验证。解包根 0755 的怀疑已撤回，不记成修复。
 
 三条验收，分开算：
 

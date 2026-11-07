@@ -20,11 +20,30 @@ impl PersonalQq {
     pub fn get(self) -> i64 {
         self.0
     }
+
+    #[cfg(test)]
+    pub(crate) fn new(id: i64) -> Option<Self> {
+        if id > 0 {
+            Some(Self(id))
+        } else {
+            None
+        }
+    }
 }
 
 impl GroupChat {
     pub fn get(self) -> i64 {
         self.0
+    }
+
+    /// Fixture binding only. Not a live QQ or group authorization path.
+    #[cfg(test)]
+    pub(crate) fn new(id: i64) -> Option<Self> {
+        if id > 0 {
+            Some(Self(id))
+        } else {
+            None
+        }
     }
 }
 

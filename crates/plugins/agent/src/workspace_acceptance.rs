@@ -567,5 +567,9 @@ fn clear_cloexec(fd: RawFd) -> io::Result<()> {
 mod leases;
 
 #[cfg(test)]
+#[path = "workspace_rootfs_probe.rs"]
+mod rootfs_probe;
+
+#[cfg(test)]
 #[path = "workspace_acceptance_tests.rs"]
 mod tests;
