@@ -49,6 +49,20 @@ pub(crate) fn round_tools(
     builtins: BuiltinTools,
     opened: &BTreeSet<String>,
 ) -> Vec<ToolSpec> {
+    round_tools_gated(
+        configured,
+        builtins,
+        opened,
+        crate::workspace_backend::production_available(),
+    )
+}
+
+pub(crate) fn round_tools_gated(
+    configured: &[ToolSpec],
+    builtins: BuiltinTools,
+    opened: &BTreeSet<String>,
+    accepted: bool,
+) -> Vec<ToolSpec> {
     let mut tools = assemble_tools(configured, builtins);
     tools.retain(|spec| !reserved_wire(spec.wire_name()));
     for spec in meta_specs() {
@@ -98,6 +112,16 @@ pub(crate) fn round_tools(
                 contest_pack::parameters(tool.wire),
             )
             .expect(tool.name);
+            push_new(&mut tools, spec);
+        }
+    }
+    finish_workspace(tools, accepted)
+}
+
+fn finish_workspace(mut tools: Vec<ToolSpec>, accepted: bool) -> Vec<ToolSpec> {
+    tools.retain(|spec| !super::workspace_pack::reserved(spec));
+    if accepted {
+        for spec in super::workspace_pack::specs() {
             push_new(&mut tools, spec);
         }
     }

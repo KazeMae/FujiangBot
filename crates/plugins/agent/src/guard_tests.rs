@@ -1,7 +1,8 @@
 use serde_json::json;
 use sqlx::SqlitePool;
 
-use super::{plan_chat, session, AgentConfig, ChatPlan, BLACKLIST_TIP, SESSION_LIMIT_TIP};
+use super::{session, AgentConfig, ChatPlan, BLACKLIST_TIP, SESSION_LIMIT_TIP};
+use crate::plan::plan_chat;
 
 async fn pool() -> SqlitePool {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()

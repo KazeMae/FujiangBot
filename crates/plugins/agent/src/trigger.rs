@@ -1,6 +1,8 @@
 use fujiang_core::{AtTarget, MessageEvent, Segment};
 
-use crate::client::{ChatMessage, LlmError, Role};
+use crate::client::LlmError;
+#[cfg(test)]
+use crate::client::{ChatMessage, Role};
 
 /// shortcut: one message capped at 1200 chars, split when a reply must stay complete.
 const REPLY_CHAR_LIMIT: usize = 1200;
@@ -57,6 +59,17 @@ pub fn llm_reply(err: &LlmError) -> String {
         | LlmError::Api { .. }
         | LlmError::Decode(_)
         | LlmError::Truncated(_) => BUSY_REPLY.to_string(),
+        LlmError::ContextClosed => {
+            "这个模型的上下文上限还没确认。官方表以外要由管理员写上核实过的 model_context_limit。"
+                .to_string()
+        }
+        LlmError::OverBudget => "这次请求超过上下文上限。我没有删掉已有对话。".to_string(),
+        LlmError::ImageUnmetered => {
+            "这张图的视觉 token 还不能核定，这次不发给模型，也没有删历史。".to_string()
+        }
+        LlmError::PayloadLimited => {
+            "这张图超过张数或大小限制，没有发给模型，也没有删历史。".to_string()
+        }
     }
 }
 
@@ -71,6 +84,7 @@ pub fn fit_reply(text: &str) -> String {
 }
 
 /// System prompt is injected per call and is not read from the session table.
+#[cfg(test)]
 pub fn build_messages(
     system_prompt: &str,
     history: Vec<ChatMessage>,

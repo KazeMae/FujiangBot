@@ -3,7 +3,7 @@
 > 仓库：https://github.com/KazeMae/FujiangBot  
 > 看板：https://github.com/users/KazeMae/projects/2  
 > 总追踪：#19  
-> 更新：2026-11-07（#60 T3：fun / contest 技能包）
+> 更新：2026-11-07。当前本地门禁已独立跑完且 exit 0，证据 `final-fsetid-*.log`：`cargo fmt --all -- --check`；agent 严格 clippy（全部 target、`--no-deps --offline -D warnings`）；`cargo test --workspace --offline` 连续三次，每次 299 个唯一用例（agent 217，0 失败、0 ignored，4 个 `--exact` 子进程不另算）；Python 28；rootfs stub；六模型 TLC；userns 999 行；`git diff --check`。这三次包含 `CAP_FSETID`。`--cap-drop ALL` 之后的命名空间能力是 CHOWN、DAC_OVERRIDE、FOWNER、FSETID、SETUID、SETGID。生产门禁关闭。没有真实完整映射，也没有 Ubuntu、bash、Python 或 apt。审批前的真实 rootfs 运行验收 harness 仍未实现。新 CI 推送后由协调者核验，这里不写成已绿。具体历史 CI 见后文。
 
 本文档是规划源。Issue / Milestone / Project 与此对齐。冲突时以已合并 Issue 的验收为准，并回写本文档。
 
@@ -90,7 +90,7 @@
 
 | Issue | 内容 | 状态 | 说明 |
 |---|---|---|---|
-| #16 | 会话摘要 fold | Done | `.agent memory` / `forget`；无 LLM 摘要 |
+| #16 | 会话摘要 fold | Done | `.agent memory` / `forget`。生产路径已不再做摘录折叠 |
 | #17 | 管理页用量 / 人格 | Done | `GET /api/agent/usage`、personas UI |
 | #46 | Codex 风格分层记忆 | In Progress | 账号 / 群 / 个人（**群内发言也写个人记忆**）；见 `docs/layered-memory.md` |
 | #15 | 托管 RAG | 取消 | 不做 |
@@ -100,6 +100,11 @@
 | #55 T1 | `qq.read`，按当前发言人只读 | Done | #58。只读他所属的群和他自己的私聊 |
 | #56 T2 | 技能包 `schedule` 与 `.agent schedule` | Done | 到点带创建者 QQ，按 `qq.read` 同一成员边界重验。私聊只发给创建者 |
 | #60 T3 | 技能包 `fun` 与 `contest` | Done | 不进常驻。打开后仍走 ServiceHub。`fun.learn` / `fun.search` 仍由宿主写入当前群 |
+| 群发言人展示 | 群提示里的当前与历史 QQ、昵称、名片、引用 ID | Done | 当前与历史昵称、名片来自真实 `MessageEvent.sender` 快照，值仍按 untrusted 清理控制字符和双向控制符。`host_reply.message_id` 只是事件所带引用 ID，不取正文、不推断作者。旧行 NULL 不回填。真实 ID 不改变权限。私聊不包装。不改 Session / ToolLoop 状态机 |
+| 上下文预算与 LLM 交接摘要 | 500000、90% 摘要、模型上限、CAS、官方看图、摘要用量 | 已实现，待 PR 验收 | 有效预算是配置与已核实上限的较小值。官方 `https://api.deepseek.com` 的 `deepseek-flash` 按 2026-11-07 定价页为 100 万，看图页每图 1024 且多图相加。只适用于该主机名和该模型名，不是 OpenAI、Anthropic 或其它模型的 tile/detail 上界。预算含投影 JSON、工具 schema、已核实图像上界和发出的 `max_output_tokens` 4096。usage 按字段保留有效非负整数；缺字段记 `unknown_calls`，不把缺的 0 当成测得值。旧行迁移后标未确认。记账失败仍走 CompactFail |
+| 工作区绑定与独立 owner | 每次真实 resolve；个人/群目录；bash/code 规格默认不广告 | 生产关闭。含 `CAP_FSETID` 的本地 299×3（agent 217）已过。新 CI 待核验 | 三块：QQ 绑定是真代码，无 NapCat 在线；owner 持久是真实文件系统夹具；工具路由是真代码，成功回调是模拟。标准 uidmap、`fd:N`、bwrap `--userns` 和六个命名空间 capability（CHOWN、DAC_OVERRIDE、FOWNER、FSETID、SETUID、SETGID）已接线。`CAP_FSETID` 只在命名空间内，用来保住非本组 SGID。辅助程序未安装，没有真实完整映射、官方 rootfs 或 apt。审批前真实 rootfs 运行验收 harness 仍未实现。见 `docs/workspace-rootfs.md` |
+| 工作区离线验证入口 | `python3 scripts/verify-workspace-bundle.py /绝对source /私有parent/新snapshot` | 入口已实现。含 `CAP_FSETID` 的本地 299×3 已过。`95c435b` 是更早的红 CI。新 CI 待核验 | 只接受 `source target` 或 `--unpack source target`。`--help` 报错。无 `--unpack` 只验证。主指纹 `843938DF228D22F7B3742BC0D94AA3F0EFE21092`。不自动写 `approved: true`。 |
+| `--unpack SOURCE NEWTARGET` | 签名检查后的私有解包与树提案 | receipt 带 `tree_sha256` 与 v2 `tree_policy`，`execution_accepted` 恒 false。v1 批准拒绝。没有 `acceptance.json` | 运行时不设 `RLIMIT_FSIZE`。`/tmp` 持久且 `--chmod 1777`。`/run` 与 `/sys` 仍是 64MiB tmpfs。本切片已把标准 uidmap、`fd:N`、`setgroups=allow`、bwrap `--userns` 和六个命名空间 capability（CHOWN、DAC_OVERRIDE、FOWNER、FSETID、SETUID、SETGID）接进 runner。`CAP_FSETID` 用来保住非本组 SGID；`CAP_FOWNER` 不够，而且不是宿主 capability。缺已安装的 04755 辅助程序、真实完整映射和官方 rootfs 验收，所以还不是 apt，也没有真实跨 GID 的 SGID。`box:100000:65536` 仍是显式部署范围。不重试 DNS、改源或 CI 下载。 |
 
 前置：agent 热路径改动优先落在 `command.rs` / `plan.rs` / 新模块；单文件勿超 1000 行。
 
@@ -125,8 +130,11 @@
 |---|---|---|
 | `spec/tla/ToolLoop.tla` | 轮数硬顶；工具错误不离开降级态；无 tools 时单次 complete | P0 |
 | `spec/tla/Session.tla` | reset 清空消息和摘要并保留人设；forget 只清空摘要；fold 不改人设 | P1 |
+| `spec/tla/Runner.tla` | 抽象顺序：阻塞、pin init pidfd、释放 payload、确认 init 死亡并回收 wrapper、join、成功。拒绝时零 spawn。正常finish解除看护前确认init和wrapper清理；Drop仅尽力清理，不证明未知错误下最终无残留。成功前进程清理和 reader 回收都完成。未知清理不能标成功。不证明 OS 隔离或真实 apt | P1 |
+| `spec/tla/Bundle.tla` | 抽象顺序：刚验证通过、密封归档、worker 写私有 stage、成功回收、再发布 rootfs 和 receipt。失败先 kill/reap 再 cleanup，且不发布。`executionAccepted` 始终 FALSE。发布前须 verified/hash、sealed、workerReaped。失败没有可用 rootfs。不证明密码、OS、CPU 或权限 | P1 |
+| `spec/tla/OwnerLayer.tla` | 生产 `prod` 恒假、base 不变。两 owner 的 inode 彼此不同且不同于 base。policy 为假时零字节、无 metadata、无 partial、锁空闲。staging 持锁且 partial；running 要求 metadata 正常且无 partial。不证明 OS 隔离、配额或官方 rootfs | P1 |
 
-实现须对照模型；改 loop/session 行为时先改 TLA+ 或同步改。
+实现须对照模型；改 loop、session、runner、owner 层或 bundle 解包顺序时先改 TLA+ 或同步改。
 
 ## 覆盖率范围
 
