@@ -21,11 +21,12 @@ const TOOLS: [&str; 5] = [
     "/usr/bin/python3",
 ];
 const META: [&str; 3] = ["SHA256SUMS", "SHA256SUMS.gpg", "ubuntu-archive-keyring.gpg"];
-const CASES: [&str; 8] = [
+const CASES: [&str; 9] = [
     "shell",
     "persist",
     "isolate",
     "apt",
+    "root-iso",
     "python",
     "proc-fd",
     "maps-caps",
@@ -200,9 +201,66 @@ fn separated(source: &Path, work: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct PinnedIdentity {
+    archive: String,
+    sha256: String,
+    bytes: u64,
+    tree: [u8; 32],
+    primary: String,
+    policy: String,
+    extracted: bool,
+    execution_accepted: bool,
+}
+
+impl PinnedIdentity {
+    fn from_receipt(receipt: &super::Receipt) -> Self {
+        Self {
+            archive: receipt.archive.clone(),
+            sha256: receipt.sha256.clone(),
+            bytes: receipt.bytes,
+            tree: receipt.tree,
+            primary: receipt.primary.clone(),
+            policy: receipt.tree_policy.clone(),
+            extracted: receipt.extracted,
+            execution_accepted: receipt.execution_accepted,
+        }
+    }
+
+    fn text(&self) -> String {
+        let tree = self
+            .tree
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!(
+            "archive={} sha256={} bytes={} tree={tree} primary={} policy={} extracted={} execution_accepted={}",
+            self.archive,
+            self.sha256,
+            self.bytes,
+            self.primary,
+            self.policy,
+            self.extracted,
+            self.execution_accepted
+        )
+    }
+}
+
+fn pin_first(slot: &mut Option<PinnedIdentity>, next: PinnedIdentity) -> Result<(), String> {
+    match slot {
+        None => {
+            *slot = Some(next);
+            Ok(())
+        }
+        Some(first) if first == &next => Ok(()),
+        Some(_) => Err("identity mismatch".into()),
+    }
+}
+
 struct AdminAuth<'a> {
     source: &'a Path,
     work: &'a Path,
+    identity: std::sync::Mutex<Option<PinnedIdentity>>,
 }
 
 impl RootfsAuthority for AdminAuth<'_> {
@@ -212,11 +270,21 @@ impl RootfsAuthority for AdminAuth<'_> {
         if !missing.is_empty() {
             anyhow::bail!("unavailable: {}", missing.join(", "));
         }
-        Ok((self.work.to_path_buf(), seal_real(self.source, self.work)?))
+        let (base, pinned) = seal_real(self.source, self.work)?;
+        let mut slot = self.identity.lock().unwrap_or_else(|err| err.into_inner());
+        if let Err(err) = pin_first(&mut slot, pinned) {
+            drop(slot);
+            drop(base);
+            anyhow::bail!("{err}");
+        }
+        Ok((self.work.to_path_buf(), base))
     }
 }
 
-fn seal_real(source: &Path, parent: &Path) -> io::Result<crate::workspace_store::VerifiedBase> {
+fn seal_real(
+    source: &Path,
+    parent: &Path,
+) -> io::Result<(crate::workspace_store::VerifiedBase, PinnedIdentity)> {
     let parent_fd = super::open_mode(parent, 0o700)?;
     let name = format!("probe-{}-{}", std::process::id(), super::nanos()?);
     let held = super::leases::create_owned(parent_fd.as_raw_fd(), &name)?;
@@ -231,7 +299,9 @@ fn seal_real(source: &Path, parent: &Path) -> io::Result<crate::workspace_store:
             return Err(io::Error::new(ErrorKind::InvalidInput, "receipt"));
         }
         let unpacked = super::open_dir(snap.as_raw_fd(), &super::one_component("rootfs")?)?;
+        let pinned = PinnedIdentity::from_receipt(&from_out);
         super::seal(parent_fd.as_raw_fd(), unpacked.as_raw_fd(), from_out.tree)
+            .map(|base| (base, pinned))
     })();
     drop(held);
     outcome
@@ -277,21 +347,33 @@ fn need_ok(result: &RunResult, needle: &str) -> Result<(), String> {
     }
 }
 
-fn drive(mut step: impl FnMut(&str) -> Result<(), String>) -> String {
+fn case_line(name: &str, body: &str, identity: &str) -> String {
+    if identity.is_empty() {
+        format!("{name}: {body}\n")
+    } else {
+        format!("{name}: {body} {identity}\n")
+    }
+}
+
+fn drive(
+    mut step: impl FnMut(&str) -> Result<(), String>,
+    identity: impl Fn() -> String,
+) -> String {
     let mut report = String::new();
     let mut stop = false;
     for name in CASES {
         if stop {
-            report.push_str(&format!("{name}: unrun\n"));
+            report.push_str(&case_line(name, "unrun", &identity()));
             continue;
         }
-        match step(name) {
-            Ok(()) => report.push_str(&format!("{name}: ok\n")),
+        let body = match step(name) {
+            Ok(()) => "ok".to_string(),
             Err(err) => {
-                report.push_str(&format!("{name}: {err}\n"));
                 stop = true;
+                err
             }
-        }
+        };
+        report.push_str(&case_line(name, &body, &identity()));
     }
     report
 }
@@ -303,21 +385,28 @@ fn unrun_report() -> String {
         .collect()
 }
 
-fn accepted(report: &str) -> bool {
-    let mut seen = Vec::new();
-    for line in report.lines() {
-        if line.is_empty() {
-            return false;
-        }
-        let Some((name, status)) = line.split_once(": ") else {
+fn report_bound(report: &str, identity: &str) -> bool {
+    if identity.is_empty()
+        || !identity.contains(" sha256=")
+        || !identity.contains(" bytes=")
+        || !identity.contains(" tree=")
+        || !identity.contains(" primary=")
+        || !identity.contains(" policy=")
+        || !identity.contains(" extracted=true")
+        || !identity.contains(" execution_accepted=false")
+    {
+        return false;
+    }
+    let mut lines = report.lines().filter(|line| !line.is_empty());
+    for name in CASES {
+        let Some(line) = lines.next() else {
             return false;
         };
-        if status != "ok" || seen.contains(&name) {
+        if line != format!("{name}: ok {identity}") {
             return false;
         }
-        seen.push(name);
     }
-    seen.len() == CASES.len() && seen.iter().copied().eq(CASES)
+    lines.next().is_none()
 }
 
 fn host_status_digest() -> io::Result<Vec<u8>> {
@@ -540,33 +629,18 @@ fn case_apt(
     attempted: &mut bool,
 ) -> Result<(), String> {
     *attempted = true;
-    let script = r#"set -eu
-if ! command -v apt-get >/dev/null; then echo MISSING; exit 2; fi
-if command -v python3 >/dev/null; then echo PRECONDITION; exit 3; fi
-echo MISSING_PYTHON
-if dpkg-query -W -f '${Status}' hello 2>/dev/null | grep -qx 'install ok installed'; then echo PRECONDITION; exit 3; fi
-if dpkg-query -W -f '${Status}' python3-minimal 2>/dev/null | grep -qx 'install ok installed'; then echo PRECONDITION; exit 3; fi
-mkdir -p /etc/apt/apt.conf.d
-printf 'Acquire::Retries "0";\n' >/etc/apt/apt.conf.d/00no-retry
-apt-get -o Acquire::Retries=0 update
-apt-get -o Acquire::Retries=0 install -y --no-install-recommends hello python3-minimal
-test "$(dpkg-query -W -f '${Status}' hello)" = "install ok installed"
-test "$(dpkg-query -W -f '${Status}' python3-minimal)" = "install ok installed"
-hello
-command -v python3
-echo APT_OK
-"#;
+    let script = apt_guest_script();
     let got = exec(auth, owner_personal(OWNER_A)?, Payload::Bash(script.into()))?;
     let out = String::from_utf8_lossy(&got.stdout);
     let err = String::from_utf8_lossy(&got.stderr);
     if is_missing_apt(&out) {
         return Err(format!("MISSING apt unaccepted: {err}"));
     }
-    if out.contains("PRECONDITION") {
-        return Err("apt hello or python already present: unmet precondition".into());
+    if out.lines().any(|line| line == "PRECONDITION") {
+        return Err("apt hello already present: unmet precondition".into());
     }
-    if !out.contains("MISSING_PYTHON") {
-        return Err(format!("apt hid initial MISSING python: {}", show(&got)));
+    if !apt_records_python(&out) {
+        return Err(format!("apt hid initial python state: {}", show(&got)));
     }
     if got.exit_code != 0 || got.timed_out || !out.contains("APT_OK") {
         return Err(format!("apt failed unaccepted: {}", show(&got)));
@@ -580,6 +654,66 @@ echo APT_OK
 
 fn is_missing_apt(out: &str) -> bool {
     out.lines().any(|line| line == "MISSING")
+}
+
+fn apt_guest_script() -> &'static str {
+    r#"set -eu
+if ! command -v apt-get >/dev/null; then echo MISSING; exit 2; fi
+if dpkg-query -W -f '${Status}' hello 2>/dev/null | grep -qx 'install ok installed'; then echo PRECONDITION; exit 3; fi
+if command -v python3 >/dev/null; then
+  echo PYTHON_PRESENT
+  pkgs="hello"
+else
+  echo MISSING_PYTHON
+  if dpkg-query -W -f '${Status}' python3-minimal 2>/dev/null | grep -qx 'install ok installed'; then echo PRECONDITION; exit 3; fi
+  pkgs="hello python3-minimal"
+fi
+mkdir -p /etc/apt/apt.conf.d
+printf 'Acquire::Retries "0";\n' >/etc/apt/apt.conf.d/00no-retry
+apt-get -o Acquire::Retries=0 update
+apt-get -o Acquire::Retries=0 install -y --no-install-recommends $pkgs
+test "$(dpkg-query -W -f '${Status}' hello)" = "install ok installed"
+if [ "$pkgs" = "hello python3-minimal" ]; then test "$(dpkg-query -W -f '${Status}' python3-minimal)" = "install ok installed"; fi
+hello
+command -v python3
+echo APT_OK
+"#
+}
+
+fn apt_records_python(out: &str) -> bool {
+    let absent = out.lines().any(|line| line == "MISSING_PYTHON");
+    let present = out.lines().any(|line| line == "PYTHON_PRESENT");
+    absent != present
+}
+
+fn root_mark_script() -> &'static str {
+    "set -eu; printf a >/etc/fujiang-root-mark; test -f /etc/fujiang-root-mark; echo ROOTMARK"
+}
+
+fn root_absent_script() -> &'static str {
+    r#"set -eu
+command -v dpkg-query >/dev/null
+if [ -e /etc/fujiang-root-mark ]; then echo PRESENT; exit 1; fi
+dpkg-query -W -f '${Package} ${Status}\n' >/tmp/dpkg-snap
+while IFS= read -r line; do
+  if [ "$line" = "hello install ok installed" ]; then echo PRESENT; exit 1; fi
+done </tmp/dpkg-snap
+echo ABSENT
+"#
+}
+
+fn case_root_iso(auth: &impl RootfsAuthority) -> Result<(), String> {
+    let marked = exec(
+        auth,
+        owner_personal(OWNER_A)?,
+        Payload::Bash(root_mark_script().into()),
+    )?;
+    need_ok(&marked, "ROOTMARK")?;
+    for owner in [owner_group(OWNER_A)?, owner_personal(OWNER_B)?] {
+        let got = exec(auth, owner, Payload::Bash(root_absent_script().into()))?;
+        need_ok(&got, "ABSENT")?;
+    }
+    Ok(())
 }
 
 fn bash_restore_script() -> &'static str {
@@ -676,6 +810,7 @@ fn admin_real_rootfs_acceptance() {
     let auth = AdminAuth {
         source: &source,
         work: &guard.path,
+        identity: std::sync::Mutex::new(None),
     };
     let nonce_path = guard.path.join("nonce");
     let other_path = guard.path.join("owner-b-sentinel");
@@ -686,17 +821,28 @@ fn admin_real_rootfs_acceptance() {
     create_new(&other_path, b"owner-b-sentinel").unwrap();
     create_new(&sentinel, b"sentinel").unwrap();
     let before = host_status_digest().unwrap();
-    let report = drive(|name| match name {
-        "shell" => case_shell(&auth),
-        "persist" => case_persist(&auth),
-        "isolate" => case_isolate(&auth),
-        "apt" => case_apt(&auth, &before, &sentinel, &mut apt_attempted),
-        "python" => case_python(&auth),
-        "proc-fd" => case_proc_fd(&auth, &nonce, &nonce_path, &other_path),
-        "maps-caps" => case_maps(&auth),
-        "sgid" => case_sgid(&auth),
-        other => Err(format!("unknown {other}")),
-    });
+    let report = drive(
+        |name| match name {
+            "shell" => case_shell(&auth),
+            "persist" => case_persist(&auth),
+            "isolate" => case_isolate(&auth),
+            "apt" => case_apt(&auth, &before, &sentinel, &mut apt_attempted),
+            "root-iso" => case_root_iso(&auth),
+            "python" => case_python(&auth),
+            "proc-fd" => case_proc_fd(&auth, &nonce, &nonce_path, &other_path),
+            "maps-caps" => case_maps(&auth),
+            "sgid" => case_sgid(&auth),
+            other => Err(format!("unknown {other}")),
+        },
+        || {
+            auth.identity
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .as_ref()
+                .map(PinnedIdentity::text)
+                .unwrap_or_default()
+        },
+    );
     eprintln!("{report}");
     let restore = if needs_restore(apt_attempted, &report) {
         Some(guest_restore(&auth, &report))
@@ -704,6 +850,14 @@ fn admin_real_rootfs_acceptance() {
         None
     };
     let residual = guard.path.clone();
+    let pinned = auth
+        .identity
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .as_ref()
+        .map(PinnedIdentity::text)
+        .unwrap_or_default();
+    drop(auth);
     let released = guard.release();
     if let Some(Err(err)) = restore {
         panic!(
@@ -717,163 +871,9 @@ fn admin_real_rootfs_acceptance() {
             residual.display()
         );
     }
-    assert!(accepted(&report), "{report}");
+    assert!(report_bound(&report, &pinned), "{report}");
 }
 
-fn ok_report() -> String {
-    CASES.iter().map(|name| format!("{name}: ok\n")).collect()
-}
-
-#[test]
-fn fixture_missing_apt_line_is_not_a_successful_bootstrap() {
-    assert!(is_missing_apt("MISSING\n"));
-    assert!(!is_missing_apt("MISSING_PYTHON\nAPT_OK\n"));
-}
-
-#[test]
-fn fixture_missing_source_is_not_acceptance() {
-    let missing = missing_parts(Path::new("/no/such-fujiang-rootfs"));
-    assert!(missing.iter().any(|item| item == "source"), "{missing:?}");
-    assert!(missing.iter().all(|item| !item.contains("accepted")));
-    let report = unrun_report();
-    assert!(report.lines().count() == CASES.len());
-    assert!(report.lines().all(|line| line.ends_with(": unrun")));
-    assert!(!accepted(&report));
-}
-
-#[test]
-fn fixture_private_dir_lists_archive_without_assuming_uidmap() {
-    let parent = private_parent("src");
-    let missing = missing_parts(&parent);
-    for name in META {
-        assert!(missing.iter().any(|item| item == name), "{missing:?}");
-    }
-    assert!(missing.iter().any(|item| item == "archive"), "{missing:?}");
-    assert!(!missing.iter().any(|item| item.contains("24.04")));
-    let _ = fs::remove_dir_all(&parent);
-}
-
-#[test]
-fn fixture_claim_rejects_existing_file() {
-    let parent = private_parent("file");
-    let file = parent.join("keep");
-    fs::write(&file, b"keep").unwrap();
-    assert!(claim_new(&file).is_err());
-    assert_eq!(fs::read(&file).unwrap(), b"keep");
-    let _ = fs::remove_dir_all(&parent);
-}
-
-#[test]
-fn fixture_claim_rejects_existing_dir() {
-    let parent = private_parent("dir");
-    let existing = parent.join("have");
-    fs::create_dir(&existing).unwrap();
-    fs::write(existing.join("keep"), b"keep").unwrap();
-    assert!(claim_new(&existing).is_err());
-    assert_eq!(fs::read(existing.join("keep")).unwrap(), b"keep");
-    let _ = fs::remove_dir_all(&parent);
-}
-
-#[test]
-fn fixture_claim_drop_and_panic_remove_only_new_dir() {
-    let parent = private_parent("drop");
-    fs::write(parent.join("marker"), b"marker").unwrap();
-    let created = parent.join("new");
-    let guard = claim_new(&created).unwrap();
-    let nonce = created.join("nonce");
-    create_new(&nonce, b"nonce").unwrap();
-    assert!(nonce.starts_with(&created));
-    assert!(!parent.join("nonce").exists());
-    drop(guard);
-    assert_eq!(fs::read(parent.join("marker")).unwrap(), b"marker");
-    assert!(!nonce.exists());
-    assert!(!created.exists());
-    let boom = parent.join("boom");
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _guard = claim_new(&boom).unwrap();
-        panic!("cleanup");
-    }));
-    assert!(!boom.exists());
-    let _ = fs::remove_dir_all(&parent);
-}
-
-#[test]
-fn fixture_release_reports_unreadable_residual() {
-    let parent = private_parent("ro");
-    let created = parent.join("new");
-    let guard = claim_new(&created).unwrap();
-    let blocked = created.join("blocked");
-    fs::create_dir(&blocked).unwrap();
-    fs::write(blocked.join("x"), b"x").unwrap();
-    let mut perms = fs::metadata(&blocked).unwrap().permissions();
-    perms.set_mode(0o000);
-    fs::set_permissions(&blocked, perms).unwrap();
-    let err = guard.release();
-    assert!(err.is_err(), "silent cleanup");
-    assert!(created.exists(), "residual path must stay visible");
-    let mut perms = fs::metadata(&blocked).unwrap().permissions();
-    perms.set_mode(0o700);
-    fs::set_permissions(&blocked, perms).unwrap();
-    let _ = fs::remove_dir_all(&parent);
-}
-
-#[test]
-fn fixture_source_rejects_symlink_dotdot_and_alias_overlap() {
-    let parent = private_parent("alias");
-    let source = parent.join("source");
-    fs::create_dir(&source).unwrap();
-    let mut perms = fs::metadata(&source).unwrap().permissions();
-    perms.set_mode(0o700);
-    fs::set_permissions(&source, perms).unwrap();
-    let link = parent.join("link");
-    std::os::unix::fs::symlink(&source, &link).unwrap();
-    assert!(open_private_source(&link).is_err());
-    assert!(open_private_source(Path::new("/tmp/../tmp")).is_err());
-    let work = link.join("child");
-    assert!(separated(&source, &work).is_err());
-    assert!(absence_script().contains("set -eu"));
-    assert!(absence_script().contains("ABSENT"));
-    assert!(!absence_script().contains("/etc/shadow"));
-    assert!(bash_restore_script().contains("chown -hRP"));
-    assert!(bash_restore_script().contains("find -P"));
-    assert!(needs_restore(
-        true,
-        "apt: failed unaccepted\npython: unrun\n"
-    ));
-    assert!(!needs_restore(false, "apt: unrun\nsgid: unrun\n"));
-    let _ = fs::remove_dir_all(&parent);
-}
-
-#[test]
-fn fixture_report_rejects_empty_truncated_and_duplicate() {
-    assert!(!accepted(""));
-    assert!(!accepted("shell: ok\n"));
-    let mut dup = ok_report();
-    dup.push_str("shell: ok\n");
-    assert!(!accepted(&dup));
-    assert!(accepted(&ok_report()));
-    let report = drive(|name| {
-        if name == "apt" {
-            Err("MISSING apt unaccepted: stderr".into())
-        } else {
-            Ok(())
-        }
-    });
-    assert!(report.contains("apt: MISSING apt unaccepted"));
-    assert!(report.contains("python: unrun"));
-    assert!(report.contains("sgid: unrun"));
-    assert!(!accepted(&report));
-    assert_eq!(
-        CASES,
-        [
-            "shell",
-            "persist",
-            "isolate",
-            "apt",
-            "python",
-            "proc-fd",
-            "maps-caps",
-            "sgid"
-        ]
-    );
-}
+#[cfg(test)]
+#[path = "workspace_rootfs_probe_tests.rs"]
+mod probe_tests;

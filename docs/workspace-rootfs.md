@@ -1,10 +1,14 @@
 # 工作区 rootfs 准备
 
-**检查点（2026-11-07）：** 当前门禁证据是 `runtime-final-*.log`，三次 `cargo test --workspace --offline` 各 308 个唯一通过（agent 226，0 失败，1 个 ignored 的真实 rootfs 管理入口）。4 个 `--exact` 嵌套子进程不另算。fmt、agent 严格 clippy、Python bundle 28、rootfs stub、六模型 TLC、探针 879 行、`git diff --check` 都通过。本机真实 gpgv 14 条因缺 `gpgv` 而 SKIP。299×3（agent 217，0 ignored）是 `feb96d0` / CI `42381451032` 的历史计数，那次 CI 已绿，且不含这一探针。新 CI 还没推、没核，不写成已绿。
+**检查点（2026-11-08 03:04–03:05 Asia/Shanghai）：** 协调者完整门禁已过，证据 `continue-20261108-gates-summary.json`。`cargo test --workspace --offline` 连续三次，每次 310 个唯一通过、0 失败、1 个 ignored。唯一计数不含嵌套 `--exact` 子进程；三次日志里被排除的行数分别是 3、4、4，不写成固定个数。agent 228。其中探针夹具 11 个通过。`cargo fmt --all`、agent 全 target 严格 clippy（`--offline -D warnings`）、Python bundle 28、rootfs stub、六模型 TLC（54/688/512/346/17/16）、长度和 `git diff --check` 通过。探针 879 行，夹具文件 289 行。本机 gpgv 14 条是 SKIP（缺工具），不是通过。三次全量里含 Rust GC 的 lease、active、unmarked、writer-outlives-parent。
 
-生产关闭：`FUJIANG_WORKSPACE_ACCEPTANCE` 未设置，没有 `acceptance.json`。普通网络，没有 `--unshare-net`。9 个夹具通过不是真实验收。独立调用一次完整 ignored 名字，Rust exit 101：缺 `/usr/bin/gpgv`、`/usr/bin/newuidmap`、`/usr/bin/newgidmap` 以及官方 metadata 和 archive；八个用例 `unrun`；工作叶子没创建；临时预检父目录已删。这是 `unavailable`，不是通过，也没有跑到 runtime 或 apt。
+同一晚独立跑了一次原始名字 `workspace_store::acceptance::rootfs_probe::admin_real_rootfs_acceptance`，证据 `continue-20261108-real-preflight.json` 与 `.log`。空的私有源，Rust exit 101，实际 1 个测试，九个用例全是 `unrun`，工作叶子没创建，预检目录已删，子进程没有生产变量，runtime 探针为 0。这只是负面预检。先前的 `unshare --map-root-user` 只证明简单 user namespace，不是 rootfs 成功。
 
-三条仍分开且未验收：QQ 绑定是真代码，无 NapCat 在线；owner 持久是文件系统夹具，无官方 Ubuntu Base；工具路由是真代码，成功回调是模拟。导入仍拒绝 setid 和 capability，官方工件能否进来还没验证。
+生产关闭。普通网络，没有 `--unshare-net`。仍缺 `gpgv`、`uidmap`、`libsubid5` 和官方工件；inbox 仍是空的 0700 目录。导入仍拒绝 setuid、setgid 和 file capability，官方归档未检查。runner 继承网络命名空间，但不写客人 DNS。这些都还不是可用的 Ubuntu/apt。
+
+三条仍分开：QQ 绑定是真代码，无 NapCat 在线；owner 持久是文件系统夹具，无官方 Ubuntu Base；工具路由是真代码，成功回调是模拟。都还没有真实验收。
+
+历史本地计数包括 308×3 和 `feb96d0` 的 299×3，不是这次门禁。基线 `07bf850` 的 CI `42384023945` 在 2026-11-07 23:01:25 Asia/Shanghai 成功，不含这次本地证据。这次提交的 CI 看 PR 62；本地证据不能代替远端。PR 正文 403 不再重试。
 
 消费侧已经接到执行器。每次调用用这一轮真实 `MemoCallScope` 做成 `HostTurn`，`handle_tool_with` 重新 resolve，不复用上一名说话人。群里只有当前 actor 显式选过本人（表键是群号+actor）才进个人 owner，否则是当前群。私聊 source 与 actor 不一致则拒绝。
 
@@ -129,15 +133,19 @@ FUJIANG_ROOTFS_SOURCE=/绝对/私有0700源 FUJIANG_ROOTFS_WORK=/绝对/0700父�
   -- --ignored --exact --test-threads=1
 ```
 
-短名字加 `--exact` 会匹配 0 个测试，不算这次调用。
+短名字加 `--exact` 会匹配 0 个测试，不算这次调用。`--list` 里这个完整名字必须恰好一条。夹具在旁边的 `probe_tests` 模块，不是这条管理入口。
 
 预检在创建叶子之前完成，且不写 `acceptance.json`、不设置生产变量：
 
 - 源和工作父目录必须是调用者拥有的 0700。拒绝符号链接、`..`，以及与生产信任目录重叠。叶子已存在则拒绝，不删除。
 - 预检工具是 `/usr/bin/gpgv`、`/usr/bin/newuidmap`、`/usr/bin/newgidmap`、`/usr/bin/bwrap`、`/usr/bin/python3`，加上官方 metadata。归档只要求有普通 `.tar.gz`；签名文件名和 24.04 版本仍由现有验证器选择。
-- 缺件时八个用例都是 `unrun`，进程非 0。本机这次独立调用的 Rust exit 101，列出缺的 gpgv、newuidmap、newgidmap、metadata 和 archive。工作叶子没创建。临时预检父目录已删除。这是 `unavailable`，不是真实验收。9 个夹具也不是真实正向结果。
+- 缺件时九个用例都是 `unrun`，进程非 0。2026-11-08 只读预检：仍缺 gpgv、newuidmap、newgidmap。`bwrap` 是 0755。`/usr/bin/python3` 是 0777 符号链接，`stat -L` 的目标是 root:root 0755，不是 0777 的可执行文件。包缓存是空的。配置源 `https://mirrors.aliyun.com/debian` trixie/main 的缓存候选（不是当场联网复核）是 `uidmap` `1:4.17.4-2`、同时缺失的 `libsubid5` `1:4.17.4-2`、`gpgv` `2.4.7-21+deb13u1+b5`。其余 uidmap/gpgv 依赖已安装。inbox `/workspace/agent-tools/fujiang-local-20261107/offline-inbox` 仍是 0700 空目录，没有覆盖工件。2026-11-07 17:26 的记录只证明 `mirrors.aliyun.com` `Temporary failure resolving`，不能证明策略 403。不重试该域名；普通网络并没有全部关掉。安装只走以后批准过的正常包管理，不在这里下载。
 
-用例顺序是 shell、persist、isolate、apt、python、proc-fd、maps-caps、sgid。apt 必须先打出客人里单独一行 `MISSING_PYTHON`（不能把这一行当成缺 apt），再用 `Acquire::Retries=0` 安装尚不存在的 `hello` 和 `python3-minimal`，然后才跑客人 Python、FD、映射和 SGID。源归档不改。nonce 和 sentinel 只放在新建任务目录里。apt 一旦尝试或 SGID 已开始，清理走同一 runner：Python 尚未成功时用 `chown -hRP` 与 `find -P`，只动该任务的 `/tmp`、`/var`、`/work`。清理失败要留下 residual，并且保留原来的失败。这些运行时步骤本机没有执行。导入仍拒绝 setid 和 capability，官方工件兼容性未验证。解包根 0755 的怀疑已撤回，不记成修复。
+用例顺序是 shell、persist、isolate、apt、root-iso、python、proc-fd、maps-caps、sgid。客人里已有 `python3` 时 apt 打出单独一行 `PYTHON_PRESENT`，只安装尚不存在的 `hello`；没有 `python3` 时打出 `MISSING_PYTHON` 并同时安装 `python3-minimal`。`hello` 已经装好仍是未满足的前提。第一次 verifier/seal 的完整 receipt（archive、sha256、bytes、tree、primary、policy、`extracted=true`、`execution_accepted=false`）钉住整次运行；后来的 acquire 若身份不同，先丢掉这次 base，再拒绝，不跑 payload。成功行必须整行等于 `用例: ok` 加这一份身份。裸 `ok`、缺字段或混用身份都不算真通过。`root-iso` 在 apt 之后由 owner A 写 `/etc/fujiang-root-mark`；同号群 owner 和另一名个人 owner 必须先有 `dpkg-query`，marker 不存在，且 `hello` 不是 `install ok installed`，然后 exit 0 打印 `ABSENT`。夹具只做 `bash -n` 和报告绑定，不在宿主执行会写 `/etc` 的客人脚本。这些运行时步骤本机没有执行，不是 Ubuntu apt 通过。先前 `runtime-final` 的 308×3 是历史门禁。当前探针是 879 行，夹具文件 289 行。导入仍拒绝 setuid、setgid 和 file capability，官方归档还没打开检查，所以不能说只差环境。继承的网络命名空间已接上，runner 不会自动写客人 DNS 解析配置；官方 rootfs 的 DNS、软件源和一次真实 apt 仍要真正跑过。不把代理、cgroup 或配额算成这道门。现有 apt/capability 范围不是所有包的兼容证明。若工件带当前导入拒绝的 metadata，或客人没有可用的解析配置，代码路径仍会失败。生产门禁关闭。解包根 0755 的怀疑已撤回，不记成修复。
+
+2026-11-08 02:58 Asia/Shanghai 只读：宿主 uid/gid 1000；当前用户的 `/etc/subuid` 和 `/etc/subgid` 仍都是 `100000:65536`，没有改。`/proc/sys/user/max_user_namespaces` 是 63991。`/usr/bin/unshare --user --map-root-user -- /usr/bin/id -u` 退出 0，stdout 是 `0`。这次没有挂载、没有改文件系统、没有辅助程序、没有网络。它只说明当前用户能做一个简单 user namespace，不是标准 newuidmap 全映射、bwrap 或 apt。`apt-get -s --no-download install gpgv uidmap` 还会带上 `libsubid5`，然后因为缓存是空的无法取得归档；没有下载或安装。只在本任务证据目录里按文件名递归找过，不跟随链接，没有官方工件或 `.deb`。不能据此说整块磁盘都没有。
+
+放到该 inbox 的文件名只应是 `SHA256SUMS`、`SHA256SUMS.gpg`、`ubuntu-archive-keyring.gpg`，以及签名清单选中的 `ubuntu-base-24.04` 或 `ubuntu-base-24.04.<数字>` 的 `base-amd64.tar.gz`。公开地址仍是 `https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release` 和 `https://archive.ubuntu.com/ubuntu/project/ubuntu-archive-keyring.gpg`。网络恢复并经正常批准后，管理员自己安装 `uidmap` 和 `gpgv`，不在这里下载或安装。
 
 三条验收，分开算：
 
@@ -149,7 +157,7 @@ FUJIANG_ROOTFS_SOURCE=/绝对/私有0700源 FUJIANG_ROOTFS_WORK=/绝对/0700父�
 
 ## 本机管理员准备
 
-本机是 Debian 13。已有 `gpg`、`gpg-agent`、`gpgconf`、`bwrap`、`python3`、`unshare`。缺 `/usr/bin/newuidmap`、`/usr/bin/newgidmap` 和 `gpgv`。`/etc/subuid` 与 `/etc/subgid` 的 `box:100000:65536` 不要改。网络正式恢复并且正常批准之后，由管理员自己运行，不给 payload 宿主 root，这一轮不执行、不重试 DNS：
+本机是 Debian 13 amd64。已有 `gpg`、`gpg-agent`、`gpgconf`、`bwrap`、`python3`、`unshare`。`/usr/bin/python3` 是 0777 符号链接，解析后的目标是 root:root 0755。缺三个普通包：`uidmap`（缓存候选 `1:4.17.4-2`）、`libsubid5`（缓存候选 `1:4.17.4-2`）、`gpgv`（缓存候选 `2.4.7-21+deb13u1+b5`）。这是已配置镜像的缓存版本，不是当场联网复核。`.deb` 缓存是空的。`/etc/subuid` 与 `/etc/subgid` 的 `box:100000:65536` 不要改。网络正式恢复并且正常批准之后，由管理员自己运行，不给 payload 宿主 root，这一轮不执行、不重试 DNS：
 
 ```sh
 sudo apt-get install --no-install-recommends uidmap gpgv
