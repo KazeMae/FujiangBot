@@ -1,6 +1,6 @@
 # 工作区 rootfs 准备
 
-**检查点（2026-11-07）：** 当前本地门禁已由协调者独立跑完，不是未关闭的锁失败。`cargo fmt --all --check` 通过。agent 严格 clippy（全部 target、`--offline -D warnings`）通过。`cargo test --workspace --offline` 连续三次完整跑完，每次 286 通过、0 失败、0 ignored，其中 agent 204；日志 `apt-final-workspace-{1,2,3}.log`。owner 锁的旧失败只属于历史：`flock` 挂在 open file description 上，`O_CLOEXEC` 在 `exec` 才关 FD。无关子进程停在 `pre_exec` 时仍共享该 OFD，只 `close` 不会解锁（确定性回归曾 exit 101 / EAGAIN）。正常 `OwnerLock` 在 `Drop` 时 `LOCK_UN`，这条已进当前 286。导入 writer 租约不解锁。GC 专项 14 通过，含父进程死后真实孤儿 writer。Python 归档 28 通过。rootfs 准备 stub 通过。本机真实 gpgv 14 条因缺工具明确 SKIP，不是加密通过。六模型 TLC 用缓存 jar 通过，distinct states 54/688/512/346/17/16。文件长度与 `git diff --check` 通过。没有新覆盖率数字。提交、推送和推送后的 CI 还没做，所以已交付 CI 仍是历史 `aaa7291` / run `42370884522`。生产仍关闭。这不等于 apt 或 Ubuntu 成功。
+**检查点（2026-11-07）：** 当前本地门禁已由协调者独立跑完，不是未关闭的锁失败。`cargo fmt --all --check` 通过。agent 严格 clippy（全部 target、`--offline -D warnings`）通过。`cargo test --workspace --offline` 连续三次完整跑完，每次 286 通过、0 失败、0 ignored，其中 agent 204；日志 `apt-final-workspace-{1,2,3}.log`。owner 锁的旧失败只属于历史：`flock` 挂在 open file description 上，`O_CLOEXEC` 在 `exec` 才关 FD。无关子进程停在 `pre_exec` 时仍共享该 OFD，只 `close` 不会解锁（确定性回归曾 exit 101 / EAGAIN）。正常 `OwnerLock` 在 `Drop` 时 `LOCK_UN`，这条已进当前 286。导入 writer 租约不解锁。GC 专项 14 通过，含父进程死后真实孤儿 writer。Python 归档 28 通过。rootfs 准备 stub 通过。本机真实 gpgv 14 条因缺工具明确 SKIP，不是加密通过。六模型 TLC 用缓存 jar 通过，distinct states 54/688/512/346/17/16。文件长度与 `git diff --check` 通过。没有新覆盖率数字，不把 89.80% 当成这次结果。这段检查点对应的是已推送的代码提交 `8d7eda1f302d05d9b29cbbc7225e4c348447c399`，不是之后单独的文档提交。该代码的 CI run `42374926956` 全部步骤于 2026-11-07 21:04:03 Asia/Shanghai 成功：https://github.com/KazeMae/FujiangBot/actions/runs/42374926956 。其中 Install gpgv、`REQUIRE_GPGV=1` 的真实 gpgv、fmt、clippy、agent、fujiang、rootfs、length、llvm-cov、coverage 都成功。先前基线 CI 是 `aaa7291` / run `42370884522`。生产仍关闭。官方 rootfs 和完整多 UID/GID 与 capability 接线仍然没有。这不等于 apt 或 Ubuntu 成功。
 
 消费侧已经接到执行器。每次调用用这一轮真实 `MemoCallScope` 做成 `HostTurn`，`handle_tool_with` 重新 resolve，不复用上一名说话人。群里只有当前 actor 显式选过本人（表键是群号+actor）才进个人 owner，否则是当前群。私聊 source 与 actor 不一致则拒绝。
 
@@ -102,7 +102,7 @@ python3 scripts/verify-workspace-bundle.py --unpack /绝对source /私有parent/
 
 `acceptance.json` 必须恰好九键：`version`（JSON 数字 1）、`kind`（`runtime_safety_approval`）、`source`、`host`、`archive_sha256`、`primary`（`843938DF228D22F7B3742BC0D94AA3F0EFE21092`）、`policy`（`workspace-rootfs-runtime-v2`）、`tree_sha256`、`approved`（JSON `true`）。两枚摘要是 64 位小写十六进制。文件上限 8192 字节，mode 0600，属 bot euid。信任目录 mode 0700。v1 的 `policy` 拒绝。当前没有这份文件。
 
-已交付 CI 仍是历史 `aaa7291`，run `42370884522`，2026-11-07 20:08:31 Asia/Shanghai 全部通过。行覆盖 89.80% 只属于更早基线，本切片不报新覆盖率。当前提交、推送以及推送后的 CI 还没做。PR 正文 403 已是最终状态，不再重试。不部署、不合并、不重启。不重试已知 DNS、rootfs 下载或 CI 工件传输。
+代码提交 `8d7eda1f302d05d9b29cbbc7225e4c348447c399` 已推送。它的 CI run `42374926956` 于 2026-11-07 21:04:03 Asia/Shanghai 全部成功：https://github.com/KazeMae/FujiangBot/actions/runs/42374926956 。本文件后来的文档修改不是该 run 所验证的提交。没有新的覆盖率百分比；89.80% 仍只属于更早基线。先前基线 CI 是 `aaa7291` / run `42370884522`（20:08:31 Asia/Shanghai）。PR 正文 403 已是最终状态，不再重试。不部署、不合并、不重启。不重试已知 DNS、rootfs 下载或 CI 工件传输。
 
 ## 本切片变更
 
@@ -112,6 +112,6 @@ python3 scripts/verify-workspace-bundle.py --unpack /绝对source /私有parent/
 
 历史（不是当前门禁）：曾有 `cargo test --workspace --offline` 284 通过（agent 202）。其后一轮 agent 201 通过、1 失败，失败项 `existing_runner_failclosed_on_incomplete_root`，owner lock EAGAIN。该失败已由 `OwnerLock` 的 `LOCK_UN` 修掉，并包含在下面的 286 里。
 
-当前门禁：`cargo fmt --all --check` 通过。agent 严格 clippy（全部 target、offline、`-D warnings`）通过。`cargo test --workspace --offline` 连续三次完整跑完，每次 286 通过、0 失败、0 ignored，agent 各 204，日志 `apt-final-workspace-1.log`、`apt-final-workspace-2.log`、`apt-final-workspace-3.log`。导入/GC 专项 14 通过，含真实孤儿 writer 租约，该租约不因 owner 锁修复而解锁。Python 归档 28 通过。rootfs 准备 stub 通过。本机真实 gpgv 14 条因缺工具明确 SKIP，不是加密通过。六模型 TLC 用缓存 jar 通过，distinct states 54/688/512/346/17/16。文件长度与 `git diff --check` 通过。没有新覆盖率。提交、推送和推送后 CI 还没做；已交付 CI 仍是 `aaa7291` / `42370884522`。生产仍关闭。这些不等于 apt 或 Ubuntu 成功。
+当前门禁：`cargo fmt --all --check` 通过。agent 严格 clippy（全部 target、offline、`-D warnings`）通过。`cargo test --workspace --offline` 连续三次完整跑完，每次 286 通过、0 失败、0 ignored，agent 各 204，日志 `apt-final-workspace-1.log`、`apt-final-workspace-2.log`、`apt-final-workspace-3.log`。导入/GC 专项 14 通过，含真实孤儿 writer 租约，该租约不因 owner 锁修复而解锁。Python 归档 28 通过。rootfs 准备 stub 通过。本机真实 gpgv 14 条因缺工具明确 SKIP，不是加密通过。六模型 TLC 用缓存 jar 通过，distinct states 54/688/512/346/17/16。文件长度与 `git diff --check` 通过。没有新覆盖率百分比。这些本地结果对应代码提交 `8d7eda1f302d05d9b29cbbc7225e4c348447c399`，该提交已推送，CI run `42374926956` 于 2026-11-07 21:04:03 Asia/Shanghai 全绿。先前基线 CI 是 `aaa7291` / `42370884522`。生产仍关闭。`--cap-drop ALL` 与单 UID 映射还在，官方 rootfs 和完整多映射/capability 代码仍缺，所以还不是 apt 就绪。这些不等于 apt 或 Ubuntu 成功。
 
 三块原状：QQ 绑定是真代码，没有 NapCat 在线；owner 持久是真实文件系统夹具；工具路由是真代码，终端成功回调是模拟。没有真实 bash、Python、Ubuntu 或 apt 的生产端到端。
