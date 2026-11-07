@@ -1,6 +1,6 @@
 # 工作区 rootfs 准备
 
-**检查点（2026-11-07，本地，本段尚未成为新的 CI）：** runner 已接标准 `newuidmap`/`newgidmap`（路径钉住、参数 `fd:N`）、内核核对后的 user namespace FD，以及 bwrap `--userns`。`--cap-drop ALL` 之后只加五个命名空间 capability。生产路径要求 `setgroups=allow` 和两段映射；单 ID 加 `setgroups=deny` 只是无特权探测。嵌套命名空间由仅在子进程安装的 seccomp 拒绝。本机没有 root 所属 04755 辅助程序，`bootstrap` 失败关闭，没有真实完整映射，也没有 apt 或官方 rootfs 验收。先前干净提交 `d0cb317` 的 CI `42375477574` 是这一切片之前的历史。全量测试计数这次未知。不报新覆盖率。生产仍关闭。
+**检查点（2026-11-07）：** 本地 `cargo test --workspace --offline` 三次各 298 通过（agent 216），Python 28，六模型 TLC 已过。代码 `107aca9` 的 CI `42378216946` 在 Test agent 失败，exit 101；gpgv、fmt、clippy 通过，后面的步骤跳过。失败名字尚未从注解读出，不把这次 CI 写成全绿。生产关闭。runner 已接标准 uidmap、`fd:N`、核对过的 namespace FD、bwrap `--userns` 和五个命名空间 capability。本机没有 04755 辅助程序，没有真实完整映射、官方 rootfs 或 apt。
 
 消费侧已经接到执行器。每次调用用这一轮真实 `MemoCallScope` 做成 `HostTurn`，`handle_tool_with` 重新 resolve，不复用上一名说话人。群里只有当前 actor 显式选过本人（表键是群号+actor）才进个人 owner，否则是当前群。私聊 source 与 actor 不一致则拒绝。
 
@@ -112,6 +112,12 @@ python3 scripts/verify-workspace-bundle.py --unpack /绝对source /私有parent/
 
 历史（不是当前门禁）：曾有 `cargo test --workspace --offline` 284 通过（agent 202）。其后一轮 agent 201 通过、1 失败，失败项 `existing_runner_failclosed_on_incomplete_root`，owner lock EAGAIN。该失败已由 `OwnerLock` 的 `LOCK_UN` 修掉，并包含在下面的 286 里。
 
-本切片是本地检查点，全量 Rust 计数未知，不写成新的 CI 全绿。历史干净 CI 是 `d0cb317` / `42375477574`。Python 归档 28、rootfs stub 和六模型 TLC 在这一轮之前已经通过。缺正常辅助程序时没有真实完整映射或 apt。
+本地基线：三次 workspace 各 298 通过（agent 216）。`107aca9` CI `42378216946` Test agent exit 101，不是全绿。Python 28 与六模型 TLC 在这次失败之前已经通过。缺辅助程序时没有真实完整映射或 apt。
 
-三块原状：QQ 绑定是真代码，没有 NapCat 在线；owner 持久是真实文件系统夹具；工具路由是真代码，终端成功回调是模拟。没有真实 bash、Python、Ubuntu 或 apt 的生产端到端。
+三条验收，分开算：
+
+1. QQ 绑定：`lib.rs` 用当前 `msg.source` 与 `msg.user_id()` 做 `HostTurn`；`resolve` 每次重算。真代码。没有 NapCat 在线。
+2. owner 根：`WorkspaceStore::open` 按 personal/group 与正数 id 打开独立目录，真实文件系统夹具。没有官方 Ubuntu Base 工件。
+3. 工具路由：`tools/mod.rs` 把当前 `MemoCallScope` 交给 `handle_tool_with`。成功终态回调在测试里是替换的，不是真 bash。
+
+没有真实 bash、Python、Ubuntu 或 apt 的生产端到端。`acceptance.json` 不会由准备脚本自动写成 `approved: true`。
