@@ -165,4 +165,4 @@ scripts/prepare-workspace-rootfs.sh /绝对/新目录
 python3 scripts/verify-workspace-bundle.py --unpack /绝对/source /绝对/私有父/新snapshot
 ```
 
-没有 runtime acceptance 脚本。审批前用真实 rootfs 跑 runner 的 harness 仍然没有，这是未实现的代码，不能说只差装包。官方工件的危险 metadata、真实 bash、Python、apt 和 NapCat 都未验收。生产门禁保持关闭。
+没有单独的 shell 验收脚本。`cfg(test)` 管理探针已经接上，复用现有 verifier、seal、`RootfsAuthority`、`execute_with` 和 runner。真实 runtime 仍未验收：本机缺前置和官方工件，官方 metadata 兼容性未验证。生产门禁保持关闭。真实 bash、Python、apt 和 NapCat 都未验收。
