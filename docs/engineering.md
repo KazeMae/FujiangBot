@@ -72,3 +72,22 @@ cargo llvm-cov -p fujiang-plugin-agent --summary-only
 ```
 
 当时的结果：`fmt` 检查通过。clippy 在 `-D warnings` 下通过。`cargo test --workspace` 216 项通过，0 失败，0 ignored；其中 `fujiang-plugin-agent` 134 项通过。`scripts/check-file-length.sh` 通过。`scripts/run-tlc.sh` 的 ToolLoop 和 Session 都没有错误；ToolLoop 54 个 distinct states，Session 688 个 distinct states。`cargo llvm-cov -p fujiang-plugin-agent --summary-only` 的行覆盖是 92.62%。`compact.rs` 81.57%，`context_budget.rs` 98.89%，`speaker.rs` 97.88%。
+
+## 2026-11-07 工作区绑定切片
+
+上面的 216 项和 134 项是更早一刀的记录。更早的 224 项 workspace 测试和 142 项 agent 测试，以及任何 namespace 探针，都不是这一批的验收。协调者在仓库根目录跑过：
+
+```
+cargo fmt --all -- --check
+cargo clippy -p fujiang-plugin-agent --all-targets --no-deps -- -D warnings
+cargo test --workspace
+scripts/check-file-length.sh
+scripts/run-tlc.sh
+cargo llvm-cov -p fujiang-plugin-agent --summary-only
+python3 scripts/test-workspace-rootfs.py
+sh -n scripts/prepare-workspace-rootfs.sh
+```
+
+`fmt` 检查通过。clippy 与 CI 相同，在 `-D warnings` 下通过。`scripts/check-file-length.sh` 通过。`cargo test --workspace` 236 项通过，0 失败，0 ignored；其中 `fujiang-plugin-agent` 154 项通过，比此前的 142 项多 12 项。`cargo llvm-cov -p fujiang-plugin-agent --summary-only` 的行覆盖是 92.03%。`compact.rs` 83.21%，`context_budget.rs` 99.40%，`session.rs` 99.16%，`workspace.rs` 91.86%。`scripts/run-tlc.sh` 的 ToolLoop、Session 和 Workspace 都没有错误；distinct states 分别是 54、688 和 640。`python3 scripts/test-workspace-rootfs.py` 的 11 个离线控制流 case 通过。`sh -n scripts/prepare-workspace-rootfs.sh` 通过。这 11 个 case 不是公开工件的加密验签，也不是沙箱端到端证明。
+
+这一批交付了真实宿主工作区绑定，以及默认关闭、不启动进程的 bash/code 路由。真实 bwrap、独立 rootfs、私有写层、网络隔离和 apt 都还没有交付。公开工件的准备说明在 [workspace-rootfs](workspace-rootfs.md)。没有测生产环境、NapCat，也没有打真实 provider。

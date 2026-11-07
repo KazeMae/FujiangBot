@@ -201,6 +201,8 @@ async fn daily_rows_add_within_one_utc_day_and_split_on_the_next() {
             calls: 3,
             in_tokens: 14,
             out_tokens: 3,
+            unknown_calls: 0,
+            legacy_rows: 0,
         }
     );
     assert_eq!(
@@ -209,6 +211,8 @@ async fn daily_rows_add_within_one_utc_day_and_split_on_the_next() {
             calls: 3,
             in_tokens: 11,
             out_tokens: 10,
+            unknown_calls: 0,
+            legacy_rows: 0,
         }
     );
     let other = today_usage(&pool, "group:8", 9, day + 50).await.unwrap();
@@ -232,6 +236,8 @@ async fn daily_rows_add_within_one_utc_day_and_split_on_the_next() {
             calls: 1,
             in_tokens: 3,
             out_tokens: 3,
+            unknown_calls: 0,
+            legacy_rows: 0,
         }
     );
     assert_eq!(next.session, next.user);
@@ -239,4 +245,63 @@ async fn daily_rows_add_within_one_utc_day_and_split_on_the_next() {
     let kept = today_usage(&pool, "group:7", 5, day + 50).await.unwrap();
     assert_eq!(kept.user.calls, 3);
     assert_eq!(kept.session.calls, 3);
+}
+
+#[tokio::test]
+async fn old_usage_rows_stay_unconfirmed_and_partial_fields_still_add() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE usage_daily (
+            day INTEGER NOT NULL,
+            session_key TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            calls INTEGER NOT NULL,
+            in_tokens INTEGER NOT NULL,
+            out_tokens INTEGER NOT NULL,
+            PRIMARY KEY (day, session_key, user_id)
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let day = 86_400 * 4;
+    sqlx::query(
+        "INSERT INTO usage_daily (day, session_key, user_id, calls, in_tokens, out_tokens)
+         VALUES (?1, 'group:7', 5, 2, 9, 4)",
+    )
+    .bind(day / 86_400)
+    .execute(&pool)
+    .await
+    .unwrap();
+    ensure_schema(&pool).await.unwrap();
+    let legacy = today_usage(&pool, "group:7", 5, day + 3).await.unwrap();
+    assert_eq!(legacy.user.calls, 2);
+    assert_eq!(legacy.user.in_tokens, 9);
+    assert_eq!(legacy.user.out_tokens, 4);
+    assert_eq!(legacy.user.unknown_calls, 0);
+    assert_eq!(legacy.user.legacy_rows, 1);
+    record_usage_delta(
+        &pool,
+        "group:7",
+        5,
+        day + 3,
+        UsageDelta {
+            calls: 1,
+            in_tokens: 9,
+            out_tokens: 0,
+            unknown_calls: 1,
+        },
+    )
+    .await
+    .unwrap();
+    let mixed = today_usage(&pool, "group:7", 5, day + 3).await.unwrap();
+    assert_eq!(mixed.user.calls, 3);
+    assert_eq!(mixed.user.in_tokens, 18);
+    assert_eq!(mixed.user.out_tokens, 4);
+    assert_eq!(mixed.user.unknown_calls, 1);
+    assert_eq!(mixed.user.legacy_rows, 1);
 }

@@ -41,6 +41,14 @@ pub struct ChatMessage {
 pub struct TokenUse {
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub input_known: bool,
+    pub output_known: bool,
+}
+
+impl TokenUse {
+    pub fn known(self) -> bool {
+        self.input_known && self.output_known
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -562,14 +570,23 @@ fn token_use(body: &str) -> TokenUse {
     let Some(usage) = value.get("usage").filter(|item| item.is_object()) else {
         return TokenUse::default();
     };
+    let input = measured_token(usage.get("input_tokens"));
+    let output = measured_token(usage.get("output_tokens"));
     TokenUse {
-        input_tokens: nonneg_token(usage.get("input_tokens")),
-        output_tokens: nonneg_token(usage.get("output_tokens")),
+        input_tokens: input.unwrap_or(0),
+        output_tokens: output.unwrap_or(0),
+        input_known: input.is_some(),
+        output_known: output.is_some(),
     }
 }
 
-fn nonneg_token(value: Option<&Value>) -> i64 {
-    value.and_then(Value::as_i64).unwrap_or(0).max(0)
+fn measured_token(value: Option<&Value>) -> Option<i64> {
+    let number = value?.as_i64()?;
+    if number < 0 {
+        None
+    } else {
+        Some(number)
+    }
 }
 
 fn parse_responses(body: &str) -> Result<String, LlmError> {

@@ -99,6 +99,7 @@ pub(crate) struct ToolTurn {
     pub calls: i64,
     pub in_tokens: i64,
     pub out_tokens: i64,
+    pub unknown_calls: i64,
 }
 
 #[async_trait]
@@ -145,6 +146,18 @@ pub(crate) struct MemoCallScope {
 impl MemoCallScope {
     pub(crate) fn speaker(&self) -> i64 {
         self.user_id
+    }
+
+    pub(crate) fn workspace_turn(&self) -> crate::workspace::HostTurn {
+        let source = if self.source_kind == "group" {
+            Source::Group { id: self.source_id }
+        } else {
+            Source::Friend { id: self.source_id }
+        };
+        crate::workspace::HostTurn {
+            source,
+            actor: self.user_id,
+        }
     }
 
     pub(crate) fn from_source(source: Source, user_id: i64) -> Self {
@@ -396,19 +409,32 @@ where
     let mut calls = 0i64;
     let mut in_tokens = 0i64;
     let mut out_tokens = 0i64;
+    let mut unknown_calls = 0i64;
     loop {
         let tools = visible(&opened);
         if tools.is_empty() && prior.is_empty() {
             return match client.complete(messages).await {
-                Ok(done) => tool_turn(
-                    Ok(ToolReply::Text(done.text)),
-                    1,
-                    done.usage.input_tokens,
-                    done.usage.output_tokens,
-                ),
+                Ok(done) => {
+                    let mut in_tokens = 0;
+                    let mut out_tokens = 0;
+                    let mut unknown_calls = 0;
+                    add_usage(
+                        &done.usage,
+                        &mut in_tokens,
+                        &mut out_tokens,
+                        &mut unknown_calls,
+                    );
+                    tool_turn(
+                        Ok(ToolReply::Text(done.text)),
+                        1,
+                        in_tokens,
+                        out_tokens,
+                        unknown_calls,
+                    )
+                }
                 Err(err) => {
                     let attempts = provider_attempt(&err);
-                    tool_turn(Err(err), attempts, 0, 0)
+                    tool_turn(Err(err), attempts, 0, 0, attempts)
                 }
             };
         }
@@ -424,15 +450,27 @@ where
             Ok(round) => round,
             Err(err) => {
                 let attempts = provider_attempt(&err);
-                return tool_turn(Err(err), calls + attempts, in_tokens, out_tokens);
+                unknown_calls += attempts;
+                return tool_turn(
+                    Err(err),
+                    calls + attempts,
+                    in_tokens,
+                    out_tokens,
+                    unknown_calls,
+                );
             }
         };
         calls += 1;
-        in_tokens += usage.input_tokens;
-        out_tokens += usage.output_tokens;
+        add_usage(&usage, &mut in_tokens, &mut out_tokens, &mut unknown_calls);
         match output {
             ModelOutput::Text(text) => {
-                return tool_turn(Ok(ToolReply::Text(text)), calls, in_tokens, out_tokens);
+                return tool_turn(
+                    Ok(ToolReply::Text(text)),
+                    calls,
+                    in_tokens,
+                    out_tokens,
+                    unknown_calls,
+                );
             }
             ModelOutput::Calls(found) => {
                 if used >= max_rounds {
@@ -442,6 +480,7 @@ where
                         calls,
                         in_tokens,
                         out_tokens,
+                        unknown_calls,
                     );
                 }
                 let opened_now = opened.clone();
@@ -455,9 +494,33 @@ where
                                 calls,
                                 in_tokens,
                                 out_tokens,
+                                unknown_calls,
                             );
                         }
                     };
+                    if crate::workspace::is_exec_wire(&call.name) {
+                        match crate::workspace::handle_tool(
+                            pass.memory,
+                            pass.scope.map(MemoCallScope::workspace_turn),
+                            &call.name,
+                            &args,
+                        )
+                        .await
+                        {
+                            Ok(value) => prior.push(prior_call(call, value)),
+                            Err(()) => {
+                                warn!(tool = %call.name, "agent workspace rejected");
+                                return tool_turn(
+                                    Ok(ToolReply::Degraded(TOOL_FAIL_REPLY)),
+                                    calls,
+                                    in_tokens,
+                                    out_tokens,
+                                    unknown_calls,
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     if let Some(step) =
                         skills::exec(&call.name, &args, builtins, &opened_now, &mut opened)
                     {
@@ -472,6 +535,7 @@ where
                                     calls,
                                     in_tokens,
                                     out_tokens,
+                                    unknown_calls,
                                 );
                             }
                             skills::SkillOut::Schedule => {
@@ -484,6 +548,7 @@ where
                                             calls,
                                             in_tokens,
                                             out_tokens,
+                                            unknown_calls,
                                         );
                                     }
                                     Err(crate::schedule::Fail::Bad) => {
@@ -493,6 +558,7 @@ where
                                             calls,
                                             in_tokens,
                                             out_tokens,
+                                            unknown_calls,
                                         );
                                     }
                                     Err(crate::schedule::Fail::Down(err)) => {
@@ -502,6 +568,7 @@ where
                                             calls,
                                             in_tokens,
                                             out_tokens,
+                                            unknown_calls,
                                         );
                                     }
                                 }
@@ -524,6 +591,7 @@ where
                                             calls,
                                             in_tokens,
                                             out_tokens,
+                                            unknown_calls,
                                         );
                                     }
                                     Err(qq_read::QqFail::Down(err)) => {
@@ -533,6 +601,7 @@ where
                                             calls,
                                             in_tokens,
                                             out_tokens,
+                                            unknown_calls,
                                         );
                                     }
                                 }
@@ -547,6 +616,7 @@ where
                             calls,
                             in_tokens,
                             out_tokens,
+                            unknown_calls,
                         );
                     };
                     let args = bind_memo_scope(spec.service(), pass.scope, args);
@@ -562,6 +632,7 @@ where
                                     calls,
                                     in_tokens,
                                     out_tokens,
+                                    unknown_calls,
                                 );
                             }
                         }
@@ -581,6 +652,7 @@ where
                                     calls,
                                     in_tokens,
                                     out_tokens,
+                                    unknown_calls,
                                 );
                             }
                         }
@@ -635,12 +707,31 @@ fn tool_turn(
     calls: i64,
     in_tokens: i64,
     out_tokens: i64,
+    unknown_calls: i64,
 ) -> ToolTurn {
     ToolTurn {
         reply,
         calls,
         in_tokens,
         out_tokens,
+        unknown_calls,
+    }
+}
+
+fn add_usage(
+    usage: &crate::client::TokenUse,
+    input: &mut i64,
+    output: &mut i64,
+    unknown: &mut i64,
+) {
+    if usage.input_known {
+        *input = input.saturating_add(usage.input_tokens);
+    }
+    if usage.output_known {
+        *output = output.saturating_add(usage.output_tokens);
+    }
+    if !usage.known() {
+        *unknown = unknown.saturating_add(1);
     }
 }
 

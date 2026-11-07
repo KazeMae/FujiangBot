@@ -15,6 +15,7 @@ mod speaker;
 mod tools;
 mod trigger;
 mod vision;
+mod workspace;
 
 #[cfg(test)]
 #[path = "guard_tests.rs"]
@@ -184,6 +185,25 @@ impl AgentPlugin {
             }
             return;
         }
+        if let AgentCmd::Workspace(human) = &cmd {
+            match crate::workspace::command(
+                &pool,
+                crate::workspace::HostTurn {
+                    source: msg.source,
+                    actor: msg.user_id(),
+                },
+                human,
+            )
+            .await
+            {
+                Ok(text) => say(ctx, msg, fit_reply(&text)).await,
+                Err(err) => {
+                    warn!(error = %err, "agent workspace");
+                    say(ctx, msg, BUSY_REPLY).await;
+                }
+            }
+            return;
+        }
         match apply_command(
             &pool,
             cfg,
@@ -304,14 +324,17 @@ impl AgentPlugin {
             ctx,
         )
         .await;
-        if let Err(err) = session::record_daily(
+        if let Err(err) = session::record_usage_delta(
             &pool,
             &key,
             msg.user_id(),
             now,
-            turn.calls,
-            turn.in_tokens,
-            turn.out_tokens,
+            session::UsageDelta {
+                calls: turn.calls,
+                in_tokens: turn.in_tokens,
+                out_tokens: turn.out_tokens,
+                unknown_calls: turn.unknown_calls,
+            },
         )
         .await
         {
@@ -437,6 +460,7 @@ mod tests {
         assert!(plugin.help().contains(".agent status"));
         assert!(plugin.help().contains(".agent tools"));
         assert!(plugin.help().contains(".agent schedule"));
+        assert!(plugin.help().contains(".agent workspace"));
     }
 
     #[tokio::test]

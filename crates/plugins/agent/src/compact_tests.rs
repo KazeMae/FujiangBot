@@ -37,6 +37,9 @@ enum Mode {
     Persona,
     ForgetEmpty,
     MeteredEmpty,
+    PartialUsage,
+    MissingUsage,
+    ZeroUsage,
 }
 
 #[derive(Clone)]
@@ -182,6 +185,15 @@ async fn handle(State(app): State<App>, Json(body): Json<Value>) -> Json<Value> 
         Mode::MeteredEmpty => Json(json!({
             "output_text": "   ",
             "usage": {"input_tokens": 9, "output_tokens": 4}
+        })),
+        Mode::PartialUsage => Json(json!({
+            "output_text": "摘要OK",
+            "usage": {"input_tokens": 9}
+        })),
+        Mode::MissingUsage => Json(json!({"output_text": "摘要OK"})),
+        Mode::ZeroUsage => Json(json!({
+            "output_text": "摘要OK",
+            "usage": {"input_tokens": 0, "output_tokens": 0}
         })),
     }
 }
@@ -366,6 +378,51 @@ async fn keeps_history(mode: Mode) {
         assert_eq!((inn, out), (0, 0));
     } else {
         assert_eq!((inn, out), (9, 4));
+    }
+    if matches!(mode, Mode::Empty) {
+        let today = session::today_usage(&pool, key, 33, 86_400).await.unwrap();
+        assert_eq!(today.user.unknown_calls, 1);
+    }
+}
+
+#[tokio::test]
+async fn compact_records_partial_missing_and_measured_zero_usage() {
+    for (mode, inn, out_tokens, unknown) in [
+        (Mode::PartialUsage, 9, 0, 1),
+        (Mode::MissingUsage, 0, 0, 1),
+        (Mode::ZeroUsage, 0, 0, 0),
+    ] {
+        let pool = pool().await;
+        let key = "group:7";
+        seed(&pool, key).await;
+        let state = App {
+            hits: Arc::new(AtomicUsize::new(0)),
+            bodies: Arc::new(Mutex::new(Vec::new())),
+            mode,
+            pool: pool.clone(),
+            key: key.to_string(),
+        };
+        let hits = state.hits.clone();
+        let base = serve(state).await;
+        let cfg = cfg(&base, 70_000);
+        let messages = speak(&pool, &cfg, key).await;
+        let out = before_turn(&pool, &cfg, &client(&cfg), key, messages, &[], host()).await;
+        let Ok(_) = out else {
+            panic!("expected compact");
+        };
+        let left = session::active_messages(&pool, key).await.unwrap();
+        assert_eq!(left.len(), 2);
+        assert_eq!(left[0].content, "近期");
+        assert_eq!(session::summary_of(&pool, key).await.unwrap(), "摘要OK");
+        let today = session::today_usage(&pool, key, 33, 86_400).await.unwrap();
+        assert_eq!(today.user.calls, 1);
+        assert_eq!(today.user.in_tokens, inn);
+        assert_eq!(today.user.out_tokens, out_tokens);
+        assert_eq!(today.user.unknown_calls, unknown);
+        assert_eq!(today.user.legacy_rows, 0);
+        let other = session::today_usage(&pool, key, 34, 86_400).await.unwrap();
+        assert_eq!(other.user.calls, 0);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 }
 

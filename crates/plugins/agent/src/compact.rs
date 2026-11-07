@@ -146,14 +146,28 @@ async fn compact_once(
     }
     let (parsed, sent) = budget.client.complete_sent(&compact_messages).await;
     if sent.calls > 0 {
-        session::record_daily(
+        let unknown = if sent.usage.known() { 0 } else { 1 };
+        let input = if sent.usage.input_known {
+            sent.usage.input_tokens
+        } else {
+            0
+        };
+        let output = if sent.usage.output_known {
+            sent.usage.output_tokens
+        } else {
+            0
+        };
+        session::record_usage_delta(
             pool,
             session_key,
             host.user_id,
             host.now,
-            sent.calls,
-            sent.usage.input_tokens,
-            sent.usage.output_tokens,
+            session::UsageDelta {
+                calls: sent.calls,
+                in_tokens: input,
+                out_tokens: output,
+                unknown_calls: unknown,
+            },
         )
         .await
         .map_err(|_| Gate::Busy)?;

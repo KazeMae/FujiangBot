@@ -88,6 +88,11 @@ fn official_host(base_url: &str) -> bool {
 mod tests {
     use super::*;
 
+    const DEEPSEEK_FLASH_CONTEXT_SOURCE: &str =
+        "https://api-docs.deepseek.com/quick_start/pricing/";
+    const DEEPSEEK_FLASH_VISION_SOURCE: &str = "https://api-docs.deepseek.com/guides/vision.md";
+    const DEEPSEEK_FLASH_VISION_SCOPE: &str = "2026-11-07 https://api.deepseek.com deepseek-flash only; each image adds 1024; not an OpenAI, Anthropic, or other-model tile or detail cap";
+
     #[test]
     fn default_budget_is_half_a_million_and_official_flash_is_clamped() {
         assert_eq!(
@@ -205,6 +210,71 @@ mod tests {
         assert!(image_transport_blocked(1, MAX_REQUEST_BODY_BYTES + 1, 10));
         assert!(image_transport_blocked(2, 10, MAX_IMAGES_BYTES + 1));
         assert!(!image_transport_blocked(2, 10, 10));
+    }
+
+    #[test]
+    fn image_cap_is_not_a_generic_tile_or_detail_table() {
+        assert!(DEEPSEEK_FLASH_CONTEXT_SOURCE.contains("api-docs.deepseek.com"));
+        assert!(DEEPSEEK_FLASH_VISION_SOURCE.ends_with("/guides/vision.md"));
+        assert!(DEEPSEEK_FLASH_VISION_SCOPE.contains("deepseek-flash only"));
+        assert_eq!(
+            image_token_cap("https://api.openai.com/v1", "gpt-4o", None),
+            None
+        );
+        assert_eq!(
+            image_token_cap("https://api.openai.com/v1", "gpt-4o", Some(765)),
+            Some(765)
+        );
+        assert_eq!(
+            image_token_cap(
+                "https://api.anthropic.com",
+                "claude-3-5-sonnet",
+                Some(1_600)
+            ),
+            Some(1_600)
+        );
+        assert_eq!(
+            image_token_cap("https://api.deepseek.com", "deepseek-reasoner", Some(100)),
+            Some(100)
+        );
+        assert_eq!(
+            image_token_cap(
+                "https://api.deepseek.com",
+                "deepseek-flash-extra",
+                Some(8_192)
+            ),
+            Some(8_192)
+        );
+        assert_eq!(
+            image_token_cap("https://api.deepseek.com:443", DEEPSEEK_FLASH_MODEL, None),
+            None
+        );
+        assert_eq!(
+            image_token_cap(
+                "https://gateway.example/api.deepseek.com",
+                DEEPSEEK_FLASH_MODEL,
+                Some(2048)
+            ),
+            Some(2048)
+        );
+        assert_eq!(
+            resolve(
+                "https://api.openai.com/v1",
+                "gpt-4o",
+                2_000_000,
+                Some(2_000_000)
+            ),
+            Some(2_000_000)
+        );
+        assert_eq!(
+            resolve(
+                "https://api.anthropic.com",
+                DEEPSEEK_FLASH_MODEL,
+                2_000_000,
+                Some(2_000_000)
+            ),
+            Some(DEEPSEEK_FLASH_CAP)
+        );
     }
 
     #[test]

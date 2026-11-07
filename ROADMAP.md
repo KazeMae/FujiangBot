@@ -101,8 +101,8 @@
 | #56 T2 | 技能包 `schedule` 与 `.agent schedule` | Done | 到点带创建者 QQ，按 `qq.read` 同一成员边界重验。私聊只发给创建者 |
 | #60 T3 | 技能包 `fun` 与 `contest` | Done | 不进常驻。打开后仍走 ServiceHub。`fun.learn` / `fun.search` 仍由宿主写入当前群 |
 | 群发言人展示 | 群提示里的当前与历史 QQ、昵称、名片、引用 ID | Done | 当前与历史昵称、名片来自真实 `MessageEvent.sender` 快照，值仍按 untrusted 清理控制字符和双向控制符。`host_reply.message_id` 只是事件所带引用 ID，不取正文、不推断作者。旧行 NULL 不回填。真实 ID 不改变权限。私聊不包装。不改 Session / ToolLoop 状态机 |
-| 上下文预算与 LLM 交接摘要 | 500000、90% 摘要、模型上限、CAS、官方看图、摘要用量 | 已实现，待 PR 验收 | 有效预算是配置与已核实上限的较小值。官方 `https://api.deepseek.com` 的 `deepseek-flash` 按 2026-11-07 文档为 100 万，自定义 URL 不沿用。预算是投影后的 Responses JSON 的 UTF-8 字节，加上每张图已核实上界，再加 4096。这是保守上界，不是精确 token。物理约 48MiB 按完整 wire JSON 及其转义、结构开销计。官方该模型每张图加 1024，不能被更小配置低估；自定义来源要 `image_token_upper_bound`，否则只拒图。已发出的摘要调用把真实 `usage` 写入 `usage_daily`；缺失写成 0 表示未知，不是测得 0。记账失败归已有 CompactFail：留历史、报忙、不能提交摘要。工作区沙箱仍未做 |
-| 工作区沙箱 | 隔离工作区 | 未做 | 没有实现，也没有假接口 |
+| 上下文预算与 LLM 交接摘要 | 500000、90% 摘要、模型上限、CAS、官方看图、摘要用量 | 已实现，待 PR 验收 | 有效预算是配置与已核实上限的较小值。官方 `https://api.deepseek.com` 的 `deepseek-flash` 按 2026-11-07 定价页为 100 万，看图页每图 1024 且多图相加。只适用于该主机名和该模型名，不是 OpenAI、Anthropic 或其它模型的 tile/detail 上界。预算含投影 JSON、工具 schema、已核实图像上界和发出的 `max_output_tokens` 4096。usage 按字段保留有效非负整数；缺字段记 `unknown_calls`，不把缺的 0 当成测得值。旧行迁移后标未确认。记账失败仍走 CompactFail |
+| 工作区绑定 | 真实群/本人选择，执行器关闭 | 绑定与拒绝已写，隔离未验收 | `workspace_choice` 按群和发言人保存选择。私聊 source 不一致则拒绝。bash/code 不进启用清单，无 rootfs 时零宿主执行。bwrap 与 apt 端到端未做。见 `docs/workspace-rootfs.md` |
 
 前置：agent 热路径改动优先落在 `command.rs` / `plan.rs` / 新模块；单文件勿超 1000 行。
 

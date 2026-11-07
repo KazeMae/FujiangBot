@@ -1,6 +1,6 @@
-# 用 TLC 检查 ToolLoop 和 Session
+# 用 TLC 检查 ToolLoop、Session 和 Workspace
 
-在仓库根目录执行 `scripts/run-tlc.sh`。它先检查 `spec/tla/ToolLoop.tla`，再检查 `spec/tla/Session.tla`。通过时，每一段输出里都有这一句。
+在仓库根目录执行 `scripts/run-tlc.sh`。它先检查 `spec/tla/ToolLoop.tla`，再检查 `spec/tla/Session.tla`，最后检查 `spec/tla/Workspace.tla`。通过时，每一段输出里都有这一句。
 
 ```
 Model checking completed. No error has been found.
@@ -72,4 +72,8 @@ java -cp tla2tools.jar tlc2.TLC -workers 1 -deadlock -config spec/tla/Session.cf
 
 `StaleCannotCommit` 要求 `blocked` 或 `fresh = FALSE` 的快照阶段里 `op` 不是 `commit`。`CommitOnlyAfterCheck` 要求成功提交的前一状态是 `ready` 且 `ticket` 曾是 `checked`。这不是把 `commit` 的守卫再写一遍：提交看的是票据，不是字段是否重新相等。
 
-模型不含每小时次数，也不含真正的模型调用。用量记账失败归已有的 `Fail`（`op = "fail"`，也叫 CompactFail），不另建状态：不改 `messages` 和 `summary`。昵称、名片、引用 ID 这类 metadata 快照不进入 ToolLoop 或 Session，也不改变权限状态。工作区和沙箱仍未实现，模型里没有它们。改 `.agent reset`、`.agent forget` 或交接摘要时，先改 `Session.tla`，再跑 `scripts/run-tlc.sh`。
+模型不含每小时次数，也不含真正的模型调用。用量记账失败归已有的 `Fail`（`op = "fail"`，也叫 CompactFail），不另建状态：不改 `messages` 和 `summary`。昵称、名片、引用 ID 这类 metadata 快照不进入 ToolLoop 或 Session，也不改变权限状态。改 `.agent reset`、`.agent forget` 或交接摘要时，先改 `Session.tla`，再跑 `scripts/run-tlc.sh`。
+
+## Workspace
+
+`Workspace.tla` 检查群里的本人选择只属于当前群和当前 actor。换 actor、换群、换私聊 peer，或在群和私聊之间切换时，先清掉已解析的绑定，再按当前事件重算。解析出的 `ownerId` 只能是当前 actor 或当前群。私聊在 peer 和 actor 不一致时拒绝。`payload` 保持 0。这个模型只覆盖路由，不证明沙箱、bwrap 或文件隔离。改 `.agent workspace` 的选择规则时，先改这个模型，再跑 `scripts/run-tlc.sh`。

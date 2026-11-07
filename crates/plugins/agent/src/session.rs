@@ -76,7 +76,9 @@ pub async fn ensure_schema(pool: &SqlitePool) -> anyhow::Result<()> {
     .execute(pool)
     .await
     .context("create usage_daily")?;
+    ensure_unknown_calls(pool).await?;
     crate::layered_memory::ensure_schema(pool).await?;
+    crate::workspace::ensure_schema(pool).await?;
     crate::schedule::ensure_schema(pool).await?;
     Ok(())
 }
@@ -108,6 +110,33 @@ async fn ensure_summary_column(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await
         .context("add sessions.summary")?;
+    Ok(())
+}
+
+async fn ensure_unknown_calls(pool: &SqlitePool) -> anyhow::Result<()> {
+    let names: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('usage_daily')")
+            .fetch_all(pool)
+            .await
+            .context("usage_daily columns")?;
+    if !names.iter().any(|name| name == "unknown_calls") {
+        sqlx::query("ALTER TABLE usage_daily ADD COLUMN unknown_calls INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await
+            .context("add usage_daily.unknown_calls")?;
+    }
+    let names: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('usage_daily')")
+            .fetch_all(pool)
+            .await
+            .context("usage_daily columns")?;
+    if names.iter().any(|name| name == "legacy_unconfirmed") {
+        return Ok(());
+    }
+    sqlx::query("ALTER TABLE usage_daily ADD COLUMN legacy_unconfirmed INTEGER NOT NULL DEFAULT 1")
+        .execute(pool)
+        .await
+        .context("add usage_daily.legacy_unconfirmed")?;
     Ok(())
 }
 
@@ -632,6 +661,8 @@ pub struct DayUsage {
     pub calls: i64,
     pub in_tokens: i64,
     pub out_tokens: i64,
+    pub unknown_calls: i64,
+    pub legacy_rows: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -641,12 +672,13 @@ pub struct TodayUsage {
 }
 
 const SUM_USER: &str =
-    "SELECT COALESCE(SUM(calls), 0), COALESCE(SUM(in_tokens), 0), COALESCE(SUM(out_tokens), 0)
+    "SELECT COALESCE(SUM(calls), 0), COALESCE(SUM(in_tokens), 0), COALESCE(SUM(out_tokens), 0), COALESCE(SUM(unknown_calls), 0), COALESCE(SUM(legacy_unconfirmed), 0)
     FROM usage_daily WHERE day = ?1 AND user_id = ?2";
 const SUM_SESSION: &str =
-    "SELECT COALESCE(SUM(calls), 0), COALESCE(SUM(in_tokens), 0), COALESCE(SUM(out_tokens), 0)
+    "SELECT COALESCE(SUM(calls), 0), COALESCE(SUM(in_tokens), 0), COALESCE(SUM(out_tokens), 0), COALESCE(SUM(unknown_calls), 0), COALESCE(SUM(legacy_unconfirmed), 0)
     FROM usage_daily WHERE day = ?1 AND session_key = ?2";
 
+#[cfg(test)]
 pub async fn record_daily(
     pool: &SqlitePool,
     session_key: &str,
@@ -656,24 +688,58 @@ pub async fn record_daily(
     in_tokens: i64,
     out_tokens: i64,
 ) -> anyhow::Result<()> {
-    if calls <= 0 && in_tokens <= 0 && out_tokens <= 0 {
+    record_usage_delta(
+        pool,
+        session_key,
+        user_id,
+        now,
+        UsageDelta {
+            calls,
+            in_tokens,
+            out_tokens,
+            unknown_calls: 0,
+        },
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageDelta {
+    pub calls: i64,
+    pub in_tokens: i64,
+    pub out_tokens: i64,
+    pub unknown_calls: i64,
+}
+
+pub async fn record_usage_delta(
+    pool: &SqlitePool,
+    session_key: &str,
+    user_id: i64,
+    now: i64,
+    delta: UsageDelta,
+) -> anyhow::Result<()> {
+    if delta.calls <= 0 && delta.in_tokens <= 0 && delta.out_tokens <= 0 && delta.unknown_calls <= 0
+    {
         return Ok(());
     }
     let day = utc_day(now);
     sqlx::query(
-        "INSERT INTO usage_daily (day, session_key, user_id, calls, in_tokens, out_tokens)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO usage_daily (
+            day, session_key, user_id, calls, in_tokens, out_tokens, unknown_calls, legacy_unconfirmed
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)
          ON CONFLICT(day, session_key, user_id) DO UPDATE SET
             calls = calls + excluded.calls,
             in_tokens = in_tokens + excluded.in_tokens,
-            out_tokens = out_tokens + excluded.out_tokens",
+            out_tokens = out_tokens + excluded.out_tokens,
+            unknown_calls = unknown_calls + excluded.unknown_calls",
     )
     .bind(day)
     .bind(session_key)
     .bind(user_id)
-    .bind(calls)
-    .bind(in_tokens)
-    .bind(out_tokens)
+    .bind(delta.calls)
+    .bind(delta.in_tokens)
+    .bind(delta.out_tokens)
+    .bind(delta.unknown_calls)
     .execute(pool)
     .await
     .context("record usage_daily")?;
@@ -721,6 +787,8 @@ fn row_usage(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<DayUsage> {
         calls: sqlx::Row::try_get(row, 0)?,
         in_tokens: sqlx::Row::try_get(row, 1)?,
         out_tokens: sqlx::Row::try_get(row, 2)?,
+        unknown_calls: sqlx::Row::try_get(row, 3)?,
+        legacy_rows: sqlx::Row::try_get(row, 4)?,
     })
 }
 

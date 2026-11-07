@@ -21,6 +21,8 @@ jobs:
         run: cargo test -p fujiang-plugin-agent
       - name: Test fujiang
         run: cargo test -p fujiang
+      - name: Test rootfs preparation offline
+        run: python3 scripts/test-workspace-rootfs.py
       - name: Agent file length
         run: scripts/check-file-length.sh
       - name: Install llvm-cov

@@ -97,6 +97,8 @@ async fn success_posts_responses_and_returns_output_text() {
         TokenUse {
             input_tokens: 3,
             output_tokens: 2,
+            input_known: true,
+            output_known: true,
         }
     );
     let seen = rec.0.lock().unwrap().take().expect("request recorded");
@@ -440,6 +442,8 @@ async fn multi_segment_output_concatenates_message_text() {
         TokenUse {
             input_tokens: 4,
             output_tokens: 2,
+            input_known: true,
+            output_known: true,
         }
     );
 }
@@ -466,7 +470,106 @@ async fn bad_usage_fields_count_as_zero_tokens() {
         .await
         .unwrap();
     assert_eq!(done.text, "好");
-    assert_eq!(done.usage, TokenUse::default());
+    assert!(!done.usage.known());
+    assert!(!done.usage.input_known);
+    assert!(!done.usage.output_known);
+    assert_eq!(done.usage.input_tokens, 0);
+    assert_eq!(done.usage.output_tokens, 0);
+}
+
+#[tokio::test]
+async fn partial_usage_keeps_the_measured_field_only() {
+    let app = Router::new().route(
+        "/responses",
+        post(|| async {
+            Json(json!({
+                "output_text": "好",
+                "usage": {"input_tokens": 9}
+            }))
+        }),
+    );
+    let base = spawn_app(app).await;
+    let client = test_client(&base, 60);
+    let done = client.complete(&[user("hi")]).await.unwrap();
+    assert!(done.usage.input_known);
+    assert_eq!(done.usage.input_tokens, 9);
+    assert!(!done.usage.output_known);
+    assert_eq!(done.usage.output_tokens, 0);
+    assert!(!done.usage.known());
+}
+
+#[tokio::test]
+async fn missing_usage_is_unknown_and_a_reported_zero_is_measured() {
+    let missing = Router::new().route(
+        "/responses",
+        post(|| async { Json(json!({"output_text": "好"})) }),
+    );
+    let base = spawn_app(missing).await;
+    let client = test_client(&base, 60);
+    let done = client.complete(&[user("hi")]).await.unwrap();
+    assert!(!done.usage.input_known);
+    assert!(!done.usage.output_known);
+    assert!(!done.usage.known());
+    assert_eq!(done.usage.input_tokens, 0);
+
+    let measured = Router::new().route(
+        "/responses",
+        post(|| async {
+            Json(json!({
+                "output_text": "好",
+                "usage": {"input_tokens": 0, "output_tokens": 0}
+            }))
+        }),
+    );
+    let base = spawn_app(measured).await;
+    let client = test_client(&base, 60);
+    let done = client.complete(&[user("hi")]).await.unwrap();
+    assert!(done.usage.known());
+    assert!(done.usage.input_known);
+    assert!(done.usage.output_known);
+    assert_eq!(done.usage.input_tokens, 0);
+    assert_eq!(done.usage.output_tokens, 0);
+}
+
+#[test]
+fn output_reserve_is_sent_and_tool_schema_counts_in_the_projection() {
+    let client = sized_client(500_000);
+    let messages = [user("hi")];
+    let bare = client.request_bytes(&messages, &[], &[]).unwrap();
+    let parameters = json!({
+        "type": "object",
+        "properties": {
+            "script": { "type": "string", "description": "workspace-schema-marker" }
+        }
+    });
+    let tools = [FunctionTool {
+        name: "rank_list",
+        description: "列出榜",
+        parameters: &parameters,
+    }];
+    let with_tools = client.request_bytes(&messages, &[], &tools).unwrap();
+    assert!(with_tools > bare);
+    let request = responses_request(
+        "deepseek-flash",
+        0.7,
+        &messages,
+        &[],
+        &tools,
+        crate::context_budget::OUTPUT_RESERVE,
+        false,
+    );
+    let body = serde_json::to_value(&request).unwrap();
+    assert_eq!(body["max_output_tokens"], 4096);
+    assert_eq!(body["tools"][0]["name"], "rank_list");
+    assert!(body["tools"][0]["parameters"]["properties"]["script"].is_object());
+    let prior = [PriorCall {
+        call_id: "c".into(),
+        name: "rank_list".into(),
+        arguments: "{\"handle\":\"x\"}".into(),
+        output: "{\"ok\":true}".into(),
+    }];
+    let with_prior = client.request_bytes(&messages, &prior, &tools).unwrap();
+    assert!(with_prior > with_tools);
 }
 
 async fn complete_err(app: Router) -> LlmError {

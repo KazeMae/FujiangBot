@@ -101,6 +101,9 @@ pub(crate) fn round_tools(
             push_new(&mut tools, spec);
         }
     }
+    tools.retain(|spec| {
+        !crate::workspace::is_exec_wire(spec.wire_name()) && spec.service() != "workspace"
+    });
     tools
 }
 
