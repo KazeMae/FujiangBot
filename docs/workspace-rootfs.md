@@ -2,7 +2,7 @@
 
 消费侧已经接到执行器。每次真实 resolve 都经 `handle_tool` 进入。唯一生产供应策略UnacceptedRootfs始终拒绝。配置和模型都不能把 rootfs 标成已接受，也不能因此启用 bash 或 code。
 
-owner 目录、锁和 bwrap 原语的代码已经有。还没有真实 rootfs，没有独立写层，也没有 bash、python、apt 的验收。下一切片是供应者实现，以及离线验签后的安全解包。
+owner 目录、锁和 bwrap 原语的代码已经有。还没有真实 rootfs，没有独立写层，也没有 bash、python、apt 的验收。`--unpack` 契约见文末；Python 正在分步实现。下一步是独立 owner 写层和运行端接线，本次不做，也不启用。
 
 启动用 block-fd 握手：先阻塞，再 pin init 的 pidfd，然后才释放 payload。确认 init 死亡并回收 wrapper 之后，才 join 输出。join 可以取消。返回成功时，进程清理和 reader 回收都已经完成。清理结果未知时不能标成功。没有宿主 exec 降级。
 
@@ -11,6 +11,8 @@ owner 目录、锁和 bwrap 原语的代码已经有。还没有真实 rootfs，
 单元 fixture 只把公开的 `true` 和 `sleep` 复制到任务 tempdir。那不是 rootfs。
 
 `spec/tla/Runner.tla` 只证明这条抽象顺序：拒绝时零 spawn，pin 之前不释放 payload，正常finish解除看护前确认init和wrapper清理；Drop仅尽力清理，不证明未知错误下最终无残留，成功返回前进程清理和 reader 回收都完成，未知清理不能标成功。它不证明操作系统隔离，也不是真实 apt。
+
+`spec/tla/Bundle.tla` 只证明解包抽象顺序，不证明密码、操作系统、CPU 或权限。
 
 
 
@@ -28,4 +30,24 @@ receipt 不是 runtime 授权。唯一生产供应策略 UnacceptedRootfs 依旧
 
 本机 `gpg` 2.4.7 存在，`gpgv` 缺失。2026-11-07 17:26 Asia/Shanghai 用正常包管理安装时失败：`mirrors.aliyun.com` Temporary failure resolving。已停止。不改软件源、DNS 或代理，也不绕路。本机真实 `gpgv` 测试必须明确 skip。CI 安装 `gpgv`、`gpg`、`gpg-agent`、`gpgconf` 之后运行 `python3 scripts/test-workspace-bundle.py` 和 `REQUIRE_GPGV=1 python3 scripts/test-workspace-bundle-gpgv.py`，无 `continue-on-error`，强制真实签名、错签名和篡改。
 
-这里不声称验证已经实际成功，也不声称官方 rootfs 已经到手。下一切片只做安全解包：拒绝 absolute、`..`、symlink、hardlink 逃逸和 device，带资源限制和私有写层。未实测的 gate 继续关闭。本次不实现解包。
+这里不声称验证已经实际成功，也不声称官方 rootfs 已经到手。未实测的 gate 继续关闭。
+
+## `--unpack SOURCE NEWTARGET`
+
+`python3 scripts/verify-workspace-bundle.py --unpack SOURCE NEWTARGET` 的契约如下。Python 正在分步实现，测试结果暂不编造。没有 `--unpack` 时，CLI 仍走原来的验证路径。`scripts/prepare-workspace-rootfs.sh` 仍然不解包。
+
+每次调用都重新验签，并复制一份新的私有 snapshot，不信任旧 receipt。SHA 核对之后，归档放进 memfd，并设置 `F_SEAL_WRITE`、`F_SEAL_GROW`、`F_SEAL_SHRINK`、`F_SEAL_SEAL`，使随后解包读到的字节保持不变。这只约束顺序，不把密封当成密码学证明。
+
+私有 stage 由受控 fork 写入。限额是 CPU 10 秒、硬限制 11 秒、地址空间 512MiB、壁钟 15 秒。失败先 kill，再 wait，然后删除 stage，不发布。成功之后才发布 rootfs 和 receipt。
+
+目录打开使用 `FD_NOFOLLOW`，新建文件使用 `O_EXCL`。重复的规范路径拒绝，并计入隐式目录 nodes。条目上限 50000，展开上限 1GiB，单文件 256MiB，膨胀比 200，计算包含头 padding 和尾部。目录和可执行文件模式 0700，普通文件 0600。不 chown，不写 xattr。
+
+路径允许一次根成员 `.` 或 `./dir`，以及标准 `./` 前缀。只接受 plain ASCII 的 regular 和 directory，格式只限 UStar 与 V7。拒绝全部链接、setuid/setgid、PAX 与 GNU 扩展、sparse、device、FIFO、socket。因此不能声称 Ubuntu 可用，也不能声称已经拿到官方 rootfs。
+
+receipt 的 `extracted` 为 true，`execution_accepted` 为 false。生产供应策略 UnacceptedRootfs 不变，仍然拒绝。
+
+`spec/tla/Bundle.tla` 的顺序是：刚验证通过，密封归档，worker 写私有 stage，成功回收 worker，然后发布 rootfs 和 receipt。失败必须先 kill 并 reap，再 cleanup，且不发布。`executionAccepted` 始终为 FALSE。发布前必须已经验证（含 hash）、密封，并且 worker 已成功回收。失败路径没有可用 rootfs。
+
+提交 `950ca5f` 的整体 CI 已成功：2026-11-07 17:48:32 Asia/Shanghai，https://github.com/KazeMae/FujiangBot/actions/runs/42360948886 。本次不重试任何 DNS 失败的下载或安装，也不借 CI 下载工件。本机仍缺 `gpgv`，真实测试继续由既有 CI 环境承担，不改依赖。
+
+下一步是独立 owner 写层和运行端接线。本次不做，也不启用。

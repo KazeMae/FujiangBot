@@ -3,7 +3,7 @@
 > 仓库：https://github.com/KazeMae/FujiangBot  
 > 看板：https://github.com/users/KazeMae/projects/2  
 > 总追踪：#19  
-> 更新：2026-11-07（上下文预算与 LLM 交接摘要已落地；工作区消费侧已接 handle_tool；离线验证入口与回归已实现，gpgv 真实回归结果以该 head 的 CI 为准；不能声称官方 rootfs 验收）
+> 更新：2026-11-07（上下文预算与 LLM 交接摘要已落地；工作区消费侧已接 handle_tool；离线验证入口与回归已实现。提交 `950ca5f` 整体 CI 已成功，2026-11-07 17:48:32 Asia/Shanghai，https://github.com/KazeMae/FujiangBot/actions/runs/42360948886 。`--unpack SOURCE NEWTARGET` 契约已写入文档和 `spec/tla/Bundle.tla`，Python 正在分步实现，测试结果暂不编造。不能声称官方 rootfs 验收或 Ubuntu 可用）
 
 本文档是规划源。Issue / Milestone / Project 与此对齐。冲突时以已合并 Issue 的验收为准，并回写本文档。
 
@@ -103,7 +103,8 @@
 | 群发言人展示 | 群提示里的当前与历史 QQ、昵称、名片、引用 ID | Done | 当前与历史昵称、名片来自真实 `MessageEvent.sender` 快照，值仍按 untrusted 清理控制字符和双向控制符。`host_reply.message_id` 只是事件所带引用 ID，不取正文、不推断作者。旧行 NULL 不回填。真实 ID 不改变权限。私聊不包装。不改 Session / ToolLoop 状态机 |
 | 上下文预算与 LLM 交接摘要 | 500000、90% 摘要、模型上限、CAS、官方看图、摘要用量 | 已实现，待 PR 验收 | 有效预算是配置与已核实上限的较小值。官方 `https://api.deepseek.com` 的 `deepseek-flash` 按 2026-11-07 定价页为 100 万，看图页每图 1024 且多图相加。只适用于该主机名和该模型名，不是 OpenAI、Anthropic 或其它模型的 tile/detail 上界。预算含投影 JSON、工具 schema、已核实图像上界和发出的 `max_output_tokens` 4096。usage 按字段保留有效非负整数；缺字段记 `unknown_calls`，不把缺的 0 当成测得值。旧行迁移后标未确认。记账失败仍走 CompactFail |
 | 工作区绑定 | 真实群/本人选择；消费侧经 `handle_tool` 每次真实 resolve 连接 | 绑定已写；唯一生产供应策略UnacceptedRootfs始终拒绝；不能靠配置或模型启用 | `workspace_choice` 按群和发言人保存选择。私聊 source 不一致则拒绝。owner 目录、锁和 bwrap 原语已有代码。仍无真实 rootfs、独立写层，也无 bash、python、apt 验收。解释器为 bash（默认，无 profile/rc）、兼容 sh、`python3 -I`。rlimit 是每进程，不是聚合限额。无宿主 exec 降级。block-fd 握手、pidfd 回收、可取消 join。单元 fixture 只复制公开 `true`/`sleep` 到任务 tempdir。见 `docs/workspace-rootfs.md` 与 `spec/tla/Runner.tla` |
-| 工作区离线验证入口 | `python3 scripts/verify-workspace-bundle.py /绝对source /私有parent/新snapshot` | 入口与回归已实现；gpgv 真实回归以该 head 的 CI 为准 | 入口核对私有快照、固定主指纹 `843938DF228D22F7B3742BC0D94AA3F0EFE21092` 与精确 SHA，不解包、不启用。本机 gpgv 因正常镜像 DNS 失败缺失，真实签名回归由 CI `REQUIRE_GPGV=1` 强制；官方 rootfs 与真实 bash/python/apt 未验收，详见 `docs/workspace-rootfs.md`。 |
+| 工作区离线验证入口 | `python3 scripts/verify-workspace-bundle.py /绝对source /私有parent/新snapshot` | 入口与回归已实现；`950ca5f` 整体 CI 已成功 | 入口核对私有快照、固定主指纹 `843938DF228D22F7B3742BC0D94AA3F0EFE21092` 与精确 SHA。无 `--unpack` 仍走该验证路径。本机 gpgv 因正常镜像 DNS 失败缺失，真实签名回归由既有 CI 环境承担，本次不改依赖、不重试 DNS 失败的下载或安装，也不借 CI 下载工件。官方 rootfs 与真实 bash/python/apt 未验收，详见 `docs/workspace-rootfs.md`。 |
+| `--unpack SOURCE NEWTARGET` | 重复验签后解进新的私有目标 | 契约与 `Bundle.tla` 已同步；Python 正在分步实现 | 不信任旧 receipt。SHA 后 memfd 加 `F_SEAL_WRITE` / `GROW` / `SHRINK` / `SEAL`。私有 stage：CPU 10s、硬限制 11s、AS 512MiB、壁钟 15s；失败 kill + wait 后删除，成功才发布 rootfs。目录 `FD_NOFOLLOW`，文件 `O_EXCL`。重复规范路径拒绝，计入隐式目录 nodes。条目 50000、展开 1GiB、单文件 256MiB、ratio 200（含头 padding 和尾部）。目录与可执行文件 0700，普通文件 0600，不 chown、不写 xattr。允许一次根 `.` 或 `./dir` 和标准 `./` 前缀。只接受 plain ASCII regular/dir 的 UStar/V7，拒绝链接、setuid/gid、PAX/GNU、sparse、device、FIFO、socket。receipt `extracted` true 且 `execution_accepted` false。UnacceptedRootfs 生产 gate 不变。不能声称 Ubuntu 可用或已拿到官方 rootfs。下一步独立 owner 写层和运行端接线，本次不做、不启用。 |
 
 前置：agent 热路径改动优先落在 `command.rs` / `plan.rs` / 新模块；单文件勿超 1000 行。
 
@@ -130,8 +131,9 @@
 | `spec/tla/ToolLoop.tla` | 轮数硬顶；工具错误不离开降级态；无 tools 时单次 complete | P0 |
 | `spec/tla/Session.tla` | reset 清空消息和摘要并保留人设；forget 只清空摘要；fold 不改人设 | P1 |
 | `spec/tla/Runner.tla` | 抽象顺序：阻塞、pin init pidfd、释放 payload、确认 init 死亡并回收 wrapper、join、成功。拒绝时零 spawn。正常finish解除看护前确认init和wrapper清理；Drop仅尽力清理，不证明未知错误下最终无残留。成功前进程清理和 reader 回收都完成。未知清理不能标成功。不证明 OS 隔离或真实 apt | P1 |
+| `spec/tla/Bundle.tla` | 抽象顺序：刚验证通过、密封归档、worker 写私有 stage、成功回收、再发布 rootfs 和 receipt。失败先 kill/reap 再 cleanup，且不发布。`executionAccepted` 始终 FALSE。发布前须 verified/hash、sealed、workerReaped。失败没有可用 rootfs。不证明密码、OS、CPU 或权限 | P1 |
 
-实现须对照模型；改 loop、session 或 runner 行为时先改 TLA+ 或同步改。
+实现须对照模型；改 loop、session、runner 或 bundle 解包顺序时先改 TLA+ 或同步改。
 
 ## 覆盖率范围
 

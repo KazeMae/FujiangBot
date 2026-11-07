@@ -1,9 +1,14 @@
+import gzip
+import hashlib
 import importlib.util
+import io
 import os
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -257,6 +262,164 @@ class BundleTests(unittest.TestCase):
             self.assertEqual(done.stdout, b"")
             self.assertFalse(os.path.lexists(target))
             self.assertFalse(os.path.lexists(target / "receipt.json"))
+
+
+def _archive(entries, fmt=tarfile.USTAR_FORMAT, pax=None, cut=0, tail=b"", plain=None):
+    if plain is not None:
+        return plain
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=fmt) as tar:
+        for name, kind, data, mode, link in entries:
+            info = tarfile.TarInfo(name)
+            info.type = kind
+            info.mode = mode
+            info.uid = 0
+            info.gid = 0
+            info.mtime = 0
+            info.linkname = link or ""
+            if kind in (tarfile.CHRTYPE, tarfile.BLKTYPE):
+                info.devmajor, info.devminor = 1, 3
+            if pax:
+                info.pax_headers = dict(pax)
+            payload = data or b""
+            info.size = len(payload) if kind in (tarfile.REGTYPE, tarfile.AREGTYPE) else 0
+            tar.addfile(info, io.BytesIO(payload) if info.size else None)
+    raw = buf.getvalue()
+    if cut:
+        raw = raw[:cut]
+    return gzip.compress(raw + tail)
+
+
+def _unpack(entries, expect_success=False, **kw):
+    with tempfile.TemporaryDirectory() as raw:
+        os.chmod(raw, 0o700)
+        base = Path(raw)
+        outside = base / "outside"
+        outside.write_bytes(b"HOST")
+        snap = base / "snapshot"
+        snap.mkdir(mode=0o700)
+        os.chmod(snap, 0o700)
+        fixed = []
+        for name, kind, data, mode, link in entries:
+            if name == "ABS":
+                name = str(outside)
+            fixed.append((name, kind, data, mode, link))
+        wall = kw.pop("wall", None)
+        gz = _archive(fixed, **kw)
+        (snap / NAME).write_bytes(gz)
+        fd = os.open(snap, os.O_RDONLY)
+        try:
+            try:
+                verify = (fd, NAME, hashlib.sha256(gz).hexdigest(), len(gz))
+                if wall is None:
+                    V._unpack_verified(*verify)
+                else:
+                    with unittest.mock.patch.object(V, "UNPACK_WALL_SECONDS", wall):
+                        V._unpack_verified(*verify)
+            except (V.BundleError, OSError):
+                assert not (snap / "rootfs").exists()
+                assert not (snap / ".rootfs-partial").exists()
+                assert outside.read_bytes() == b"HOST"
+                raise
+            if not expect_success:
+                raise AssertionError
+            root = snap / "rootfs"
+            proof = root / "etc" / "proof"
+            assert proof.read_bytes() == b"proof"
+            for rel, mode in (("etc", 0o700), ("etc/proof", 0o600)):
+                st = os.stat(root / rel)
+                assert st.st_mode & 0o777 == mode
+                assert st.st_uid == os.getuid()
+        finally:
+            os.close(fd)
+            assert outside.read_bytes() == b"HOST"
+
+
+_OK = (
+    (".", tarfile.DIRTYPE, b"", 0o755, None),
+    ("./etc/proof", tarfile.REGTYPE, b"proof", 0o644, None),
+    ("etc", tarfile.DIRTYPE, b"", 0o755, None),
+)
+
+
+class UnpackTests(unittest.TestCase):
+    def test_normal_members(self):
+        _unpack(_OK, expect_success=True)
+
+    def test_bad_table(self):
+        reg, dire = tarfile.REGTYPE, tarfile.DIRTYPE
+        cases = {
+            "abs": (("ABS", reg, b"x", 0o644, None),),
+            "dotdot": (("../../outside", reg, b"x", 0o644, None),),
+            "dotdot-mid": (("a/../outside", reg, b"x", 0o644, None),),
+            "slash": (("etc\\proof", reg, b"x", 0o644, None),),
+            "dup": (("a", reg, b"a", 0o644, None), ("./a", reg, b"b", 0o644, None)),
+            "file-parent": (("a", reg, b"a", 0o644, None), ("a/b", reg, b"b", 0o644, None)),
+            "root-dup": ((".", dire, b"", 0o755, None), (".", dire, b"", 0o755, None)),
+            "root-reg": ((".", reg, b"x", 0o644, None),),
+            "symlink": (
+                ("jump", tarfile.SYMTYPE, b"", 0o777, "../../"),
+                ("jump/outside", reg, b"x", 0o644, None),
+            ),
+            "hardlink": (("a", reg, b"a", 0o644, None), ("b", tarfile.LNKTYPE, b"", 0o644, "a")),
+            "chr": (("d", tarfile.CHRTYPE, b"", 0o644, None),),
+            "blk": (("d", tarfile.BLKTYPE, b"", 0o644, None),),
+            "fifo": (("d", tarfile.FIFOTYPE, b"", 0o644, None),),
+            "sock": (("d", b"s", b"", 0o644, None),),
+            "unknown": (("d", b"Z", b"", 0o644, None),),
+            "sparse": (("d", tarfile.GNUTYPE_SPARSE, b"", 0o644, None),),
+            "setuid": (("./etc/proof", reg, b"proof", 0o4755, None),),
+            "setgid": (("./etc/proof", reg, b"proof", 0o2755, None),),
+        }
+        for label, entries in cases.items():
+            with self.subTest(label=label):
+                with self.assertRaises((V.BundleError, OSError)):
+                    _unpack(entries)
+
+    def test_pax_and_framing(self):
+        reg = tarfile.REGTYPE
+        member = (("./etc/proof", reg, b"proof", 0o644, None),)
+        frames = {
+            "pax-cap": dict(entries=member, fmt=tarfile.PAX_FORMAT, pax={"SCHILY.xattr.security.capability": "\x00"}),
+            "bad-gzip": dict(entries=member, plain=b"not-gzip"),
+            "trunc-tar": dict(entries=member, cut=100),
+            "tail": dict(entries=_OK, tail=b"\x01" * 512),
+        }
+        for label, kw in frames.items():
+            with self.subTest(label=label):
+                with self.assertRaises((V.BundleError, OSError)):
+                    entries = kw["entries"]
+                    rest = {k: v for k, v in kw.items() if k != "entries"}
+                    _unpack(entries, **rest)
+
+    def test_limits(self):
+        nested = (("a/b/c", tarfile.REGTYPE, b"z", 0o644, None),)
+        tight = (
+            ("MAX_FILE", 2, _OK),
+            ("MAX_EXPANDED", 512, _OK),
+            ("MAX_RATIO", 1, _OK),
+            ("MAX_ENTRIES", 1, _OK),
+            ("MAX_ENTRIES", 2, nested),
+        )
+        for name, value, entries in tight:
+            with self.subTest(name=name, value=value):
+                with unittest.mock.patch.object(V, name, value):
+                    with self.assertRaises((V.BundleError, OSError)):
+                        _unpack(entries)
+
+    def test_worker_timeout_reaped(self):
+        import time
+
+        def sleep2(*_a, **_k):
+            time.sleep(2)
+
+        started = time.monotonic()
+        with unittest.mock.patch.object(V, "_unpack_stream", sleep2):
+            with self.assertRaises(V.BundleError):
+                _unpack(_OK, wall=.05)
+        self.assertLess(time.monotonic() - started, 1)
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(-1, os.WNOHANG)
 
 
 if __name__ == "__main__":

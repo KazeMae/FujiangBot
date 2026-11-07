@@ -1,9 +1,11 @@
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 
@@ -261,6 +263,102 @@ class WorkspaceBundleGpgvTests(unittest.TestCase):
         with self.assertRaises(verify.BundleError):
             verify.verify_bundle(self.source, self.target)
         self._assert_no_residue()
+
+    def _ustar(self, write):
+        bio = io.BytesIO()
+        with tarfile.open(fileobj=bio, mode="w:gz", format=tarfile.USTAR_FORMAT) as tf:
+            write(tf)
+        self.payload = bio.getvalue()
+        self.digest = hashlib.sha256(self.payload).hexdigest()
+
+    def _dot(self):
+        info = tarfile.TarInfo(".")
+        info.type = tarfile.DIRTYPE
+        info.mode = 0o755
+        return info
+
+    def test_unpack_extracts_signed_fixture_rootfs(self):
+        proof = b"not-ubuntu\n"
+
+        def write(tf):
+            tf.addfile(self._dot())
+            info = tarfile.TarInfo("./etc/proof")
+            info.type = tarfile.REGTYPE
+            info.mode = 0o644
+            info.size = len(proof)
+            tf.addfile(info, io.BytesIO(proof))
+
+        self._ustar(write)
+        self._fill()
+        rec = verify.verify_bundle(self.source, self.target, unpack=True)
+        self.assertEqual(rec["archive"], _ARCHIVE)
+        self.assertEqual(rec["sha256"], self.digest)
+        self.assertEqual(rec["bytes"], len(self.payload))
+        self.assertEqual(rec["primary"], self.alpha)
+        self.assertIs(rec["extracted"], True)
+        self.assertIs(rec["execution_accepted"], False)
+        proof_path = os.path.join(self.target, "rootfs", "etc", "proof")
+        with open(proof_path, "rb") as fh:
+            self.assertEqual(fh.read(), proof)
+        self.assertFalse(os.path.islink(proof_path))
+        self.assertEqual(os.stat(os.path.join(self.target, "rootfs")).st_mode & 0o777, 0o700)
+        with open(os.path.join(self.target, "receipt.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), rec)
+
+    def test_unpack_rechecks_sha_when_snapshot_archive_changes(self):
+        proof = b"not-ubuntu\n"
+
+        def write(tf):
+            tf.addfile(self._dot())
+            info = tarfile.TarInfo("./etc/proof")
+            info.type = tarfile.REGTYPE
+            info.mode = 0o644
+            info.size = len(proof)
+            tf.addfile(info, io.BytesIO(proof))
+
+        self._ustar(write)
+        self._fill()
+        snap = os.path.join(self.dst_td.name, "snap-src")
+        rec = verify.verify_bundle(self.source, snap, unpack=False)
+        self.assertIs(rec["extracted"], False)
+        self.assertIs(rec["execution_accepted"], False)
+        arch = os.path.join(snap, _ARCHIVE)
+        with open(arch, "ab") as fh:
+            fh.write(b"\n")
+        nxt = os.path.join(self.dst_td.name, "unpack-dst")
+        with self.assertRaises(verify.BundleError):
+            verify.verify_bundle(snap, nxt, unpack=True)
+        self.assertFalse(os.path.lexists(nxt))
+        with open(os.path.join(snap, "receipt.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), rec)
+
+    def test_unpack_rejects_link_parent_escape(self):
+        hold = tempfile.TemporaryDirectory(prefix="wb-sentinel-")
+        self.addCleanup(hold.cleanup)
+        os.chmod(hold.name, 0o700)
+        sentinel = os.path.join(hold.name, "sentinel")
+        marker = b"sentinel-intact\n"
+        with open(sentinel, "wb") as fh:
+            fh.write(marker)
+
+        def write(tf):
+            tf.addfile(self._dot())
+            sym = tarfile.TarInfo("./up")
+            sym.type = tarfile.SYMTYPE
+            sym.linkname = ".."
+            tf.addfile(sym)
+            hard = tarfile.TarInfo("./etc/proof")
+            hard.type = tarfile.LNKTYPE
+            hard.linkname = "../up/sentinel"
+            tf.addfile(hard)
+
+        self._ustar(write)
+        self._fill()
+        with self.assertRaises(verify.BundleError):
+            verify.verify_bundle(self.source, self.target, unpack=True)
+        self._assert_no_residue()
+        with open(sentinel, "rb") as fh:
+            self.assertEqual(fh.read(), marker)
 
     def test_concatenated_valid_signatures_rejected(self):
         manifest = self._manifest()
