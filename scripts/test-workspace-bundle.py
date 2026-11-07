@@ -306,6 +306,8 @@ def _unpack(entries, expect_success=False, check=None, **kw):
                 name = str(outside)
             fixed.append((name, kind, data, mode, link))
         wall = kw.pop("wall", None)
+        proof_mode = kw.pop("proof_mode", 0o644)
+        capture = kw.pop("capture", None)
         gz = _archive(fixed, **kw)
         (snap / NAME).write_bytes(gz)
         fd = os.open(snap, os.O_RDONLY)
@@ -327,10 +329,17 @@ def _unpack(entries, expect_success=False, check=None, **kw):
             root = snap / "rootfs"
             proof = root / "etc" / "proof"
             assert proof.read_bytes() == b"proof"
-            for rel, mode in (("etc", 0o755), ("etc/proof", 0o644)):
+            for rel, mode in (("etc", 0o755), ("etc/proof", proof_mode)):
                 st = os.stat(root / rel)
                 assert st.st_mode & 0o777 == mode
+                assert st.st_mode & 0o6000 == 0
                 assert st.st_uid == os.getuid()
+            if capture is not None:
+                tfd = _root(root)
+                try:
+                    capture.append((hashlib.sha256(gz).hexdigest(), V.tree_sha256(tfd)))
+                finally:
+                    os.close(tfd)
             if check is not None:
                 check(root)
         finally:
@@ -428,8 +437,7 @@ class UnpackTests(unittest.TestCase):
             "sock": (("d", b"s", b"", 0o644, None),),
             "unknown": (("d", b"Z", b"", 0o644, None),),
             "sparse": (("d", tarfile.GNUTYPE_SPARSE, b"", 0o644, None),),
-            "setuid": (("./etc/proof", reg, b"proof", 0o4755, None),),
-            "setgid": (("./etc/proof", reg, b"proof", 0o2755, None),),
+            "file-sticky": (("./etc/proof", reg, b"proof", 0o1644, None),),
         }
         for label, entries in cases.items():
             with self.subTest(label=label):
@@ -440,7 +448,6 @@ class UnpackTests(unittest.TestCase):
         reg = tarfile.REGTYPE
         member = (("./etc/proof", reg, b"proof", 0o644, None),)
         frames = {
-            "pax-cap": dict(entries=member, fmt=tarfile.PAX_FORMAT, pax={"SCHILY.xattr.security.capability": "\x00"}),
             "bad-gzip": dict(entries=member, plain=b"not-gzip"),
             "trunc-tar": dict(entries=member, cut=100),
             "tail": dict(entries=_OK, tail=b"\x01" * 512),
@@ -543,6 +550,66 @@ class UnpackTests(unittest.TestCase):
         )
         _unpack(entries, expect_success=True)
 
+    def test_v3_strips_setid_and_discards_cap(self):
+        reg, dire = tarfile.REGTYPE, tarfile.DIRTYPE
+        base = (
+            (".", dire, b"", 0o755, None),
+            ("etc", dire, b"", 0o755, None),
+        )
+
+        def no_xattr(root):
+            names = os.listxattr(root / "etc" / "proof")
+            self.assertFalse(any("capability" in name or name.startswith("security.") for name in names))
+
+        for mode in (0o4755, 0o2755):
+            got = []
+            _unpack(
+                base + (("./etc/proof", reg, b"proof", mode, None),),
+                expect_success=True,
+                proof_mode=0o755,
+                capture=got,
+                check=no_xattr,
+            )
+            self.assertEqual(len(got), 1)
+        sticky = []
+        _unpack(
+            base
+            + (
+                ("./etc/proof", reg, b"proof", 0o644, None),
+                ("tmp", dire, b"", 0o3777, None),
+            ),
+            expect_success=True,
+            check=lambda root: self.assertEqual(os.lstat(root / "tmp").st_mode & 0o7777, 0o1777),
+            capture=sticky,
+        )
+        plain, suid, sgid, capped = [], [], [], []
+        member = base + (("./etc/proof", reg, b"proof", 0o644, None),)
+        _unpack(member, expect_success=True, capture=plain)
+        _unpack(base + (("./etc/proof", reg, b"proof", 0o4755, None),), expect_success=True, proof_mode=0o755, capture=suid)
+        _unpack(base + (("./etc/proof", reg, b"proof", 0o2755, None),), expect_success=True, proof_mode=0o755, capture=sgid)
+        _unpack(
+            member,
+            expect_success=True,
+            fmt=tarfile.PAX_FORMAT,
+            pax={"SCHILY.xattr.security.capability": "\x00a\nb"},
+            capture=capped,
+            check=no_xattr,
+        )
+        self.assertEqual(suid[0][1], sgid[0][1])
+        self.assertNotEqual(suid[0][0], sgid[0][0])
+        self.assertEqual(plain[0][1], capped[0][1])
+        self.assertNotEqual(plain[0][0], capped[0][0])
+        self.assertNotEqual(plain[0][1], suid[0][1])
+        wide = []
+        _unpack(
+            base + (("./etc/proof", reg, b"proof", 0o755, None),),
+            expect_success=True,
+            proof_mode=0o755,
+            capture=wide,
+        )
+        self.assertEqual(wide[0][1], suid[0][1])
+        self.assertNotEqual(wide[0][0], suid[0][0])
+
     def test_pax_safe_times(self):
         pax = {"mtime": "1.25", "atime": "2", "ctime": "3.0"}
         _unpack(_OK, expect_success=True, fmt=tarfile.PAX_FORMAT, pax=pax)
@@ -552,7 +619,7 @@ class UnpackTests(unittest.TestCase):
             {"path": "etc/proof"},
             {"linkpath": "etc/proof"},
             {"size": "1"},
-            {"SCHILY.xattr.security.capability": "\x00"},
+            {"SCHILY.xattr.security.capability": "A" * 257},
             {"GNU.sparse.map": "0,0"},
             {"VENDOR.unknown": "x"},
             {"mtime": "nan"},
@@ -572,6 +639,7 @@ class UnpackTests(unittest.TestCase):
             valid * 2,
             valid + b"x",
             b"11 mtime=\x00\n",
+            b"38 SCHILY.xattr.security.capability=\x00\n" * 2,
             b"x" * 65537,
         )
         frames = [(tarfile.XHDTYPE, payload, base) for payload in payloads]
@@ -598,7 +666,7 @@ class UnpackTests(unittest.TestCase):
                 _unpack(_OK)
 
 
-_GOLDEN = "d4c7888733e446897db069da80dbd6dc00fc402689b3050f98ac36bc295d8dca"
+_GOLDEN = "ea44e35d303fa76e05605bfc4d0ce07fa456a1822cb8ac4bd4364e6c49506ae1"
 
 
 def _root(path):

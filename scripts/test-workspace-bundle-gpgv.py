@@ -297,7 +297,7 @@ class WorkspaceBundleGpgvTests(unittest.TestCase):
         self.assertEqual(rec["primary"], self.alpha)
         self.assertIs(rec["extracted"], True)
         self.assertIs(rec["execution_accepted"], False)
-        self.assertEqual(rec["tree_policy"], "workspace-rootfs-runtime-v2")
+        self.assertEqual(rec["tree_policy"], "workspace-rootfs-runtime-v3")
         root_fd = os.open(os.path.join(self.target, "rootfs"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             self.assertEqual(rec["tree_sha256"], verify.tree_sha256(root_fd))
@@ -403,7 +403,7 @@ class WorkspaceBundleGpgvTests(unittest.TestCase):
         rec = verify.verify_bundle(self.source, self.target, unpack=True)
         self.assertIs(rec["extracted"], True)
         self.assertIs(rec["execution_accepted"], False)
-        self.assertEqual(rec["tree_policy"], "workspace-rootfs-runtime-v2")
+        self.assertEqual(rec["tree_policy"], "workspace-rootfs-runtime-v3")
         root_fd = os.open(os.path.join(self.target, "rootfs"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             self.assertEqual(rec["tree_sha256"], verify.tree_sha256(root_fd))

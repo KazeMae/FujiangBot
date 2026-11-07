@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use super::{fstat, invalid, openat2};
 
-const POLICY: &[u8] = b"workspace-rootfs-runtime-v2\0";
+const POLICY: &[u8] = b"workspace-rootfs-runtime-v3\0";
 const MOUNTS: [&[u8]; 6] = [b"proc", b"dev", b"work", b"tmp", b"run", b"sys"];
 const MAX_DEPTH: u32 = 64;
 const MAX_NODES: u64 = 50_000;

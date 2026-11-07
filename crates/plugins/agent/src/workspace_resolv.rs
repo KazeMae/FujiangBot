@@ -23,6 +23,9 @@ fn unavailable(what: &str) -> io::Error {
     )
 }
 
+/// `WorkspaceStore::open` already holds `OwnerLock` for the whole store, including `run`.
+/// This function does not lock again. Each stage also takes `flock` on its own marker so
+/// crash orphans can be reclaimed here, while a live or inherited descriptor is skipped.
 pub(super) fn install(root: RawFd) -> io::Result<()> {
     let text = read_host()?;
     let body = render(&text)?;
@@ -368,42 +371,70 @@ fn numbered(opt: &str, prefix: &str, lo: u32, hi: u32) -> bool {
     (!rest.starts_with('0') && n >= lo && n <= hi) || (rest == "0" && lo == 0)
 }
 
+/// Exact marker. A short or missing marker is not a claim: those inodes are left, including a
+/// legacy unmarked `.tmp`. Only a full marker plus `flock` is reclaimed, and the hold stays
+/// until the paired `.tmp` is absent or removed.
+const STAGE_MARK: &[u8] = b"fujiang-resolv-stage-v1\n";
+
 struct Stage {
     dir: RawFd,
-    name: CString,
+    tmp: CString,
+    hold: CString,
+    hold_fd: Option<OwnedFd>,
+    tmp_dev: u64,
+    tmp_ino: u64,
     armed: bool,
 }
 
 impl Stage {
     fn create(dir: RawFd) -> io::Result<(Self, OwnedFd)> {
-        let name = CString::new(format!(
-            ".resolv.{}.{}.tmp",
-            std::process::id(),
-            STAGE_SEQ.fetch_add(1, Ordering::Relaxed)
-        ))
-        .map_err(|_| unavailable("tmp"))?;
-        let fd = unsafe {
-            libc::openat(
-                dir,
-                name.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                0o644,
-            )
-        };
-        if fd < 0 {
+        let id = next_stage_id();
+        let hold = CString::new(format!(".resolv.{id}.hold")).map_err(|_| unavailable("tmp"))?;
+        let tmp = CString::new(format!(".resolv.{id}.tmp")).map_err(|_| unavailable("tmp"))?;
+        let hold_fd = open_new(dir, &hold)?;
+        if unsafe { libc::flock(hold_fd.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            unlink_same(dir, &hold, hold_fd.as_raw_fd());
             return Err(unavailable("tmp"));
         }
+        if write_full(hold_fd.as_raw_fd(), STAGE_MARK).is_err()
+            || unsafe { libc::fsync(hold_fd.as_raw_fd()) } != 0
+        {
+            unlink_same(dir, &hold, hold_fd.as_raw_fd());
+            return Err(unavailable("tmp"));
+        }
+        let body = match open_new(dir, &tmp) {
+            Ok(fd) => fd,
+            Err(err) => {
+                unlink_same(dir, &hold, hold_fd.as_raw_fd());
+                return Err(err);
+            }
+        };
+        let st = match fstat(body.as_raw_fd()) {
+            Ok(st) => st,
+            Err(err) => {
+                unlink_same(dir, &tmp, body.as_raw_fd());
+                unlink_same(dir, &hold, hold_fd.as_raw_fd());
+                return Err(err);
+            }
+        };
         Ok((
             Self {
                 dir,
-                name,
+                tmp,
+                hold,
+                hold_fd: Some(hold_fd),
+                tmp_dev: st.st_dev,
+                tmp_ino: st.st_ino,
                 armed: true,
             },
-            unsafe { OwnedFd::from_raw_fd(fd) },
+            body,
         ))
     }
 
-    fn disarm(&mut self) {
+    fn finish(&mut self) {
+        if let Some(fd) = self.hold_fd.as_ref() {
+            unlink_same(self.dir, &self.hold, fd.as_raw_fd());
+        }
         self.armed = false;
     }
 }
@@ -411,10 +442,66 @@ impl Stage {
 impl Drop for Stage {
     fn drop(&mut self) {
         if self.armed {
-            let _ = unsafe { libc::unlinkat(self.dir, self.name.as_ptr(), 0) };
+            unlink_ino(self.dir, &self.tmp, self.tmp_dev, self.tmp_ino);
+            if let Some(fd) = self.hold_fd.as_ref() {
+                unlink_same(self.dir, &self.hold, fd.as_raw_fd());
+            }
         }
     }
 }
+
+fn open_new(dir: RawFd, name: &CStr) -> io::Result<OwnedFd> {
+    let fd = unsafe {
+        libc::openat(
+            dir,
+            name.as_ptr(),
+            libc::O_RDWR
+                | libc::O_CREAT
+                | libc::O_EXCL
+                | libc::O_CLOEXEC
+                | libc::O_NOFOLLOW
+                | libc::O_NONBLOCK,
+            0o644,
+        )
+    };
+    if fd < 0 {
+        Err(unavailable("tmp"))
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+fn write_full(fd: RawFd, bytes: &[u8]) -> io::Result<()> {
+    let mut off = 0usize;
+    while off < bytes.len() {
+        let n = unsafe { libc::write(fd, bytes[off..].as_ptr().cast(), bytes.len() - off) };
+        if n <= 0 {
+            return Err(unavailable("tmp"));
+        }
+        off += n as usize;
+    }
+    Ok(())
+}
+
+fn unlink_same(dir: RawFd, name: &CStr, fd: RawFd) {
+    let Ok(opened) = fstat(fd) else {
+        return;
+    };
+    unlink_ino(dir, name, opened.st_dev, opened.st_ino);
+}
+
+fn unlink_ino(dir: RawFd, name: &CStr, dev: u64, ino: u64) {
+    let Ok(named) = fstat_at(dir, name, libc::AT_SYMLINK_NOFOLLOW) else {
+        return;
+    };
+    if named.st_dev == dev && named.st_ino == ino && named.st_nlink == 1 {
+        let _ = unsafe { libc::unlinkat(dir, name.as_ptr(), 0) };
+    }
+}
+
+#[path = "workspace_resolv_reclaim.rs"]
+mod stage_reclaim;
+use stage_reclaim::reclaim;
 
 fn write_guest(root: RawFd, body: &[u8]) -> io::Result<()> {
     let etc = open_at(root, c"etc", OPEN_DIR | libc::O_NOFOLLOW)?;
@@ -439,6 +526,7 @@ fn write_guest(root: RawFd, body: &[u8]) -> io::Result<()> {
         Err(err) if err.raw_os_error() == Some(libc::ENOENT) => {}
         Err(err) => return Err(err),
     }
+    reclaim(etc.as_raw_fd(), euid)?;
     let (mut stage, tmp) = Stage::create(etc.as_raw_fd())?;
     let mut off = 0usize;
     while off < body.len() {
@@ -463,7 +551,7 @@ fn write_guest(root: RawFd, body: &[u8]) -> io::Result<()> {
     if unsafe {
         libc::renameat(
             etc.as_raw_fd(),
-            stage.name.as_ptr(),
+            stage.tmp.as_ptr(),
             etc.as_raw_fd(),
             dest.as_ptr(),
         )
@@ -471,14 +559,51 @@ fn write_guest(root: RawFd, body: &[u8]) -> io::Result<()> {
     {
         return Err(unavailable("rename"));
     }
-    stage.disarm();
+    stage.finish();
     Ok(())
+}
+
+fn next_stage_id() -> String {
+    #[cfg(test)]
+    if let Some(id) = NEXT_STAGE_ID.with(|slot| slot.borrow_mut().take()) {
+        return id;
+    }
+    format!(
+        "{}.{}",
+        std::process::id(),
+        STAGE_SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn after_lock_hook() {
+    #[cfg(test)]
+    {
+        if let Some(hook) = SWAP.with(|slot| slot.replace(None)) {
+            hook();
+        }
+    }
+}
+
+fn before_tmp_hook() {
+    #[cfg(test)]
+    {
+        if let Some(hook) = TMP_SWAP.with(|slot| slot.replace(None)) {
+            hook();
+        }
+    }
 }
 
 #[cfg(test)]
 thread_local! {
     static BETWEEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static SWAP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static TMP_SWAP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static NEXT_STAGE_ID: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
+
+#[cfg(test)]
+#[path = "workspace_resolv_gc_tests.rs"]
+mod gc_tests;
 
 #[cfg(test)]
 mod tests {
@@ -711,8 +836,8 @@ mod tests {
         fs::write(outside.join("keep"), b"UNTOUCHED").unwrap();
         fs::remove_file(root.join("etc/resolv.conf")).unwrap();
         std::os::unix::fs::symlink(outside.join("keep"), root.join("etc/resolv.conf")).unwrap();
-        let next = STAGE_SEQ.load(Ordering::Relaxed);
-        let blocker = root.join(format!("etc/.resolv.{}.{}.tmp", std::process::id(), next));
+        NEXT_STAGE_ID.with(|slot| *slot.borrow_mut() = Some("fixture.9".into()));
+        let blocker = root.join("etc/.resolv.fixture.9.tmp");
         fs::write(&blocker, b"block").unwrap();
         assert!(write_guest(fd.as_raw_fd(), body).is_err());
         assert!(fs::symlink_metadata(root.join("etc/resolv.conf"))

@@ -11,7 +11,7 @@ use super::workspace_seed::{self, VerifiedBase};
 use super::{fstat, invalid, one_component, open_host, openat2, tree_digest};
 
 const PRIMARY: &str = "843938DF228D22F7B3742BC0D94AA3F0EFE21092";
-const POLICY: &str = "workspace-rootfs-runtime-v2";
+const POLICY: &str = "workspace-rootfs-runtime-v3";
 const EMBEDDED_VERIFIER: &str = include_str!("../../../../scripts/verify-workspace-bundle.py");
 
 struct Approval {

@@ -132,7 +132,7 @@ fn sample_identity() -> PinnedIdentity {
         bytes: 3,
         tree: [9; 32],
         primary: "843938DF228D22F7B3742BC0D94AA3F0EFE21092".into(),
-        policy: "workspace-rootfs-runtime-v2".into(),
+        policy: "workspace-rootfs-runtime-v3".into(),
         extracted: true,
         execution_accepted: false,
     }

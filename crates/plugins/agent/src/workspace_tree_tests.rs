@@ -59,7 +59,7 @@ fn hex_digest(root: &Path) -> [u8; 32] {
 
 #[test]
 fn fixture_matches_python_bytes() {
-    const EXPECTED: &str = "d4c7888733e446897db069da80dbd6dc00fc402689b3050f98ac36bc295d8dca";
+    const EXPECTED: &str = "ea44e35d303fa76e05605bfc4d0ce07fa456a1822cb8ac4bd4364e6c49506ae1";
     let root = scratch();
     golden(&root);
     let got = hex_digest(&root);

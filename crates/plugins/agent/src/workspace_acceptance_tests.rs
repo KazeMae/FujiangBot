@@ -62,6 +62,28 @@ fn receipt(accepted: bool, sha: &str, tree: [u8; 32]) -> Receipt {
 }
 
 #[test]
+fn old_and_fake_policy_approval_rejected() {
+    for policy in [
+        "workspace-rootfs-runtime-v1",
+        "workspace-rootfs-runtime-v2",
+        "fake-policy",
+    ] {
+        let raw = format!(
+            r#"{{"version":1,"kind":"runtime_safety_approval","source":"/var/empty/source","host":"/var/empty/host","archive_sha256":"{}","primary":"{PRIMARY}","policy":"{policy}","tree_sha256":"{}","approved":true}}"#,
+            "ab".repeat(32),
+            "cd".repeat(32),
+        );
+        assert!(parse_approval(raw.as_bytes()).is_err(), "{policy}");
+    }
+    let raw = format!(
+        r#"{{"version":1,"kind":"runtime_safety_approval","source":"/var/empty/source","host":"/var/empty/host","archive_sha256":"{}","primary":"{PRIMARY}","policy":"{POLICY}","tree_sha256":"{}","approved":true}}"#,
+        "ab".repeat(32),
+        "cd".repeat(32),
+    );
+    assert!(parse_approval(raw.as_bytes()).is_ok());
+}
+
+#[test]
 fn receipt_alone_is_not_approval() {
     let raw = br#"{"archive":"ubuntu-base-24.04-base-amd64.tar.gz","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":3,"primary":"843938DF228D22F7B3742BC0D94AA3F0EFE21092","extracted":true,"execution_accepted":false,"tree_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","tree_policy":"workspace-rootfs-runtime-v1"}"#;
     assert!(parse_approval(raw).is_err());
@@ -82,6 +104,10 @@ fn forged_or_stale_receipt_rejected() {
     assert!(bind(&ok, &receipt(false, &ok.archive_sha256, [1u8; 32])).is_err());
     let mut policy = good;
     policy.tree_policy = "other".into();
+    assert!(bind(&ok, &policy).is_err());
+    policy.tree_policy = "workspace-rootfs-runtime-v1".into();
+    assert!(bind(&ok, &policy).is_err());
+    policy.tree_policy = "workspace-rootfs-runtime-v2".into();
     assert!(bind(&ok, &policy).is_err());
 }
 

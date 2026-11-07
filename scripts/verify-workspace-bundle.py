@@ -161,9 +161,16 @@ def _pax_times(data):
         if eq <= 0:
             raise BundleError()
         key = body[:eq]
-        if key not in (b"atime", b"mtime", b"ctime") or key in seen:
+        val = body[eq + 1:]
+        if key in seen:
             raise BundleError()
-        if _PAX_TIME_RE.fullmatch(body[eq + 1:]) is None:
+        if key in (b"atime", b"mtime", b"ctime"):
+            if _PAX_TIME_RE.fullmatch(val) is None:
+                raise BundleError()
+        elif key == b"SCHILY.xattr.security.capability":
+            if len(val) < 1 or len(val) > 256:
+                raise BundleError()
+        else:
             raise BundleError()
         seen.add(key)
         i = end
@@ -173,9 +180,9 @@ def _tar_path(member):
         raise BundleError()
     if member.pax_headers or member.sparse is not None:
         raise BundleError()
-    if member.mode & 0o6000:
-        raise BundleError()
     if kind == tarfile.DIRTYPE and (member.mode & 0o500) != 0o500:
+        raise BundleError()
+    if kind != tarfile.DIRTYPE and member.mode & 0o1000:
         raise BundleError()
     if kind in (tarfile.REGTYPE, tarfile.AREGTYPE) and (member.mode & 0o1400) != 0o400:
         raise BundleError()
@@ -325,6 +332,8 @@ def _unpack_stream(archive_fd, root_fd, compressed_size):
                     pending_pax = True
                     continue
                 pending_pax = False
+                if type(member.mode) is int:
+                    member.mode &= ~0o6000
                 parts = _tar_path(member)
                 if parts in seen:
                     raise BundleError()
@@ -735,7 +744,7 @@ def _unpack_verified(snapshot_fd, name, digest, compressed_size):
                         os.close(wr)
                     if made:
                         _rm(snapshot_fd, ".rootfs-partial")
-_TREE_POLICY = "workspace-rootfs-runtime-v2"
+_TREE_POLICY = "workspace-rootfs-runtime-v3"
 _CLEAN_NODES = 54096
 def _apply_dirs(root, modes):
     for parts in sorted(modes, key=len, reverse=True):
