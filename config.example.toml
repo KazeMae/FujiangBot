@@ -96,8 +96,10 @@ enabled = true
 # model_context_limit = 128000
 # timeout_secs = 60
 # vision_enabled = false
+# 官方 https://api.deepseek.com + deepseek-flash 每张按 1024。自定义地址要自己核实后填写，写更小也不会把官方 1024 估低。
+# image_token_upper_bound = 1024
 # max_image_bytes = 5242880
-# 默认不看图。改成 true 之后会取图片并准备 input_image，但视觉 token 还不能核定，请求会在客户端拒绝，不会发给模型。
+# 默认不看图。改成 true 之后，有已核实视觉上界的模型会把原 data URL 放进 input_image。没有上界的来源只拒绝这张图。
 # 单张超过 max_image_bytes 就回复一句中文，不调用模型。写成 0 时仍是 5242880。
 # max_tool_rounds = 3
 # enable_rank_tools = true

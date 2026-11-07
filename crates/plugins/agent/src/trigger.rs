@@ -67,6 +67,9 @@ pub fn llm_reply(err: &LlmError) -> String {
         LlmError::ImageUnmetered => {
             "这张图的视觉 token 还不能核定，这次不发给模型，也没有删历史。".to_string()
         }
+        LlmError::PayloadLimited => {
+            "这张图超过张数或大小限制，没有发给模型，也没有删历史。".to_string()
+        }
     }
 }
 

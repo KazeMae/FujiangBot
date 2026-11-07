@@ -1,6 +1,11 @@
 pub const DEFAULT_CONTEXT_BUDGET: u64 = 500_000;
 pub const OUTPUT_RESERVE: u64 = 4_096;
 pub const DEEPSEEK_FLASH_CAP: u64 = 1_000_000;
+pub const DEEPSEEK_FLASH_IMAGE_CAP: u64 = 1_024;
+pub const MAX_INPUT_IMAGES: usize = 600;
+pub const MAX_REQUEST_BODY_BYTES: u64 = 48 * 1024 * 1024;
+pub const MAX_ONE_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+pub const MAX_IMAGES_BYTES: u64 = 64 * 1024 * 1024;
 pub const OFFICIAL_DEEPSEEK_HOST: &str = "api.deepseek.com";
 pub const DEEPSEEK_FLASH_MODEL: &str = "deepseek-flash";
 
@@ -24,6 +29,27 @@ pub fn resolve(base_url: &str, model: &str, budget: u64, admin: Option<u64>) -> 
         })
     }?;
     Some(budget.min(cap))
+}
+
+pub fn image_token_cap(base_url: &str, model: &str, admin: Option<u64>) -> Option<u64> {
+    let admin = admin.filter(|n| *n > 0);
+    let official = if official_host(base_url) && model == DEEPSEEK_FLASH_MODEL {
+        Some(DEEPSEEK_FLASH_IMAGE_CAP)
+    } else {
+        None
+    };
+    match (official, admin) {
+        (Some(official), Some(admin)) => Some(official.max(admin)),
+        (Some(official), None) => Some(official),
+        (None, Some(admin)) => Some(admin),
+        (None, None) => None,
+    }
+}
+
+pub fn image_transport_blocked(count: usize, url_bytes: u64, decoded_bytes: u64) -> bool {
+    count > MAX_INPUT_IMAGES
+        || url_bytes > MAX_REQUEST_BODY_BYTES
+        || decoded_bytes > MAX_IMAGES_BYTES
 }
 
 pub fn at_ninety(total: u64, limit: u64) -> bool {
@@ -143,6 +169,42 @@ mod tests {
             resolve("https://api.deepseek.com", "other-model", 500_000, None),
             None
         );
+    }
+
+    #[test]
+    fn official_flash_image_cap_is_1024_and_cannot_be_lowered() {
+        assert_eq!(
+            image_token_cap("https://api.deepseek.com", DEEPSEEK_FLASH_MODEL, None),
+            Some(DEEPSEEK_FLASH_IMAGE_CAP)
+        );
+        assert_eq!(
+            image_token_cap("https://api.deepseek.com/", DEEPSEEK_FLASH_MODEL, Some(10)),
+            Some(DEEPSEEK_FLASH_IMAGE_CAP)
+        );
+        assert_eq!(
+            image_token_cap(
+                "https://api.deepseek.com",
+                DEEPSEEK_FLASH_MODEL,
+                Some(4_000)
+            ),
+            Some(4_000)
+        );
+        assert_eq!(
+            image_token_cap("http://127.0.0.1:9", DEEPSEEK_FLASH_MODEL, None),
+            None
+        );
+        assert_eq!(
+            image_token_cap("http://127.0.0.1:9", "local-model", Some(10)),
+            Some(10)
+        );
+        assert_eq!(
+            image_token_cap("https://api.deepseek.com", "other-model", None),
+            None
+        );
+        assert!(image_transport_blocked(601, 10, 10));
+        assert!(image_transport_blocked(1, MAX_REQUEST_BODY_BYTES + 1, 10));
+        assert!(image_transport_blocked(2, 10, MAX_IMAGES_BYTES + 1));
+        assert!(!image_transport_blocked(2, 10, 10));
     }
 
     #[test]

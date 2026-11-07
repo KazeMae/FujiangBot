@@ -69,6 +69,8 @@ pub enum LlmError {
     OverBudget,
     #[error("image tokens are not metered")]
     ImageUnmetered,
+    #[error("image request exceeds transport limits")]
+    PayloadLimited,
 }
 
 pub struct LlmClient {
@@ -79,6 +81,7 @@ pub struct LlmClient {
     temperature: f64,
     timeout: Duration,
     limit: Option<u64>,
+    image_cap: Option<u64>,
 }
 
 impl LlmClient {
@@ -90,7 +93,16 @@ impl LlmClient {
     }
 
     pub async fn complete(&self, messages: &[ChatMessage]) -> Result<Completion, LlmError> {
-        self.request_bound(messages, &[], &[])?;
+        self.complete_sent(messages).await.0
+    }
+
+    pub(crate) async fn complete_sent(
+        &self,
+        messages: &[ChatMessage],
+    ) -> (Result<Completion, LlmError>, SentCall) {
+        if let Err(err) = self.request_bound(messages, &[], &[]) {
+            return (Err(err), SentCall::none());
+        }
         let request = responses_request(
             &self.model,
             self.temperature,
@@ -98,12 +110,28 @@ impl LlmClient {
             &[],
             &[],
             crate::context_budget::OUTPUT_RESERVE,
+            false,
         );
-        let body = self.post_ok(&request).await?;
-        Ok(Completion {
-            text: parse_responses(&body)?,
-            usage: token_use(&body),
-        })
+        match self.send_json("responses", &request).await {
+            Err(err) => (Err(err), SentCall::unknown()),
+            Ok((status, body)) => {
+                let usage = token_use(&body);
+                let sent = SentCall::once(usage);
+                if !status.is_success() {
+                    return (
+                        Err(LlmError::Api {
+                            status: status.as_u16(),
+                            body: error_message_or_snippet(&body),
+                        }),
+                        sent,
+                    );
+                }
+                match parse_responses(&body) {
+                    Ok(text) => (Ok(Completion { text, usage }), sent),
+                    Err(err) => (Err(err), sent),
+                }
+            }
+        }
     }
 
     pub(crate) async fn complete_with_tools(
@@ -120,6 +148,7 @@ impl LlmClient {
             prior,
             tools,
             crate::context_budget::OUTPUT_RESERVE,
+            false,
         );
         let body = self.post_ok(&request).await?;
         Ok((parse_model_output(&body)?, token_use(&body)))
@@ -139,6 +168,11 @@ impl LlmClient {
                 cfg.context_budget,
                 cfg.model_context_limit,
             ),
+            image_cap: crate::context_budget::image_token_cap(
+                &cfg.base_url,
+                &cfg.model,
+                cfg.image_token_upper_bound,
+            ),
         }
     }
 
@@ -148,11 +182,28 @@ impl LlmClient {
         prior: &[PriorCall],
         tools: &[FunctionTool<'_>],
     ) -> Result<u64, LlmError> {
-        if messages.iter().any(|message| !message.images.is_empty()) {
-            return Err(LlmError::ImageUnmetered);
-        }
         if self.limit.is_none() {
             return Err(LlmError::ContextClosed);
+        }
+        let urls = image_urls(messages);
+        let each = if urls.is_empty() {
+            0
+        } else {
+            self.image_cap.ok_or(LlmError::ImageUnmetered)?
+        };
+        let mut url_bytes = 0u64;
+        let mut decoded = 0u64;
+        for url in &urls {
+            let len = u64::try_from(url.len()).unwrap_or(u64::MAX);
+            url_bytes = url_bytes.saturating_add(len);
+            let one = decoded_image_bytes(url);
+            if one > crate::context_budget::MAX_ONE_IMAGE_BYTES {
+                return Err(LlmError::PayloadLimited);
+            }
+            decoded = decoded.saturating_add(one);
+        }
+        if crate::context_budget::image_transport_blocked(urls.len(), url_bytes, decoded) {
+            return Err(LlmError::PayloadLimited);
         }
         let reserve = crate::context_budget::OUTPUT_RESERVE;
         let request = responses_request(
@@ -162,11 +213,18 @@ impl LlmClient {
             prior,
             tools,
             reserve,
+            true,
         );
         let bytes = serde_json::to_vec(&request).map_err(|_| LlmError::OverBudget)?;
-        Ok(u64::try_from(bytes.len())
+        let projected = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let wire = physical_wire_len(projected, &urls)?;
+        if wire > crate::context_budget::MAX_REQUEST_BODY_BYTES {
+            return Err(LlmError::PayloadLimited);
+        }
+        let visual = u64::try_from(urls.len())
             .unwrap_or(u64::MAX)
-            .saturating_add(reserve))
+            .saturating_mul(each);
+        Ok(projected.saturating_add(visual).saturating_add(reserve))
     }
 
     pub(crate) fn request_bound(
@@ -328,6 +386,7 @@ fn responses_request<'a>(
     prior: &'a [PriorCall],
     tools: &'a [FunctionTool<'a>],
     max_output_tokens: u64,
+    project_images: bool,
 ) -> ResponsesRequest<'a> {
     let mut instructions = String::new();
     let mut input = Vec::new();
@@ -344,7 +403,7 @@ fn responses_request<'a>(
             }
             Role::User if !message.images.is_empty() => input.push(InputItem::UserParts {
                 role: "user",
-                content: user_parts(message),
+                content: user_parts(message, project_images),
             }),
             Role::User => input.push(InputItem::Message {
                 role: "user",
@@ -393,7 +452,7 @@ fn responses_request<'a>(
     }
 }
 
-fn user_parts(message: &ChatMessage) -> Vec<ContentPart<'_>> {
+fn user_parts(message: &ChatMessage, project_images: bool) -> Vec<ContentPart<'_>> {
     let mut parts = Vec::with_capacity(message.images.len() + 1);
     parts.push(ContentPart::Text {
         kind: "input_text",
@@ -402,10 +461,64 @@ fn user_parts(message: &ChatMessage) -> Vec<ContentPart<'_>> {
     for image in &message.images {
         parts.push(ContentPart::Image {
             kind: "input_image",
-            image_url: image.data_url(),
+            image_url: if project_images { "" } else { image.data_url() },
         });
     }
     parts
+}
+
+pub(crate) fn physical_wire_len(projected_len: u64, urls: &[&str]) -> Result<u64, LlmError> {
+    let mut extra = 0u64;
+    for url in urls {
+        extra = extra.saturating_add(json_string_extra(url)?);
+    }
+    Ok(projected_len.saturating_add(extra))
+}
+
+fn json_string_extra(url: &str) -> Result<u64, LlmError> {
+    let encoded = serde_json::to_string(url).map_err(|_| LlmError::OverBudget)?;
+    Ok(u64::try_from(encoded.len())
+        .unwrap_or(u64::MAX)
+        .saturating_sub(2))
+}
+
+fn image_urls(messages: &[ChatMessage]) -> Vec<&str> {
+    messages
+        .iter()
+        .flat_map(|message| message.images.iter().map(|image| image.data_url()))
+        .collect()
+}
+
+fn decoded_image_bytes(url: &str) -> u64 {
+    let raw = url.rsplit_once(',').map(|(_, data)| data).unwrap_or(url);
+    let len = raw.chars().filter(|ch| !ch.is_whitespace()).count();
+    u64::try_from(len.saturating_mul(3) / 4).unwrap_or(u64::MAX)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SentCall {
+    pub calls: i64,
+    pub usage: TokenUse,
+}
+
+impl SentCall {
+    fn none() -> Self {
+        Self {
+            calls: 0,
+            usage: TokenUse::default(),
+        }
+    }
+
+    fn unknown() -> Self {
+        Self {
+            calls: 1,
+            usage: TokenUse::default(),
+        }
+    }
+
+    fn once(usage: TokenUse) -> Self {
+        Self { calls: 1, usage }
+    }
 }
 
 fn map_reqwest(err: reqwest::Error) -> LlmError {
@@ -589,6 +702,7 @@ pub(crate) fn rendered_request(
         prior,
         tools,
         crate::context_budget::OUTPUT_RESERVE,
+        false,
     ))
     .expect("request json")
 }

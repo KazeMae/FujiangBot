@@ -58,7 +58,7 @@ java -cp tla2tools.jar tlc2.TLC -workers 1 -deadlock -config spec/tla/Session.cf
 - `ToolErr` 把阶段设成 `degraded`。阶段只有 `running`、`complete`、`degraded`。工具失败不会进入别的状态。
 - `used` 已经达到 `cap`，模型仍要调用工具时，只发生 `CapHit`。阶段变成 `degraded`，`used` 不增加。
 - 阶段变成 `degraded`、`complete` 或 `rejected` 之后保持不变。
-- `overBudget` 为真时只发生 `RejectBudget`。阶段变成 `rejected`，`modelCalls` 仍是 0。这对应上下文未确认、超预算或图片无法计量时，工具循环在发请求前返回，不把这次算成 provider 调用。
+- `overBudget` 为真时只发生 `RejectBudget`。阶段变成 `rejected`，`modelCalls` 仍是 0。这对应上下文未确认、超预算、图片没有核实上界，或图片张数和体积超限时，工具循环在发请求前返回，不把这次算成 provider 调用。已核实上界的图片仍是一次普通模型调用，不单独占状态。
 
 模型不含语言模型的传输失败，也不含响应 JSON 的解码失败。实现里这两类返回 `Err(LlmError)`，并且会计一次 provider 调用。调用方另回一句说明，不使用 `ToolReply::Degraded`。未知工具、参数不是 JSON，或 `ToolHub::invoke` 返回错误，才是 `Degraded`。
 
@@ -72,4 +72,4 @@ java -cp tla2tools.jar tlc2.TLC -workers 1 -deadlock -config spec/tla/Session.cf
 
 `StaleCannotCommit` 要求 `blocked` 或 `fresh = FALSE` 的快照阶段里 `op` 不是 `commit`。`CommitOnlyAfterCheck` 要求成功提交的前一状态是 `ready` 且 `ticket` 曾是 `checked`。这不是把 `commit` 的守卫再写一遍：提交看的是票据，不是字段是否重新相等。
 
-模型不含每小时次数，也不含真正的模型调用。改 `.agent reset`、`.agent forget` 或交接摘要时，先改 `Session.tla`，再跑 `scripts/run-tlc.sh`。
+模型不含每小时次数，也不含真正的模型调用。用量记账失败归已有的 `Fail`（`op = "fail"`，也叫 CompactFail），不另建状态：不改 `messages` 和 `summary`。昵称、名片、引用 ID 这类 metadata 快照不进入 ToolLoop 或 Session，也不改变权限状态。工作区和沙箱仍未实现，模型里没有它们。改 `.agent reset`、`.agent forget` 或交接摘要时，先改 `Session.tla`，再跑 `scripts/run-tlc.sh`。

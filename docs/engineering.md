@@ -56,7 +56,9 @@ cargo clippy -p fujiang-plugin-agent --all-targets --no-deps -- -D warnings
 
 ## 2026-11-07 上下文预算与交接摘要
 
-协调者在本机跑过下面这些命令。这一轮没有测生产环境、NapCat，也没有打真实 provider。字节上界不是精确 tokenizer 验收。工作区沙箱没有实现。图片在视觉 token 无法核定时 fail closed。交接摘要那一次模型调用的 usage 没有计入 `usage_daily`。
+协调者在本机跑过下面这些命令。这一轮没有测生产环境、NapCat，也没有打真实 provider。字节上界不是精确 tokenizer 验收。工作区沙箱没有实现。下面这组数字记录的是看图恢复和摘要用量入账之前的结果。当时未知视觉上界会拒绝图片，交接摘要也还没写入 `usage_daily`。
+
+下面保留首刀基线，不代表当前补丁验收；当前补丁以 PR 里的最新本地验收记录为准。记账失败走 Session 里已有的 `Fail`（文档里称 CompactFail），不新增状态：历史留下，用户看到忙，摘要不能提交。昵称、名片、引用 ID 的 metadata 快照不改变 ToolLoop 或 Session 的权限状态。工作区和沙箱仍未实现。
 
 在仓库根目录：
 

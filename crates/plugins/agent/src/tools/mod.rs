@@ -622,7 +622,10 @@ async fn memory_value(pass: &ToolPass<'_>, method: &str, args: &Value) -> anyhow
 
 fn provider_attempt(err: &LlmError) -> i64 {
     match err {
-        LlmError::ContextClosed | LlmError::OverBudget | LlmError::ImageUnmetered => 0,
+        LlmError::ContextClosed
+        | LlmError::OverBudget
+        | LlmError::ImageUnmetered
+        | LlmError::PayloadLimited => 0,
         _ => 1,
     }
 }

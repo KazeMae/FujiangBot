@@ -3,7 +3,7 @@ use sqlx::SqlitePool;
 use crate::client::{ChatMessage, Role};
 use crate::command::enabled_builtins;
 use crate::config::AgentConfig;
-use crate::session::{self, StoredTurn};
+use crate::session::{self, StoredTurn, UserSnap};
 use crate::speaker::{self, Untrusted};
 use crate::tools;
 
@@ -19,11 +19,33 @@ pub(crate) enum ChatPlan {
 }
 
 /// History is loaded before the slot so a failed read does not burn quota.
+#[cfg(test)]
 pub(crate) async fn plan_chat(
     pool: &SqlitePool,
     cfg: &AgentConfig,
     session_key: &str,
     user_id: i64,
+    user_text: &str,
+    now: i64,
+    key_ready: bool,
+) -> anyhow::Result<ChatPlan> {
+    plan_faced(
+        pool,
+        cfg,
+        session_key,
+        &UserSnap::bare(user_id),
+        user_text,
+        now,
+        key_ready,
+    )
+    .await
+}
+
+pub(crate) async fn plan_faced(
+    pool: &SqlitePool,
+    cfg: &AgentConfig,
+    session_key: &str,
+    snap: &UserSnap,
     user_text: &str,
     now: i64,
     key_ready: bool,
@@ -34,15 +56,15 @@ pub(crate) async fn plan_chat(
     if !key_ready {
         return Ok(ChatPlan::MissingKey);
     }
-    if cfg.is_admin(user_id) {
-        let messages = turn_messages(pool, cfg, session_key, user_id, user_text).await?;
+    if cfg.is_admin(snap.user_id) {
+        let messages = turn_messages(pool, cfg, session_key, snap, user_text).await?;
         return Ok(ChatPlan::Speak { messages });
     }
-    let messages = turn_messages(pool, cfg, session_key, user_id, user_text).await?;
+    let messages = turn_messages(pool, cfg, session_key, snap, user_text).await?;
     let slot = session::take_slot(
         pool,
         session_key,
-        user_id,
+        snap.user_id,
         cfg.rate_limit.per_user_per_hour,
         cfg.rate_limit.per_group_per_hour,
         now,
@@ -59,13 +81,13 @@ async fn turn_messages(
     pool: &SqlitePool,
     cfg: &AgentConfig,
     session_key: &str,
-    user_id: i64,
+    snap: &UserSnap,
     user_text: &str,
 ) -> anyhow::Result<Vec<ChatMessage>> {
     let mut messages = conversation(pool, cfg, session_key).await?;
     messages.push(ChatMessage {
         role: Role::User,
-        content: present_current(session_key, user_id, user_text),
+        content: present_current(session_key, snap, user_text),
         images: Vec::new(),
     });
     Ok(messages)
@@ -122,9 +144,18 @@ async fn presented_history(
         .collect())
 }
 
+fn face_of(row: &StoredTurn) -> Untrusted<'_> {
+    Untrusted {
+        nickname: row.nickname.as_deref(),
+        card: row.card.as_deref(),
+        quote: None,
+        body: &row.content,
+    }
+}
+
 fn present_stored(session_key: &str, row: StoredTurn) -> ChatMessage {
     let content = if session::is_group_key(session_key) && row.role == Role::User {
-        speaker::render_user(row.user_id, Untrusted::body(&row.content))
+        speaker::render_user(row.user_id, row.reply_id, face_of(&row))
     } else {
         row.content
     };
@@ -135,9 +166,18 @@ fn present_stored(session_key: &str, row: StoredTurn) -> ChatMessage {
     }
 }
 
-fn present_current(session_key: &str, user_id: i64, user_text: &str) -> String {
+fn present_current(session_key: &str, snap: &UserSnap, user_text: &str) -> String {
     if session::is_group_key(session_key) {
-        speaker::render_user(Some(user_id), Untrusted::body(user_text))
+        speaker::render_user(
+            Some(snap.user_id),
+            snap.reply_id,
+            Untrusted {
+                nickname: snap.nickname.as_deref(),
+                card: snap.card.as_deref(),
+                quote: None,
+                body: user_text,
+            },
+        )
     } else {
         user_text.to_string()
     }

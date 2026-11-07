@@ -36,8 +36,8 @@ use tracing::warn;
 use crate::command::{
     apply_command, enabled_builtins, log_enabled_tools, parse_agent_cmd, AgentCmd, HELP,
 };
-use crate::plan::{plan_chat, ChatPlan};
-use crate::session::{save_exchange, session_key};
+use crate::plan::{plan_faced, ChatPlan};
+use crate::session::{save_faced, session_key, snap_of};
 use crate::trigger::{claim, fit_reply, llm_reply, Claim, BUSY_REPLY};
 
 #[cfg(test)]
@@ -216,17 +216,9 @@ impl AgentPlugin {
         };
         let key = session_key(msg.source);
         let now = session::unix_now();
+        let snap = snap_of(msg);
         let prepared = LlmClient::from_config(cfg, ctx.http.clone());
-        let plan = plan_chat(
-            &pool,
-            cfg,
-            &key,
-            msg.user_id(),
-            &user_text,
-            now,
-            prepared.is_ok(),
-        )
-        .await;
+        let plan = plan_faced(&pool, cfg, &key, &snap, &user_text, now, prepared.is_ok()).await;
         let (client, messages, skipped) = match (prepared, plan) {
             (_, Ok(ChatPlan::Tip(tip))) => {
                 say(ctx, msg, tip).await;
@@ -275,14 +267,26 @@ impl AgentPlugin {
             }
         };
         let resident = tools::resident_tools(&cfg.tools, enabled_builtins(cfg));
-        let messages =
-            match compact::before_turn(&pool, cfg, &client, &key, messages, &resident).await {
-                Ok(messages) => messages,
-                Err(gate) => {
-                    say(ctx, msg, compact::user_tip(&gate)).await;
-                    return;
-                }
-            };
+        let messages = match compact::before_turn(
+            &pool,
+            cfg,
+            &client,
+            &key,
+            messages,
+            &resident,
+            compact::HostUsage {
+                user_id: msg.user_id(),
+                now,
+            },
+        )
+        .await
+        {
+            Ok(messages) => messages,
+            Err(gate) => {
+                say(ctx, msg, compact::user_tip(&gate)).await;
+                return;
+            }
+        };
         let scope = tools::MemoCallScope::from_source(msg.source, msg.user_id());
         let pass = tools::ToolPass {
             max_rounds: cfg.max_tool_rounds,
@@ -347,7 +351,7 @@ impl AgentPlugin {
         if saved.is_empty() {
             return;
         }
-        if let Err(err) = save_exchange(&pool, &key, msg.user_id(), &user_text, &saved).await {
+        if let Err(err) = save_faced(&pool, &key, &snap, &user_text, &saved).await {
             warn!(error = %err, "agent save");
         }
     }
@@ -374,6 +378,8 @@ async fn say(ctx: &BotContext, msg: &MessageEvent, text: impl Into<String>) {
 mod tests {
     use super::session;
     use super::*;
+    use crate::plan::plan_chat;
+    use crate::session::save_exchange;
     use fujiang_core::Source;
     use serde_json::json;
 

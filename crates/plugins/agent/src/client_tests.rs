@@ -172,6 +172,124 @@ fn image_wire_is_built_but_unmetered_images_are_rejected() {
         client.request_bound(&messages, &[], &[]).unwrap_err(),
         LlmError::ImageUnmetered
     ));
+    let capped = image_client(80_000, Some(1_024));
+    let short = shot("data:image/png;base64,aa");
+    let long = shot(&format!("data:image/png;base64,{}", "a".repeat(5_000)));
+    let one = capped
+        .request_bytes(std::slice::from_ref(&short), &[], &[])
+        .unwrap();
+    let big = capped
+        .request_bytes(std::slice::from_ref(&long), &[], &[])
+        .unwrap();
+    assert_eq!(one, big);
+    let mut both = short.clone();
+    both.images.push(long.images[0].clone());
+    let two = capped.request_bytes(&[both], &[], &[]).unwrap();
+    assert!(two >= one + 1_024);
+    assert!(two < one + 1_024 + 200);
+    let mut many = short;
+    for _ in 0..600 {
+        many.images
+            .push(ImagePart::new("data:image/png;base64,aa".into()));
+    }
+    assert!(matches!(
+        capped.request_bound(&[many], &[], &[]).unwrap_err(),
+        LlmError::PayloadLimited
+    ));
+    let tight = image_client(2_000, Some(1_024));
+    assert!(matches!(
+        tight.request_bound(&[long], &[], &[]).unwrap_err(),
+        LlmError::OverBudget
+    ));
+}
+
+#[test]
+fn multi_image_wire_matches_escaped_json_and_the_body_boundary() {
+    let urls = [
+        "data:image/png;base64,aa",
+        "data:image/png;base64,\"\\\u{2028}",
+        "data:image/png;base64,a+b/c=",
+    ];
+    let message = ChatMessage {
+        role: Role::User,
+        content: "看\"图".into(),
+        images: urls
+            .iter()
+            .map(|url| ImagePart::new((*url).into()))
+            .collect(),
+    };
+    let client = image_client(80_000, Some(1_024));
+    let projected = super::responses_request(
+        &client.model,
+        client.temperature,
+        std::slice::from_ref(&message),
+        &[],
+        &[],
+        crate::context_budget::OUTPUT_RESERVE,
+        true,
+    );
+    let full = super::responses_request(
+        &client.model,
+        client.temperature,
+        std::slice::from_ref(&message),
+        &[],
+        &[],
+        crate::context_budget::OUTPUT_RESERVE,
+        false,
+    );
+    let projected_len = serde_json::to_vec(&projected).unwrap().len() as u64;
+    let full_len = serde_json::to_vec(&full).unwrap().len() as u64;
+    let wire = super::physical_wire_len(projected_len, &urls).unwrap();
+    assert_eq!(wire, full_len);
+    let one = super::physical_wire_len(projected_len, &urls[..1]).unwrap();
+    let two = super::physical_wire_len(projected_len, &urls[..2]).unwrap();
+    let extra_two = super::json_string_extra(urls[1]).unwrap();
+    assert_eq!(two, one + extra_two);
+    assert!(two > one + urls[1].len() as u64);
+    let max = crate::context_budget::MAX_REQUEST_BODY_BYTES;
+    assert_eq!(super::physical_wire_len(max, &[]).unwrap(), max);
+    assert!(super::physical_wire_len(max, &["\""]).unwrap() > max);
+    let probe = shot("data:,x");
+    let estimate = client
+        .request_bytes(std::slice::from_ref(&probe), &[], &[])
+        .unwrap();
+    let projected = estimate - 1_024 - crate::context_budget::OUTPUT_RESERVE;
+    let slack = max - projected;
+    let quotes = ((slack.saturating_sub(7)) / 2) as usize;
+    let under = format!("data:{},x", "\"".repeat(quotes));
+    let over = format!("data:{},x", "\"".repeat(quotes + 1));
+    assert!((under.len() as u64) <= max);
+    assert!(super::json_string_extra(&under).unwrap() > under.len() as u64);
+    assert!(super::physical_wire_len(projected, &[under.as_str()]).unwrap() <= max);
+    assert!(super::physical_wire_len(projected, &[over.as_str()]).unwrap() > max);
+    assert!(client
+        .request_bytes(std::slice::from_ref(&shot(&under)), &[], &[])
+        .is_ok());
+    assert!(matches!(
+        client
+            .request_bytes(std::slice::from_ref(&shot(&over)), &[], &[])
+            .unwrap_err(),
+        LlmError::PayloadLimited
+    ));
+}
+
+fn shot(url: &str) -> ChatMessage {
+    ChatMessage {
+        role: Role::User,
+        content: "正文里的 image_url 不是图片字段".into(),
+        images: vec![ImagePart::new(url.into())],
+    }
+}
+
+fn image_client(limit: u64, image_cap: Option<u64>) -> LlmClient {
+    let mut cfg = AgentConfig::from_value(&json!({
+        "model": "local-model",
+        "context_budget": limit,
+        "model_context_limit": limit
+    }));
+    cfg.base_url = "http://127.0.0.1:9".into();
+    cfg.image_token_upper_bound = image_cap;
+    LlmClient::new(&cfg, reqwest::Client::new(), "k".into())
 }
 
 #[test]

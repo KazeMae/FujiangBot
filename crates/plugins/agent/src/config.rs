@@ -32,6 +32,7 @@ pub struct AgentConfig {
     pub max_history_turns: u32,
     pub context_budget: u64,
     pub model_context_limit: Option<u64>,
+    pub image_token_upper_bound: Option<u64>,
     pub memory_enabled: bool,
     /// Body of the `default` persona.
     pub system_prompt: String,
@@ -75,6 +76,7 @@ impl AgentConfig {
             max_history_turns: u32_field(v, "max_history_turns", DEFAULT_MAX_HISTORY_TURNS),
             context_budget: context_budget_from(v),
             model_context_limit: model_context_limit_from(v),
+            image_token_upper_bound: positive_limit(v, "image_token_upper_bound"),
             memory_enabled: memory_enabled_from(v),
             system_prompt,
             personas,
@@ -182,9 +184,11 @@ fn context_budget_from(v: &Value) -> u64 {
 }
 
 fn model_context_limit_from(v: &Value) -> Option<u64> {
-    v.get("model_context_limit")
-        .and_then(Value::as_u64)
-        .filter(|n| *n > 0)
+    positive_limit(v, "model_context_limit")
+}
+
+fn positive_limit(v: &Value, key: &str) -> Option<u64> {
+    v.get(key).and_then(Value::as_u64).filter(|n| *n > 0)
 }
 
 fn u32_field(v: &Value, key: &str, default: u32) -> u32 {
@@ -322,6 +326,7 @@ mod tests {
         assert_eq!(cfg.max_history_turns, 20);
         assert_eq!(cfg.context_budget, 500_000);
         assert_eq!(cfg.model_context_limit, None);
+        assert_eq!(cfg.image_token_upper_bound, None);
         assert!(cfg.memory_enabled);
         assert_eq!(cfg.system_prompt, "你是福酱，西南科技大学 ACM 群助手。");
         assert!(cfg.personas.is_empty());
