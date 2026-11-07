@@ -254,6 +254,7 @@ fn push_fixed_args_block_fd_unshare_without_as_pid_1() {
         "CAP_CHOWN",
         "CAP_DAC_OVERRIDE",
         "CAP_FOWNER",
+        "CAP_FSETID",
         "CAP_SETUID",
         "CAP_SETGID",
     ] {
@@ -261,6 +262,22 @@ fn push_fixed_args_block_fd_unshare_without_as_pid_1() {
             .windows(2)
             .any(|pair| pair[0] == "--cap-add" && pair[1] == cap));
     }
+    let added: Vec<&str> = args
+        .windows(2)
+        .filter(|pair| pair[0] == "--cap-add")
+        .map(|pair| pair[1].as_str())
+        .collect();
+    assert_eq!(
+        added,
+        [
+            "CAP_CHOWN",
+            "CAP_DAC_OVERRIDE",
+            "CAP_FOWNER",
+            "CAP_FSETID",
+            "CAP_SETUID",
+            "CAP_SETGID"
+        ]
+    );
     assert!(args.iter().all(|arg| arg != "--unshare-user"));
     assert!(args
         .windows(2)

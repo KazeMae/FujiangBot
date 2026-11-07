@@ -364,6 +364,8 @@ fn push_fixed_args(
         .arg("--cap-add")
         .arg("CAP_FOWNER")
         .arg("--cap-add")
+        .arg("CAP_FSETID")
+        .arg("--cap-add")
         .arg("CAP_SETUID")
         .arg("--cap-add")
         .arg("CAP_SETGID")

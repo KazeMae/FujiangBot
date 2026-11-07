@@ -400,7 +400,10 @@ fn run_pinned(
     if status == 0 {
         Ok(())
     } else {
-        Err(invalid("helper"))
+        Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("helper exit {status}"),
+        ))
     }
 }
 
@@ -754,14 +757,14 @@ mod tests {
 
     #[test]
     fn helper_timeout_kills_the_process_group() {
-        let fd = open_public_tool(c"/bin/sleep");
+        let fd = open_public_tool(c"/usr/bin/python3");
         let started = Instant::now();
         let err = run_pinned(
             &fd,
             None,
-            "sleep",
-            "30",
-            &[],
+            "python3",
+            "-I",
+            &["-c", "import time; time.sleep(30)"],
             Duration::from_millis(400),
             true,
         )
@@ -772,10 +775,19 @@ mod tests {
 
     #[test]
     fn helper_failure_is_reaped() {
-        let fd = open_public_tool(c"/bin/false");
-        let err =
-            run_pinned(&fd, None, "false", "1", &[], Duration::from_secs(2), true).unwrap_err();
-        assert!(err.to_string().contains("helper"), "{err}");
+        let fd = open_public_tool(c"/usr/bin/python3");
+        let err = run_pinned(
+            &fd,
+            None,
+            "python3",
+            "-I",
+            &["-c", "raise SystemExit(23)"],
+            Duration::from_secs(2),
+            true,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("exit 23"), "{err}");
+        assert!(!err.to_string().contains("timeout"), "{err}");
     }
 
     #[test]
