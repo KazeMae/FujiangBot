@@ -180,7 +180,9 @@ async fn unavailable_route_does_not_run_the_script() {
     assert_eq!(closed["error"], RUNNER_UNAVAILABLE);
     assert_eq!(closed["bound"], "当前群 20");
     assert!(!sentinel.exists());
-    for key in ["path", "cwd", "actor", "identity", "user_id", "group_id"] {
+    for key in [
+        "path", "cwd", "actor", "identity", "user_id", "group_id", "rootfs", "owner",
+    ] {
         let mut args = serde_json::Map::new();
         args.insert("script".into(), json!("true"));
         args.insert(key.into(), json!("x"));

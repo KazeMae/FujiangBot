@@ -18,13 +18,13 @@ async fn resolved_owner(source: Source, actor: i64) -> crate::workspace::Workspa
 #[tokio::test]
 async fn production_authority_never_reaches_the_runner() {
     assert!(!production_available());
-    assert!(UnacceptedRootfs.acquire().is_err());
+    assert!(ProductionSupply.acquire().is_err());
     let owner = resolved_owner(Source::Friend { id: 1 }, 1).await;
     let mut called = false;
     let err = execute_with(
         owner,
         crate::workspace_runner::Payload::Sh("true".to_string()),
-        &UnacceptedRootfs,
+        &ProductionSupply,
         |_, _, _| {
             called = true;
             Ok(crate::workspace_runner::RunResult {

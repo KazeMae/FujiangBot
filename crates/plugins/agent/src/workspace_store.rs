@@ -1,7 +1,7 @@
 use std::ffi::CString;
 use std::io::{self, ErrorKind};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
@@ -249,11 +249,25 @@ fn reject_lock_stat(st: &libc::stat) -> io::Result<()> {
     Ok(())
 }
 
+#[path = "workspace_tree.rs"]
+mod tree;
+
+fn tree_digest(root: RawFd) -> io::Result<[u8; 32]> {
+    tree::digest(root)
+}
+
 #[path = "workspace_seed.rs"]
 mod workspace_seed;
 
 #[cfg(test)]
 #[path = "workspace_seed_tests.rs"]
 mod workspace_seed_tests;
+
+#[path = "workspace_acceptance.rs"]
+mod acceptance;
+
+pub(crate) fn acquire_accepted(trust: &Path) -> io::Result<(PathBuf, VerifiedBase)> {
+    acceptance::acquire(trust)
+}
 
 pub(crate) use workspace_seed::VerifiedBase;

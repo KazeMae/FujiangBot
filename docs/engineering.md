@@ -130,16 +130,18 @@ scripts/check-file-length.sh
 git diff --check
 ```
 
-结果（日志在 `/workspace/agent-tools/fujiang-local-20261107/`）：
+上面命令块是已推基线 `92a7b15` 的历史结果，不是后面的提交前本地验收记录：
 
-- `owner-clippy-final.log`：上述 clippy 通过。
-- fmt `--check` 通过。
-- `owner-workspace-final.log`：`cargo test --workspace --offline` 261 通过，其中 agent 179；0 失败，0 ignored。
-- `owner-coverage-final.log`：`TOTAL` 行覆盖 90.76%（9299 行，859 未覆盖）。同一行的 88.55% 是 region，不是行覆盖。
-- `owner-python-bundle-final.log`：24 通过。`owner-python-gpgv-final.log`：14 条因缺 gpgv 明确 SKIP。`owner-python-rootfs-final.log`：旧 stub 11 个控制流通过。SKIP 不是验签通过，stub 不是官方工件。
-- `owner-tlc-acceptance.log`：六模型无错误。distinct states：ToolLoop 54、Session 688、Workspace 512、OwnerLayer 346、Runner 17、Bundle 16。
-- 文件长度检查与 `git diff --check` 通过。
+- 当时 clippy 与 fmt 通过。
+- 当时 `cargo test --workspace --offline` 261 通过，其中 agent 179。
+- 当时行覆盖 90.76%（9299 行，859 未覆盖）；88.55% 是 region。
+- 当时 bundle 24、gpgv 14 SKIP、stub 11。
+- 当时六模型 TLC：54、688、512、346、17、16。
 
-范围：真实 SQLite 上的 QQ 选择，以及 OS 复制、持久、并发、硬链接、符号链接、metadata、FIFO、清理和界。全局节点预算在预取分配前计入，含清理。ToolLoop 的模拟 LLM 与成功路径的 runner 回调是模拟。`owner-agent-second.log` 里，合成不完整 owner root 上原生 bwrap 对 `/bin/bash` 和 `/usr/bin/python3` 都是 exit 1、`execvp` No such file。这不是成功的 shell、Python 或 Ubuntu。
+该基线全部 CI 含真实 gpgv 于 2026-11-07 19:25:36 Asia/Shanghai 通过，run `42367869558`。更早 `32427e4` 的 run `42364745250` 与上文 248 项都只属于当时。
 
-没有可用的生产已接受 base，provider 未因此打开。模型、配置、环境都不能启用。没有官方 rootfs、apt、网络、挂载或 FD 端到端。没有 NapCat 生产调用，没有从 CI 取回工件，没有宿主根绑定，没有 DNS 重试。`UnacceptedRootfs` 恒拒绝。`VerifiedBase` 只有 `cfg(test)` 工厂。运行时没有作为 Ubuntu 交付。
+### 提交前本地验收记录
+
+同一类命令再次独立通过：fmt；严格 agent clippy（全部 target、无依赖、offline、`-D warnings`）；`cargo test --workspace --offline` 278（agent 196），0 失败、0 ignored；行覆盖 89.80%（10100 行，1030 未覆盖），region 87.39% 不是行覆盖；acceptance 模块行覆盖 77.80%，树模块 86.24%。Python bundle 27（含黄金用例），真实 gpgv 14 条 SKIP，stub 11。TLC 仍是 54/688/512/346/17/16。验证器脚本 1000 行。文件长度与 diff check 通过。CI 以 PR 62 当前 head 的检查页为准。下文只记录已核验的 `92a7b15` 基线 CI。`FUJIANG_WORKSPACE_ACCEPTANCE` 未设置，没有真实批准文件。
+
+生产供给接线已实现，默认关闭。历史 identity 里的 `unaccepted` 不是管理员批准。不是生产已接受，也不是全部要求完成。仍缺的代码：按 owner 的隔离出口/代理；apt 的 mode、UID/GID、capability 与维护者执行策略；3 秒壁钟和 64MiB `FSIZE` 的 apt 策略；聚合 cgroup/pids/内存/磁盘/inode 配额；启动崩溃后的 `r*` / `live-*` 孤儿租约回收。正常失败和 Drop 会清理本次租约。来源目录 FD 不是不可变存储；发布前比对的是实际克隆摘要。runner 清理夹具通过，不是全部 OS 失败的强证明。QQ 授权与 owner 持久是真测试；工具路由的终端成功是模拟。在线 QQ 与完整 bash/Python/Ubuntu/apt 未验证。中文 PR 正文 403 已终止。细节见 [workspace-rootfs](workspace-rootfs.md)。

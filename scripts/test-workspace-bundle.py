@@ -1,5 +1,6 @@
 import gzip
 import hashlib
+import shutil
 import importlib.util
 import io
 import os
@@ -568,6 +569,102 @@ class UnpackTests(unittest.TestCase):
         ):
             with self.assertRaises((V.BundleError, OSError)):
                 _unpack(_OK)
+
+
+_GOLDEN = "62cd8e8eb2f1b715820a4dddff98fd471429dd7a7e16ba471c47b0a732e66f59"
+
+
+def _root(path):
+    return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+
+
+class TreeDigestTests(unittest.TestCase):
+    def _golden(self, payload=b"data"):
+        raw = tempfile.mkdtemp(prefix="tree-digest-")
+        self.addCleanup(shutil.rmtree, raw)
+        os.chmod(raw, 0o700)
+        os.mkdir(os.path.join(raw, "e"), 0o700)
+        fd = os.open(os.path.join(raw, "e", "payload"), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.write(fd, payload)
+        os.close(fd)
+        os.link(os.path.join(raw, "e", "payload"), os.path.join(raw, "e", "alias"))
+        os.symlink("/e/payload", os.path.join(raw, "link"))
+        return raw
+
+    def test_canonical_golden_and_repeat_fd(self):
+        root = self._golden()
+        fd = _root(root)
+        try:
+            first = V.tree_sha256(fd)
+            second = V.tree_sha256(fd)
+        finally:
+            os.close(fd)
+        self.assertEqual(first, _GOLDEN)
+        self.assertEqual(second, first)
+        self.assertEqual(os.lstat(os.path.join(root, "e", "alias")).st_ino, os.lstat(os.path.join(root, "e", "payload")).st_ino)
+        self.assertEqual(os.readlink(os.path.join(root, "link")), "/e/payload")
+
+    def test_same_size_change(self):
+        root = self._golden()
+        fd = _root(root)
+        try:
+            before = V.tree_sha256(fd)
+            w = os.open(os.path.join(root, "e", "payload"), os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            os.write(w, b"eta!")
+            os.close(w)
+            after = V.tree_sha256(fd)
+        finally:
+            os.close(fd)
+        self.assertEqual(before, _GOLDEN)
+        self.assertEqual(len(b"eta!"), 4)
+        self.assertNotEqual(after, before)
+
+    def test_negative_edges(self):
+        root = self._golden()
+        outside = tempfile.mkdtemp(prefix="tree-out-")
+        self.addCleanup(shutil.rmtree, outside)
+        os.chmod(outside, 0o700)
+        ext = os.open(os.path.join(outside, "ext"), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.write(ext, b"z")
+        os.close(ext)
+        os.link(os.path.join(outside, "ext"), os.path.join(root, "extlink"))
+        fd = _root(root)
+        try:
+            with self.assertRaises(V.BundleError):
+                V.tree_sha256(fd)
+        finally:
+            os.close(fd)
+        os.unlink(os.path.join(root, "extlink"))
+        os.symlink("..", os.path.join(root, "up"))
+        fd = _root(root)
+        try:
+            with self.assertRaises(V.BundleError):
+                V.tree_sha256(fd)
+        finally:
+            os.close(fd)
+        os.unlink(os.path.join(root, "up"))
+        os.symlink("somewhere", os.path.join(root, "proc"))
+        fd = _root(root)
+        try:
+            with self.assertRaises(V.BundleError):
+                V.tree_sha256(fd)
+        finally:
+            os.close(fd)
+        os.unlink(os.path.join(root, "proc"))
+        os.mkfifo(os.path.join(root, "pipe"), 0o600)
+        fd = _root(root)
+        try:
+            with self.assertRaises(V.BundleError):
+                V.tree_sha256(fd)
+        finally:
+            os.close(fd)
+        os.unlink(os.path.join(root, "pipe"))
+        fd = _root(root)
+        try:
+            with self.assertRaises(V.BundleError):
+                V.tree_sha256(fd, nodes=1)
+        finally:
+            os.close(fd)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

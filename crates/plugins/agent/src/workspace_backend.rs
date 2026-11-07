@@ -6,7 +6,7 @@ const RUNNER_UNAVAILABLE: &str = "accepted official rootfs unavailable";
 pub(crate) use crate::workspace_store::VerifiedBase;
 
 pub(crate) fn production_available() -> bool {
-    UnacceptedRootfs.acquire().is_ok()
+    ProductionSupply.acquire().is_ok()
 }
 
 pub fn execute(
@@ -16,7 +16,7 @@ pub fn execute(
     execute_with(
         owner,
         payload,
-        &UnacceptedRootfs,
+        &ProductionSupply,
         crate::workspace_runner::run,
     )
 }
@@ -34,6 +34,7 @@ pub(crate) fn execute_with(
     let owner = map_owner(owner)?;
     let (host, base) = authority.acquire()?;
     let store = crate::workspace_store::WorkspaceStore::open(&host, owner, &base)?;
+    drop(base);
     let result = run_callback(store.rootfs(), store.as_fd(), payload);
     drop(store);
     result
@@ -60,11 +61,19 @@ pub(crate) trait RootfsAuthority {
     fn acquire(&self) -> anyhow::Result<(PathBuf, VerifiedBase)>;
 }
 
-struct UnacceptedRootfs;
+struct ProductionSupply;
 
-impl RootfsAuthority for UnacceptedRootfs {
+impl RootfsAuthority for ProductionSupply {
     fn acquire(&self) -> anyhow::Result<(PathBuf, VerifiedBase)> {
-        Err(anyhow::anyhow!(RUNNER_UNAVAILABLE))
+        // Model payloads never reach here. Only an administrator process env can
+        // name the trust directory, and a present path is still not acceptance.
+        let raw = std::env::var_os("FUJIANG_WORKSPACE_ACCEPTANCE")
+            .ok_or_else(|| anyhow::anyhow!(RUNNER_UNAVAILABLE))?;
+        if raw.is_empty() {
+            return Err(anyhow::anyhow!(RUNNER_UNAVAILABLE));
+        }
+        crate::workspace_store::acquire_accepted(std::path::Path::new(&raw))
+            .map_err(|err| anyhow::anyhow!("{RUNNER_UNAVAILABLE}: {err}"))
     }
 }
 

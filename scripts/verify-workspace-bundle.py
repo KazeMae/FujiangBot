@@ -1,20 +1,4 @@
-import datetime
-import fcntl
-import gzip
-import hashlib
-import json
-import os
-import re
-import resource
-import shutil
-import signal
-import stat
-import subprocess
-import sys
-import tarfile
-import tempfile
-import time
-
+import datetime, fcntl, gzip, hashlib, json, os, re, resource, shutil, signal, stat, subprocess, sys, tarfile, tempfile, time
 MAX_EXPANDED = 1024 * 1024 * 1024
 MAX_RATIO = 200
 MAX_ENTRIES = 50000
@@ -28,16 +12,11 @@ _PAX_TIME_RE = re.compile(rb"-?[0-9]{1,20}(\.[0-9]{1,9})?")
 _LINK_TYPES = (tarfile.SYMTYPE, tarfile.LNKTYPE)
 _DIR_INFO = tarfile.TarInfo("d")
 _DIR_INFO.type = tarfile.DIRTYPE
-
 OFFICIAL_PRIMARY = "843938DF228D22F7B3742BC0D94AA3F0EFE21092"
-
 class BundleError(Exception):
     pass
-
 MAX_LINK_HOPS = 40
 MAX_LINK_STEPS = 1000000
-
-
 def _symlink_check(path, syms, files, budget):
     pending = list(path)
     index = 0
@@ -87,8 +66,6 @@ def _symlink_check(path, syms, files, budget):
             index = 0
         elif key in files and index < len(pending):
             raise BundleError()
-
-
 def _hard_target(path, hard, regular, syms, budget):
     current = path
     hops = 0
@@ -126,8 +103,6 @@ def _hard_target(path, hard, regular, syms, budget):
             current = canon
             continue
         raise BundleError()
-
-
 def _link_dir(root_fd, parts):
     fd = os.dup(root_fd)
     try:
@@ -139,8 +114,6 @@ def _link_dir(root_fd, parts):
     except BaseException:
         os.close(fd)
         raise
-
-
 def _tar_links(root_fd, links, created, regular):
     syms = {p: t for p, (kind, t) in links.items() if kind == tarfile.SYMTYPE}
     hard = {p: t for p, (kind, t) in links.items() if kind == tarfile.LNKTYPE}
@@ -180,8 +153,6 @@ def _tar_links(root_fd, links, created, regular):
             os.symlink(raw, path[-1], dir_fd=fd)
         finally:
             os.close(fd)
-
-
 def _pax_times(data):
     if type(data) is not bytes or len(data) < 1 or len(data) > 65536:
         raise BundleError()
@@ -210,8 +181,6 @@ def _pax_times(data):
             raise BundleError()
         seen.add(key)
         i = end
-
-
 def _tar_path(member):
     kind = member.type
     if kind not in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE) + _LINK_TYPES:
@@ -250,7 +219,6 @@ def _tar_path(member):
         if len(part) > 255 or part in (".", "..") or _COMP_RE.fullmatch(part) is None:
             raise BundleError()
     return tuple(parts)
-
 def _tar_dir(parent_fd, name, path, created):
     try:
         return os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
@@ -260,7 +228,6 @@ def _tar_dir(parent_fd, name, path, created):
         os.mkdir(name, 0o700, dir_fd=parent_fd)
         created.add(path)
         return os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
-
 def _tar_write(root_fd, member, parts, created, read):
     if parts == ():
         return
@@ -305,7 +272,6 @@ def _tar_write(root_fd, member, parts, created, read):
                 raise BundleError()
     finally:
         os.close(fd)
-
 def _unpack_stream(archive_fd, root_fd, compressed_size):
     raw = os.fdopen(os.dup(archive_fd), "rb")
     try:
@@ -313,7 +279,6 @@ def _unpack_stream(archive_fd, root_fd, compressed_size):
         try:
             expanded = 0
             limit = compressed_size * MAX_RATIO
-
             def read(n):
                 nonlocal expanded
                 if type(n) is not int or n < 0 or n > 65536:
@@ -323,7 +288,6 @@ def _unpack_stream(archive_fd, root_fd, compressed_size):
                 if expanded > MAX_EXPANDED or expanded > limit:
                     raise BundleError()
                 return chunk
-
             seen = set()
             created = set()
             regular = set()
@@ -391,7 +355,6 @@ def _unpack_stream(archive_fd, root_fd, compressed_size):
             gz.close()
     finally:
         raw.close()
-
 def parse_manifest(data: bytes):
     if len(data) > 1048576:
         raise BundleError()
@@ -421,7 +384,6 @@ def parse_manifest(data: bytes):
     if len(candidates) != 1:
         raise BundleError()
     return candidates[0]
-
 def parse_status(data: bytes, returncode: int) -> str:
     if returncode != 0:
         raise BundleError()
@@ -482,7 +444,6 @@ def parse_status(data: bytes, returncode: int) -> str:
     if found != 1:
         raise BundleError()
     return OFFICIAL_PRIMARY
-
 def open_dir(path):
     if type(path) is not str or path == "" or path[0] != "/":
         raise BundleError()
@@ -509,7 +470,6 @@ def open_dir(path):
         os.close(fd)
         fd = nxt
     return fd
-
 def copy_file(source_fd, name, dest_fd, limit):
     if type(name) is not str or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name) is None or name == "." or name == "..":
         raise BundleError()
@@ -557,7 +517,6 @@ def copy_file(source_fd, name, dest_fd, limit):
             os.close(src)
         if dst is not None:
             os.close(dst)
-
 def read_private(dest_fd, name, limit):
     if type(name) is not str or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name) is None or name == "." or name == "..":
         raise BundleError()
@@ -586,7 +545,6 @@ def read_private(dest_fd, name, limit):
     finally:
         if fd is not None:
             os.close(fd)
-
 def verify_signature(snapshot_fd):
     if not os.path.isfile("/usr/bin/gpgv") or not os.access("/usr/bin/gpgv", os.X_OK):
         raise BundleError("gpgv unavailable")
@@ -595,14 +553,12 @@ def verify_signature(snapshot_fd):
         os.mkdir("gnupg", 0o700, dir_fd=snapshot_fd)
         root = "/proc/self/fd/%d" % snapshot_fd
         out = tempfile.TemporaryFile(dir=root + "/gnupg")
-
         def limits():
             resource.setrlimit(resource.RLIMIT_CPU, (10, 11))
             resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
             resource.setrlimit(resource.RLIMIT_FSIZE, (1048576, 1048576))
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
             resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
-
         proc = subprocess.run(
             [
                 "/usr/bin/gpgv",
@@ -637,7 +593,6 @@ def verify_signature(snapshot_fd):
         if out is not None:
             out.close()
     return parse_status(data, proc.returncode)
-
 def _sealed_archive(snapshot_fd, name, digest, compressed_size):
     cap = 512 * 1024 * 1024
     if type(compressed_size) is not int or compressed_size <= 0 or compressed_size > cap:
@@ -694,7 +649,6 @@ def _sealed_archive(snapshot_fd, name, digest, compressed_size):
             os.close(src)
         if dst is not None:
             os.close(dst)
-
 def _unpack_verified(snapshot_fd, name, digest, compressed_size):
     archive_fd = None
     stage_fd = None
@@ -703,6 +657,7 @@ def _unpack_verified(snapshot_fd, name, digest, compressed_size):
     reaped = False
     status = None
     timed_out = False
+    rd = wr = None
     soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     if soft != resource.RLIM_INFINITY and soft < MAX_PATH_COMPONENTS + 128:
         raise BundleError()
@@ -717,19 +672,30 @@ def _unpack_verified(snapshot_fd, name, digest, compressed_size):
         os.mkdir(".rootfs-partial", 0o700, dir_fd=snapshot_fd)
         made = True
         stage_fd = os.open(".rootfs-partial", _DIR_FLAGS, dir_fd=snapshot_fd)
+        rd, wr = os.pipe()
         pid = os.fork()
         if pid == 0:
             try:
-                resource.setrlimit(resource.RLIMIT_CPU, (10, 11))
-                resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
-                resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-                resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
-                resource.setrlimit(resource.RLIMIT_FSIZE, (256 * 1024 * 1024, 256 * 1024 * 1024))
+                os.close(rd)
+                for lim, pair in (
+                    (resource.RLIMIT_CPU, (10, 11)),
+                    (resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024)),
+                    (resource.RLIMIT_CORE, (0, 0)),
+                    (resource.RLIMIT_NOFILE, (64, 64)),
+                    (resource.RLIMIT_FSIZE, (256 * 1024 * 1024, 256 * 1024 * 1024)),
+                ):
+                    resource.setrlimit(lim, pair)
                 os.umask(0o077)
                 _unpack_stream(archive_fd, stage_fd, compressed_size)
+                hx = tree_sha256(stage_fd).encode("ascii")
+                if len(hx) != 64 or os.write(wr, hx) != 64:
+                    os._exit(1)
+                os.close(wr)
             except BaseException:
                 os._exit(1)
             os._exit(0)
+        os.close(wr)
+        wr = None
         deadline = time.monotonic() + UNPACK_WALL_SECONDS
         while True:
             got, status = os.waitpid(pid, os.WNOHANG)
@@ -745,8 +711,12 @@ def _unpack_verified(snapshot_fd, name, digest, compressed_size):
             time.sleep(0.05)
         if timed_out or not reaped or not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
             raise BundleError()
+        blob = os.read(rd, 64)
+        if os.read(rd, 1) or len(blob) != 64 or any(c not in b"0123456789abcdef" for c in blob):
+            raise BundleError()
         os.rename(".rootfs-partial", "rootfs", src_dir_fd=snapshot_fd, dst_dir_fd=snapshot_fd)
         made = False
+        return blob.decode("ascii")
     finally:
         try:
             if pid is not None and not reaped:
@@ -767,9 +737,125 @@ def _unpack_verified(snapshot_fd, name, digest, compressed_size):
                     if archive_fd is not None:
                         os.close(archive_fd)
                 finally:
+                    if rd is not None:
+                        os.close(rd)
+                    if wr is not None:
+                        os.close(wr)
                     if made:
                         shutil.rmtree(".rootfs-partial", dir_fd=snapshot_fd)
-
+_TREE_POLICY = "workspace-rootfs-runtime-v1"
+_MOUNTS = (b"proc", b"dev", b"work", b"tmp", b"run", b"sys")
+_OD = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+_OF = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+def _bad(buf, slash=False):
+    return not buf or any(x < 32 or x == 127 or x == 92 or (slash and x == 47) for x in buf)
+def _esc(depth, tgt):
+    d = depth
+    if tgt[:1] == b"/":
+        return False
+    for part in tgt.split(b"/"):
+        if part in (b"", b"."):
+            continue
+        if part == b".." and d == 0:
+            return True
+        d += -1 if part == b".." else 1
+    return False
+def _frame(kind, path, extra=b""):
+    return bytes((kind,)) + len(path).to_bytes(4, "big") + path + extra
+def _names(fd, left):
+    scan = os.open(".", _OD, dir_fd=fd)
+    try:
+        out = []
+        with os.scandir(scan) as it:
+            for ent in it:
+                name = os.fsencode(ent.name)
+                if left <= 0 or _bad(name, True):
+                    raise BundleError()
+                left -= 1
+                out.append(name)
+        out.sort()
+        return out, left
+    finally:
+        os.close(scan)
+def _file_sha(parent, name, size):
+    fd = os.open(name, _OF, dir_fd=parent)
+    try:
+        pre, digest, left = os.fstat(fd), hashlib.sha256(), size
+        if not stat.S_ISREG(pre.st_mode) or pre.st_size != size:
+            raise BundleError()
+        while left:
+            block = os.read(fd, 65536 if left > 65536 else left)
+            if not block:
+                raise BundleError()
+            digest.update(block); left -= len(block)
+        post = None if os.read(fd, 1) else os.fstat(fd)
+        if post is None or (post.st_ino, post.st_size) != (pre.st_ino, pre.st_size):
+            raise BundleError()
+        return digest.digest()
+    finally:
+        os.close(fd)
+def _walk(fd, prefix, depth, left, total, files, rows):
+    if depth > 64:
+        raise BundleError()
+    names, left = _names(fd, left)
+    if depth == 64 and names:
+        raise BundleError()
+    for name in names:
+        path = name if depth == 0 else prefix + b"/" + name
+        st = os.lstat(name, dir_fd=fd)
+        mode = st.st_mode
+        bad = len(path) > 4096 or st.st_uid != os.geteuid()
+        if bad or (depth == 0 and name in _MOUNTS and not stat.S_ISDIR(mode)):
+            raise BundleError()
+        if stat.S_ISLNK(mode):
+            tgt = os.fsencode(os.readlink(name, dir_fd=fd))
+            if _bad(tgt) or len(tgt) > 4096 or _esc(depth, tgt):
+                raise BundleError()
+            rows.append(_frame(ord("s"), path, len(tgt).to_bytes(4, "big") + tgt))
+            continue
+        if mode & (stat.S_IWGRP | stat.S_IWOTH | stat.S_ISUID | stat.S_ISGID):
+            raise BundleError()
+        if stat.S_ISDIR(mode):
+            if mode & 0o777 not in (0o700, 0o755):
+                raise BundleError()
+            rows.append(_frame(ord("d"), path))
+            child = os.open(name, _OD, dir_fd=fd)
+            try:
+                left, total = _walk(child, path, depth + 1, left, total, files, rows)
+            finally:
+                os.close(child)
+            continue
+        perm, size = mode & 0o777, st.st_size
+        if not stat.S_ISREG(mode) or perm not in (0o600, 0o700) or size > 256 << 20:
+            raise BundleError()
+        key = (st.st_dev, st.st_ino)
+        got = files.get(key)
+        if got is None:
+            if total > (1 << 30) - size:
+                raise BundleError()
+            total += size
+            files[key] = [int(perm == 0o700), size, _file_sha(fd, name, size), st.st_nlink, [path]]
+        elif (got[1], got[3]) != (size, st.st_nlink):
+            raise BundleError()
+        else:
+            got[4].append(path)
+    return left, total
+def tree_sha256(root_fd, nodes=50000):
+    rows, files = [], {}
+    _walk(root_fd, b"", 0, nodes, 0, files, rows)
+    for exe, size, sha, nlink, aliases in files.values():
+        aliases.sort()
+        if len(aliases) != nlink:
+            raise BundleError()
+        first = aliases[0]
+        extra = len(first).to_bytes(4, "big") + first
+        rows.append(_frame(ord("f"), first, bytes((int(exe),)) + int(size).to_bytes(8, "big") + sha))
+        rows.extend(_frame(ord("h"), alias, extra) for alias in aliases[1:])
+    rows.sort(key=lambda rec: rec[5:5 + int.from_bytes(rec[1:5], "big")])
+    digest = hashlib.sha256(b"workspace-rootfs-runtime-v1\0")
+    for rec in rows:
+        digest.update(rec)
+    return digest.hexdigest()
 def verify_bundle(source, target, unpack=False):
     if os.geteuid() == 0:
         raise BundleError()
@@ -829,8 +915,7 @@ def verify_bundle(source, target, unpack=False):
         got, total = copy_file(source_fd, archive_name, snapshot_fd, 536870912)
         if got != digest:
             raise BundleError()
-        if unpack:
-            _unpack_verified(snapshot_fd, archive_name, digest, total)
+        tree_hex = _unpack_verified(snapshot_fd, archive_name, digest, total) if unpack else None
         receipt = {
             "archive": archive_name,
             "sha256": got,
@@ -839,6 +924,9 @@ def verify_bundle(source, target, unpack=False):
             "extracted": bool(unpack),
             "execution_accepted": False,
         }
+        if unpack:
+            receipt["tree_sha256"] = tree_hex
+            receipt["tree_policy"] = _TREE_POLICY
         payload = (json.dumps(receipt, separators=(",", ":")) + "\n").encode("ascii")
         rfd = None
         try:
@@ -876,7 +964,6 @@ def verify_bundle(source, target, unpack=False):
             finally:
                 if source_fd is not None:
                     os.close(source_fd)
-
 def main():
     unpack = False
     if len(sys.argv) == 4 and sys.argv[1] == "--unpack":
@@ -909,6 +996,5 @@ def main():
             pass
         return 1
     return 0
-
 if __name__ == "__main__":
     sys.exit(main())

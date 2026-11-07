@@ -297,6 +297,13 @@ class WorkspaceBundleGpgvTests(unittest.TestCase):
         self.assertEqual(rec["primary"], self.alpha)
         self.assertIs(rec["extracted"], True)
         self.assertIs(rec["execution_accepted"], False)
+        self.assertEqual(rec["tree_policy"], "workspace-rootfs-runtime-v1")
+        root_fd = os.open(os.path.join(self.target, "rootfs"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            self.assertEqual(rec["tree_sha256"], verify.tree_sha256(root_fd))
+        finally:
+            os.close(root_fd)
+        self.assertFalse(os.path.lexists(os.path.join(self.target, "acceptance.json")))
         proof_path = os.path.join(self.target, "rootfs", "etc", "proof")
         with open(proof_path, "rb") as fh:
             self.assertEqual(fh.read(), proof)
@@ -396,6 +403,12 @@ class WorkspaceBundleGpgvTests(unittest.TestCase):
         rec = verify.verify_bundle(self.source, self.target, unpack=True)
         self.assertIs(rec["extracted"], True)
         self.assertIs(rec["execution_accepted"], False)
+        self.assertEqual(rec["tree_policy"], "workspace-rootfs-runtime-v1")
+        root_fd = os.open(os.path.join(self.target, "rootfs"), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            self.assertEqual(rec["tree_sha256"], verify.tree_sha256(root_fd))
+        finally:
+            os.close(root_fd)
         base = os.path.join(self.target, "rootfs")
         proof_path = os.path.join(base, "etc", "proof")
         tool_path = os.path.join(base, "usr", "bin", "tool")

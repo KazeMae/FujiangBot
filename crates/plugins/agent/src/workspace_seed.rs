@@ -13,9 +13,25 @@ mod copy;
 
 const MOUNTS: [&str; 6] = ["proc", "dev", "work", "tmp", "run", "sys"];
 
+struct LiveCleanup {
+    parent: OwnedFd,
+    name: CString,
+}
+
 pub(crate) struct VerifiedBase {
     root: OwnedFd,
     identity: [u8; 32],
+    live: Option<LiveCleanup>,
+    /// `fixture` skips the consumer digest. Production seals never set this.
+    check_tree: bool,
+}
+
+impl Drop for VerifiedBase {
+    fn drop(&mut self) {
+        if let Some(live) = self.live.take() {
+            let _ = copy::remove_partial(live.parent.as_raw_fd(), &live.name);
+        }
+    }
 }
 
 impl VerifiedBase {
@@ -24,8 +40,51 @@ impl VerifiedBase {
         Ok(Self {
             root: open_host(root)?,
             identity,
+            live: None,
+            check_tree: false,
         })
     }
+
+    /// Test-only sealed base. Still checked at seed; not a receipt constructor.
+    #[cfg(test)]
+    pub(crate) fn checking(root: &Path, identity: [u8; 32]) -> io::Result<Self> {
+        Ok(Self {
+            root: open_host(root)?,
+            identity,
+            live: None,
+            check_tree: true,
+        })
+    }
+
+    /// Sealed directory FD plus the approved tree digest. Not a path constructor.
+    pub(crate) fn from_sealed(
+        root: OwnedFd,
+        identity: [u8; 32],
+        parent: OwnedFd,
+        name: CString,
+    ) -> io::Result<Self> {
+        let st = fstat(root.as_raw_fd())?;
+        if st.st_mode & libc::S_IFMT != libc::S_IFDIR
+            || st.st_uid != unsafe { libc::geteuid() }
+            || st.st_mode & 0o777 != 0o700
+        {
+            return Err(invalid("sealed root"));
+        }
+        Ok(Self {
+            root,
+            identity,
+            live: Some(LiveCleanup { parent, name }),
+            check_tree: true,
+        })
+    }
+}
+
+pub(crate) fn copy_tree(source: RawFd, dest: RawFd) -> io::Result<()> {
+    copy::populate(source, dest)
+}
+
+pub(crate) fn remove_tree(parent: RawFd, name: &CString) -> io::Result<()> {
+    copy::remove_partial(parent, name)
 }
 
 pub(super) fn ensure_host_outside_base(host: RawFd, base: &VerifiedBase) -> io::Result<()> {
@@ -109,6 +168,13 @@ fn seed(
         let rootfs = open_dir(stage_fd.as_raw_fd(), &one_component("rootfs")?)?;
         assert_owned_dir(rootfs.as_raw_fd())?;
         copy::populate(base.root.as_raw_fd(), rootfs.as_raw_fd())?;
+        // Directory FD does not freeze bytes. Hash the clone before mount dirs exist.
+        if base.check_tree {
+            let got = super::tree_digest(rootfs.as_raw_fd())?;
+            if got != base.identity {
+                return Err(invalid("tree"));
+            }
+        }
         ensure_mounts(rootfs.as_raw_fd())?;
         write_identity(stage_fd.as_raw_fd(), owner, &base.identity)?;
         fsync_fd(rootfs.as_raw_fd())?;
