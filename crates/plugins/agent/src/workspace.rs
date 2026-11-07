@@ -109,12 +109,21 @@ pub async fn handle_tool(
         return Err(());
     }
     let owner = resolve(pool, turn).await.map_err(|_| ())?;
-    accept_script(wire, args)?;
-    Ok(json!({
-        "available": false,
-        "bound": owner_label(owner),
-        "error": RUNNER_UNAVAILABLE,
-    }))
+    let payload = accept_script(wire, args)?;
+    match crate::workspace_backend::execute(owner, payload) {
+        Ok(result) => Ok(json!({
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "timed_out": result.timed_out,
+            "truncated": result.truncated,
+        })),
+        Err(_) => Ok(json!({
+            "available": false,
+            "bound": owner_label(owner),
+            "error": RUNNER_UNAVAILABLE,
+        })),
+    }
 }
 
 pub async fn resolve(pool: &SqlitePool, turn: HostTurn) -> Result<WorkspaceOwner, &'static str> {
@@ -140,7 +149,7 @@ pub async fn resolve(pool: &SqlitePool, turn: HostTurn) -> Result<WorkspaceOwner
     }
 }
 
-fn accept_script(wire: &str, args: &Value) -> Result<(), ()> {
+fn accept_script(wire: &str, args: &Value) -> Result<crate::workspace_runner::Payload, ()> {
     let Some(obj) = args.as_object() else {
         return Err(());
     };
@@ -160,15 +169,12 @@ fn accept_script(wire: &str, args: &Value) -> Result<(), ()> {
         None => None,
         Some(value) => Some(value.as_str().ok_or(())?),
     };
-    let lang_ok = match wire {
-        BASH_WIRE => matches!(lang, None | Some("sh")),
-        CODE_WIRE => lang == Some("python"),
-        _ => false,
-    };
-    if lang_ok {
-        Ok(())
-    } else {
-        Err(())
+    let script = script.to_string();
+    match (wire, lang) {
+        (BASH_WIRE, None | Some("bash")) => Ok(crate::workspace_runner::Payload::Bash(script)),
+        (BASH_WIRE, Some("sh")) => Ok(crate::workspace_runner::Payload::Sh(script)),
+        (CODE_WIRE, Some("python")) => Ok(crate::workspace_runner::Payload::Python(script)),
+        _ => Err(()),
     }
 }
 

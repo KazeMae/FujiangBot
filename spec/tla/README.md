@@ -1,6 +1,6 @@
-# 用 TLC 检查 ToolLoop、Session 和 Workspace
+# 用 TLC 检查 ToolLoop、Session、Workspace 和 Runner
 
-在仓库根目录执行 `scripts/run-tlc.sh`。它先检查 `spec/tla/ToolLoop.tla`，再检查 `spec/tla/Session.tla`，最后检查 `spec/tla/Workspace.tla`。通过时，每一段输出里都有这一句。
+在仓库根目录执行 `scripts/run-tlc.sh`。它先检查 `spec/tla/ToolLoop.tla`，再检查 `spec/tla/Session.tla`，然后检查 `spec/tla/Workspace.tla`，最后检查 `spec/tla/Runner.tla`。通过时，每一段输出里都有这一句。
 
 ```
 Model checking completed. No error has been found.
@@ -77,3 +77,7 @@ java -cp tla2tools.jar tlc2.TLC -workers 1 -deadlock -config spec/tla/Session.cf
 ## Workspace
 
 `Workspace.tla` 检查群里的本人选择只属于当前群和当前 actor。换 actor、换群、换私聊 peer，或在群和私聊之间切换时，先清掉已解析的绑定，再按当前事件重算。解析出的 `ownerId` 只能是当前 actor 或当前群。私聊在 peer 和 actor 不一致时拒绝。`payload` 保持 0。这个模型只覆盖路由，不证明沙箱、bwrap 或文件隔离。改 `.agent workspace` 的选择规则时，先改这个模型，再跑 `scripts/run-tlc.sh`。
+
+## Runner
+
+`Runner.tla` 是有限顺序抽象。`pin` 之前不释放 `payload`。正常 `finish` 在确认进程清理之后解除看护，成功之前输出 `join`。`UnacceptedRootfs` 在生产路径上始终拒绝，且零 `spawn`。`accepted` 是未来能力的抽象，不是当前已验收的供应者。失败和 `Drop` 只是尽力清理：不证明最终没有残留，也不证明操作系统隔离，或真实的 bash、python、apt。

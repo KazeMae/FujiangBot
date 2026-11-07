@@ -16,6 +16,9 @@ mod tools;
 mod trigger;
 mod vision;
 mod workspace;
+mod workspace_backend;
+mod workspace_runner;
+mod workspace_store;
 
 #[cfg(test)]
 #[path = "guard_tests.rs"]
