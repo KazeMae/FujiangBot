@@ -19,6 +19,7 @@ MAX_EXPANDED = 1024 * 1024 * 1024
 MAX_RATIO = 200
 MAX_ENTRIES = 50000
 MAX_FILE = 256 * 1024 * 1024
+MAX_PATH_COMPONENTS = 64
 UNPACK_WALL_SECONDS = 15
 _DIR_FLAGS = os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -243,6 +244,8 @@ def _tar_path(member):
     if name.startswith("./"):
         name = name[2:]
     parts = name.split("/")
+    if len(parts) > MAX_PATH_COMPONENTS:
+        raise BundleError()
     for part in parts:
         if len(part) > 255 or part in (".", "..") or _COMP_RE.fullmatch(part) is None:
             raise BundleError()
@@ -700,6 +703,9 @@ def _unpack_verified(snapshot_fd, name, digest, compressed_size):
     reaped = False
     status = None
     timed_out = False
+    soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft != resource.RLIM_INFINITY and soft < MAX_PATH_COMPONENTS + 128:
+        raise BundleError()
     try:
         archive_fd = _sealed_archive(snapshot_fd, name, digest, compressed_size)
         try:

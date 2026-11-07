@@ -52,13 +52,13 @@ receipt 的 `extracted` 为 true，`execution_accepted` 为 false。生产供应
 
 ### 已实现：延迟链接与有限 PAX（有限结构切片）
 
-有限结构切片已实现。本地证据：23 个 Python 测试通过，248 个 Rust 测试通过，相关 clippy 与 fmt 严格通过，5 个 TLC 模型通过；本机 `gpgv` 相关 14 项 skip。新 head 的 CI 未知。没有官方工件验收，也没有运行时验收。rootfs 供应商并未完成。
+有限结构切片已实现。本地证据：24 个 Python 测试通过（新增正式 depth 与 FD 回归），248 个 Rust 测试通过，相关 clippy 与 fmt 严格通过，5 个 TLC 模型通过；本机 `gpgv` 相关 14 项 skip。新 head 的 CI 未知。没有官方工件验收，也没有运行时验收。rootfs 供应商并未完成。
 
 全部真实文件数据落盘之后才处理链接，并先校验整张虚拟图。硬链接其次：使用真实目录 FD，源必须是普通文件且 nofollow。符号链接最后，按归档原文存储，绝对目标也照存。
 
 绝对符号链接只在隔离 root 内解析。宿主导入和复制工具绝不能解引用它们。相对 `..` 只允许留在 root 内。root 下溢、环与跳数或工作预算、重复名字，以及把链接当作归档父目录，一律拒绝。硬链接正向链必须终止于普通文件数据，目标路径上不穿越符号链接。允许安全悬空符号链接，例如 `etc/mtab` → `/proc/mounts`。本单位尚未验收运行时挂载。
 
-路径分量允许可打印 ASCII，包括 coreutils 的 `[` 和 dpkg 的 `:`。拒绝控制字符、反斜杠、绝对路径条目和 `..` 条目。
+路径分量允许可打印 ASCII，包括 coreutils 的 `[` 和 dpkg 的 `:`。拒绝控制字符、反斜杠、绝对路径条目和 `..` 条目。实际成员路径至多 64 个分量。staging 前父进程 soft `RLIMIT_NOFILE` 必须至少 192；从不提高或改写父进程限额。子进程 `NOFILE` 仍是 64。这挡住可确定触发的对抗性深树在清理时的递归与 FD 耗尽。
 
 每文件 PAX `x` 头只允许 `atime`、`mtime`、`ctime`：严格有界的十进制记录，校验后忽略，不恢复时间戳。未知记录、path、linkpath、size 覆盖、全局 `g`、xattr 与 capability、ACL、sparse 和 GNU 扩展都拒绝。
 

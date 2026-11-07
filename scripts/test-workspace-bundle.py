@@ -559,6 +559,15 @@ class UnpackTests(unittest.TestCase):
                 with self.assertRaises((V.BundleError, OSError)):
                     _unpack((), plain=gzip.compress(raw))
 
+    def test_path_depth_and_cleanup_headroom(self):
+        deep = ("/".join(["d"] * 64 + ["leaf"]), tarfile.REGTYPE, b"x", 0o644, None)
+        with self.assertRaises((V.BundleError, OSError)):
+            _unpack(_OK + (deep,))
+        with unittest.mock.patch.object(
+            V.resource, "getrlimit", return_value=(64, 64)
+        ):
+            with self.assertRaises((V.BundleError, OSError)):
+                _unpack(_OK)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
