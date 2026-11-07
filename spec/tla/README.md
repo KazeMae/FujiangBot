@@ -6,7 +6,7 @@
 Model checking completed. No error has been found.
 ```
 
-模型写的是 `crates/plugins/agent/src/tools/mod.rs` 里 `run_tool_loop` 的完成、降级和轮次上限。这次不改这个函数的行为。
+模型写的是 `crates/plugins/agent/src/tools/mod.rs` 里 `run_tool_loop` 的完成、降级、轮次上限，以及上下文预算在发请求前拒绝且不增加 provider 调用次数。
 
 ## 准备 Java
 
@@ -57,20 +57,19 @@ java -cp tla2tools.jar tlc2.TLC -workers 1 -deadlock -config spec/tla/Session.cf
 - 有工具时，`ToolOk` 要求 `used < cap`。成功执行的工具轮数不超过 `cap`。
 - `ToolErr` 把阶段设成 `degraded`。阶段只有 `running`、`complete`、`degraded`。工具失败不会进入别的状态。
 - `used` 已经达到 `cap`，模型仍要调用工具时，只发生 `CapHit`。阶段变成 `degraded`，`used` 不增加。
-- 阶段变成 `degraded` 或 `complete` 之后保持不变。
+- 阶段变成 `degraded`、`complete` 或 `rejected` 之后保持不变。
+- `overBudget` 为真时只发生 `RejectBudget`。阶段变成 `rejected`，`modelCalls` 仍是 0。这对应上下文未确认、超预算或图片无法计量时，工具循环在发请求前返回，不把这次算成 provider 调用。
 
-模型不含语言模型的传输失败，也不含响应 JSON 的解码失败。实现里这两类返回 `Err(LlmError)`。调用方另回一句说明，不使用 `ToolReply::Degraded`。未知工具、参数不是 JSON，或 `ToolHub::invoke` 返回错误，才是 `Degraded`。
+模型不含语言模型的传输失败，也不含响应 JSON 的解码失败。实现里这两类返回 `Err(LlmError)`，并且会计一次 provider 调用。调用方另回一句说明，不使用 `ToolReply::Degraded`。未知工具、参数不是 JSON，或 `ToolHub::invoke` 返回错误，才是 `Degraded`。
 
 改 `run_tool_loop` 的完成、降级或轮次上限时，先改 `ToolLoop.tla`，再跑 `scripts/run-tlc.sh`。
 
 ## Session
 
-`Session.tla` 写的是会话摘要和人设。`Window` 是 1。`messages` 从 0 到 3。`summary` 是真或假。`persona` 是 `default` 或 `strict`。
+`Session.tla` 是有限抽象。`Window` 是 2。`messages` 从 0 到 4。`rev` 从 0 到 2，到顶后不再增加，所以单靠 revision 不能证明饱和之后的变更。真正拦住过期提交的是 `fresh` 和 `ticket`。`summary` 是真或假。`persona` 是 `default` 或 `strict`。`layered` 恒为真。一次只跟踪一个快照。`messages` 为 3 时可以 `snap`，随后 `speak` 加到 4，这次追加把 `fresh` 置假。模型不覆盖更长的历史。
 
-TLC 检查不变式 `Inv`。
+`snap` 在空闲且消息数大于 `Window` 时把 `fresh` 设为真，`ticket` 设为 `open`。`Validate` 只在这时进入 `ready`，并把 `ticket` 设为 `checked`。它抽象「摘要非空、折叠后变小且不超过预算」，不改历史。`commit` 只在 `ready`、`fresh` 且 `ticket = checked` 时把消息收到 `Window`。它不比较当前的 revision、人设、摘要或消息数是否又等于快照。`reset`、`forget`、`speak`、`persona` 无条件把 `fresh` 设为假、`ticket` 设为 `blocked`，即使 revision 已经饱和、摘要本来就是假、或人设来回切换后看起来和快照一样。`fail` 可以从 `snapped` 或 `ready` 退出，不改历史。
 
-- `reset` 之后消息数是 0，摘要是假，人设和这一步之前相同。
-- `forget` 之后摘要是假，消息数和人设都和这一步之前相同。
-- `fold` 只在消息数大于 `Window` 时发生。之后消息数等于 `Window`，摘要是真，人设和这一步之前相同。
+`StaleCannotCommit` 要求 `blocked` 或 `fresh = FALSE` 的快照阶段里 `op` 不是 `commit`。`CommitOnlyAfterCheck` 要求成功提交的前一状态是 `ready` 且 `ticket` 曾是 `checked`。这不是把 `commit` 的守卫再写一遍：提交看的是票据，不是字段是否重新相等。
 
-模型不含每小时次数，也不含模型调用。改 `.agent reset`、`.agent forget` 或摘要折叠时，先改 `Session.tla`，再跑 `scripts/run-tlc.sh`。
+模型不含每小时次数，也不含真正的模型调用。改 `.agent reset`、`.agent forget` 或交接摘要时，先改 `Session.tla`，再跑 `scripts/run-tlc.sh`。

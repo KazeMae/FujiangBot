@@ -85,15 +85,20 @@ enabled = true
 # priority = 10
 # base_url = "https://api.deepseek.com"
 # model = "deepseek-flash"
-# # 只走 Responses：POST {base_url}/responses；旧字段 api 若存在会被忽略
+# 只走 Responses：POST {base_url}/responses；旧字段 api 若存在会被忽略
 # api_key_env = "FUJIANG_LLM_KEY"
 # temperature = 0.7
 # max_history_turns = 20
+# context_budget = 500000
+# 管理员核实过的上下文。官方 https://api.deepseek.com + deepseek-flash 在 2026-11-07 文档里是 1000000，不必再写。
+# 自定义 URL 不能沿用这张表。未知模型不写就拒绝请求。不能把已知官方上限写得更高。
+# 自定义地址要同时核实真实窗口，以及 byte-fallback 计量（序列化 JSON 的 UTF-8 字节是文本 token 上界）确实成立。没核实就不要填。
+# model_context_limit = 128000
 # timeout_secs = 60
 # vision_enabled = false
 # max_image_bytes = 5242880
-# # 默认不看图。改成 true 之后，当前消息里的图片才会取字节，并放进 Responses 的 input_image。
-# # 单张超过 max_image_bytes 就回复一句中文，不调用模型。写成 0 时仍是 5242880。
+# 默认不看图。改成 true 之后会取图片并准备 input_image，但视觉 token 还不能核定，请求会在客户端拒绝，不会发给模型。
+# 单张超过 max_image_bytes 就回复一句中文，不调用模型。写成 0 时仍是 5242880。
 # max_tool_rounds = 3
 # enable_rank_tools = true
 # enable_contest_tools = true
@@ -107,21 +112,21 @@ enabled = true
 # memory_max_entries_per_scope = 200
 # memory_consolidate_on_start = false
 # inject_tool_list = false
-# # rank、problem、memo 和分层记忆的读工具默认都开。写成 false 就从请求里拿掉对应的常驻工具。
-# # contest 和 fun 是技能包，不在常驻请求里。enable_contest_tools / enable_fun_tools 为 false 时，skills.list 不列出对应的包。
-# # enable_memo_write_tools 默认 false。改成 true 之后才带 memo_add。enable_memo_tools 为 false 时，memo_add 也不带。
-# # fun 没有写工具开关。打开 fun 之后才有 fun_tags、fun_stars、fun_learn、fun_search。
-# # 分层记忆默认开，含 memory.upsert、memory.forget 和 memory.consolidate。enable_memory_tools 为 false 时，五个 memory_* 都不带。
-# # enable_memory_write_tools 为 false 时仍可 memory.list 和 memory.get。
-# # memory.consolidate 丢掉太久没用的，并把每一层限制在 memory_max_entries_per_scope。
-# # memory_consolidate_on_start 默认 false。改成 true 后，启动时整理库里的每一层。
-# # 不把记忆全文塞进系统提示。见 docs/layered-memory.md。
-# # inject_tool_list 默认 false。改成 true 后，当前启用工具的短清单会追加到系统提示。`.agent tools` 始终列出同一份清单。
-# # 工具名写成「服务.方法」。请求里的函数名把点换成下划线。
-# # 常驻工具默认是 rank.list、rank.get、problem.today、memo.list、memory.list、memory.get、memory.upsert、memory.forget、memory.consolidate，外加 skills.list 和 skills.open。contest 与 fun 要先 skills.open。
-# # memo.add 要等 enable_memo_write_tools = true。memo 插件以 .so 加载后才提供 memo 服务。
-# # fun 随 fujiang 启动。这次不注册删除图库、改学话、改收藏、改 tag 的工具。
-# # 下面这项和已启用的 rank_list 函数名相同，所以不会发出去。关掉 enable_rank_tools 之后才会。
+# rank、problem、memo 和分层记忆的读工具默认都开。写成 false 就从请求里拿掉对应的常驻工具。
+# contest 和 fun 是技能包，不在常驻请求里。enable_contest_tools / enable_fun_tools 为 false 时，skills.list 不列出对应的包。
+# enable_memo_write_tools 默认 false。改成 true 之后才带 memo_add。enable_memo_tools 为 false 时，memo_add 也不带。
+# fun 没有写工具开关。打开 fun 之后才有 fun_tags、fun_stars、fun_learn、fun_search。
+# 分层记忆默认开，含 memory.upsert、memory.forget 和 memory.consolidate。enable_memory_tools 为 false 时，五个 memory_* 都不带。
+# enable_memory_write_tools 为 false 时仍可 memory.list 和 memory.get。
+# memory.consolidate 丢掉太久没用的，并把每一层限制在 memory_max_entries_per_scope。
+# memory_consolidate_on_start 默认 false。改成 true 后，启动时整理库里的每一层。
+# 不把记忆全文塞进系统提示。见 docs/layered-memory.md。
+# inject_tool_list 默认 false。改成 true 后，当前启用工具的短清单会追加到系统提示。`.agent tools` 始终列出同一份清单。
+# 工具名写成「服务.方法」。请求里的函数名把点换成下划线。
+# 常驻工具默认是 rank.list、rank.get、problem.today、memo.list、memory.list、memory.get、memory.upsert、memory.forget、memory.consolidate，外加 skills.list 和 skills.open。contest 与 fun 要先 skills.open。
+# memo.add 要等 enable_memo_write_tools = true。memo 插件以 .so 加载后才提供 memo 服务。
+# fun 随 fujiang 启动。这次不注册删除图库、改学话、改收藏、改 tag 的工具。
+# 下面这项和已启用的 rank_list 函数名相同，所以不会发出去。关掉 enable_rank_tools 之后才会。
 # [[plugins.configs.agent.tools]]
 # name = "rank.list"
 # description = "列出当前榜"
@@ -138,9 +143,11 @@ enabled = true
 # per_group_per_hour = 120
 # [plugins.configs.agent.memory]
 # enabled = true
-# 默认 true。存下的回合超过 max_history_turns 时，更早的回合折成一段摘要。
-# 摘要写在人设后面、工具清单前面。false 时不折叠，也不把摘要放进系统提示。
-# 上下文示例这次不做。
+# 默认 true。活动历史按字节上界达到有效预算的 90% 时，才用一次不带工具的模型调用做交接摘要。
+# max_history_turns 只决定留下多少近期回合，不在普通提示里先丢旧消息。写成 0 仍至少留一个回合。
+# 摘要写在人设后面、工具清单前面。false 时不交接，也不把摘要放进系统提示。
+# 计量是同一份 Responses JSON 的 UTF-8 字节加上 max_output_tokens 4096，不是精确 token。图片无法核定就拒绝。
+# 上下文示例这次不做。工作区沙箱没有实现。
 # [plugins.configs.agent.personas.strict]
 # system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 

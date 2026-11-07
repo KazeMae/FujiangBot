@@ -196,7 +196,7 @@ impl BuiltinTools {
         memory: true,
         memory_write: true,
     };
-    const OFF: Self = Self {
+    pub(crate) const OFF: Self = Self {
         rank: false,
         contest: false,
         problem: false,
@@ -406,7 +406,10 @@ where
                     done.usage.input_tokens,
                     done.usage.output_tokens,
                 ),
-                Err(err) => tool_turn(Err(err), 1, 0, 0),
+                Err(err) => {
+                    let attempts = provider_attempt(&err);
+                    tool_turn(Err(err), attempts, 0, 0)
+                }
             };
         }
         let defs: Vec<FunctionTool<'_>> = tools
@@ -419,7 +422,10 @@ where
             .collect();
         let (output, usage) = match client.complete_with_tools(messages, &prior, &defs).await {
             Ok(round) => round,
-            Err(err) => return tool_turn(Err(err), calls + 1, in_tokens, out_tokens),
+            Err(err) => {
+                let attempts = provider_attempt(&err);
+                return tool_turn(Err(err), calls + attempts, in_tokens, out_tokens);
+            }
         };
         calls += 1;
         in_tokens += usage.input_tokens;
@@ -612,6 +618,13 @@ async fn memory_value(pass: &ToolPass<'_>, method: &str, args: &Value) -> anyhow
         pass.memory_max_entries,
     )
     .await
+}
+
+fn provider_attempt(err: &LlmError) -> i64 {
+    match err {
+        LlmError::ContextClosed | LlmError::OverBudget | LlmError::ImageUnmetered => 0,
+        _ => 1,
+    }
 }
 
 fn tool_turn(

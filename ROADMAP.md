@@ -3,7 +3,7 @@
 > 仓库：https://github.com/KazeMae/FujiangBot  
 > 看板：https://github.com/users/KazeMae/projects/2  
 > 总追踪：#19  
-> 更新：2026-11-07（#60 T3：fun / contest 技能包）
+> 更新：2026-11-07（上下文预算与 LLM 交接摘要已落地；工作区沙箱未做）
 
 本文档是规划源。Issue / Milestone / Project 与此对齐。冲突时以已合并 Issue 的验收为准，并回写本文档。
 
@@ -90,7 +90,7 @@
 
 | Issue | 内容 | 状态 | 说明 |
 |---|---|---|---|
-| #16 | 会话摘要 fold | Done | `.agent memory` / `forget`；无 LLM 摘要 |
+| #16 | 会话摘要 fold | Done | `.agent memory` / `forget`。生产路径已不再做摘录折叠 |
 | #17 | 管理页用量 / 人格 | Done | `GET /api/agent/usage`、personas UI |
 | #46 | Codex 风格分层记忆 | In Progress | 账号 / 群 / 个人（**群内发言也写个人记忆**）；见 `docs/layered-memory.md` |
 | #15 | 托管 RAG | 取消 | 不做 |
@@ -100,6 +100,9 @@
 | #55 T1 | `qq.read`，按当前发言人只读 | Done | #58。只读他所属的群和他自己的私聊 |
 | #56 T2 | 技能包 `schedule` 与 `.agent schedule` | Done | 到点带创建者 QQ，按 `qq.read` 同一成员边界重验。私聊只发给创建者 |
 | #60 T3 | 技能包 `fun` 与 `contest` | Done | 不进常驻。打开后仍走 ServiceHub。`fun.learn` / `fun.search` 仍由宿主写入当前群 |
+| 群发言人展示 | 群提示里的当前与历史 QQ | Done | 只使用入站 `user_id()` 和 `messages.user_id`。旧 NULL 显示 unknown，不当成当前人。昵称、群名片、引用正文未做。私聊不包装。权限仍是真实 `ToolScope`。不改 Session / ToolLoop 状态机 |
+| 上下文预算与 LLM 交接摘要 | 500000、90% 摘要、模型上限、CAS | 已实现，待 PR 验收 | 有效预算是配置与已核实上限的较小值。官方 `https://api.deepseek.com` 的 `deepseek-flash` 按 2026-11-07 文档为 100 万，自定义 URL 不沿用。计量是完整序列化 Responses JSON 的 UTF-8 字节加上 `max_output_tokens` 4096。这是保守上界，不是精确的 450000 个真实 token；只有已核实 byte-level/byte-fallback 不会把每个输入字节再膨胀成多个 token，且协议开销已含在这份 JSON 里时，文本 token 才不多于该字节数。图片无法核定视觉 token 时拒绝发送。摘要失败、超限或 CAS 对不上不删历史。`max_history_turns` 为 0 仍至少留一个回合。分层记忆不读不改。交接摘要那一次调用不进 `usage_daily`。工作区沙箱仍未做 |
+| 工作区沙箱 | 隔离工作区 | 未做 | 没有实现，也没有假接口 |
 
 前置：agent 热路径改动优先落在 `command.rs` / `plan.rs` / 新模块；单文件勿超 1000 行。
 

@@ -634,7 +634,7 @@ fn user(text: &str) -> Vec<ChatMessage> {
 }
 
 fn test_client(base: &str) -> LlmClient {
-    let mut cfg = AgentConfig::from_value(&json!({}));
+    let mut cfg = AgentConfig::from_value(&json!({"model_context_limit": 500_000}));
     cfg.base_url = base.to_string();
     cfg.timeout_secs = 60;
     LlmClient::new(&cfg, reqwest::Client::new(), "test-key".into())

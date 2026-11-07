@@ -2,13 +2,16 @@
 
 mod client;
 mod command;
+mod compact;
 mod config;
+mod context_budget;
 mod layered_memory;
 mod memory_consolidate;
 mod plan;
 mod schedule;
 mod schedule_cron;
 mod session;
+mod speaker;
 mod tools;
 mod trigger;
 mod vision;
@@ -271,6 +274,15 @@ impl AgentPlugin {
                 return;
             }
         };
+        let resident = tools::resident_tools(&cfg.tools, enabled_builtins(cfg));
+        let messages =
+            match compact::before_turn(&pool, cfg, &client, &key, messages, &resident).await {
+                Ok(messages) => messages,
+                Err(gate) => {
+                    say(ctx, msg, compact::user_tip(&gate)).await;
+                    return;
+                }
+            };
         let scope = tools::MemoCallScope::from_source(msg.source, msg.user_id());
         let pass = tools::ToolPass {
             max_rounds: cfg.max_tool_rounds,
@@ -467,7 +479,10 @@ mod tests {
         let ChatPlan::Speak { messages } = quiet else {
             panic!("expected a chat");
         };
-        assert_eq!(messages[0].content, "默认人设");
+        assert_eq!(
+            messages[0].content,
+            format!("默认人设\n\n{}", crate::speaker::GROUP_NOTE)
+        );
 
         let loud = AgentConfig::from_value(&json!({
             "system_prompt": "默认人设",
@@ -491,9 +506,11 @@ mod tests {
         let ChatPlan::Speak { messages } = plan else {
             panic!("expected a chat");
         };
+        assert!(messages[0].content.starts_with("默认人设\n\n"));
+        assert!(messages[0].content.contains(crate::speaker::GROUP_NOTE));
         assert!(messages[0]
             .content
-            .starts_with("默认人设\n\n可用工具：\nmemo.list：列出备忘\n"));
+            .contains("\n\n可用工具：\nmemo.list：列出备忘\n"));
         assert!(messages[0].content.contains("skills.list："));
         assert!(messages[0].content.contains("skills.open："));
         assert!(!messages[0].content.contains("ping.pong"));
@@ -551,9 +568,18 @@ mod tests {
             panic!("expected a chat");
         };
         assert_eq!(messages[0].role, Role::System);
-        assert_eq!(messages[0].content, "严格人设");
-        assert_eq!(messages[1].content, "u1");
-        assert_eq!(messages.last().unwrap().content, "u3");
+        assert_eq!(
+            messages[0].content,
+            format!("严格人设\n\n{}", crate::speaker::GROUP_NOTE)
+        );
+        assert_eq!(
+            messages[1].content,
+            r#"{"host_sender":{"user_id":5},"untrusted":{"body":"u1"}}"#
+        );
+        assert_eq!(
+            messages.last().unwrap().content,
+            r#"{"host_sender":{"user_id":5},"untrusted":{"body":"u3"}}"#
+        );
         assert_eq!(usage_rows(&pool).await, 1);
 
         let status = run(&pool, &cfg, key, 5, &AgentCmd::Status, 1_000).await;
@@ -663,31 +689,27 @@ mod tests {
         let ChatPlan::Speak { messages } = plan else {
             panic!("expected a chat");
         };
-        let system = &messages[0].content;
-        let prior = system.find("先前上下文").expect("summary");
-        assert!(system.find("默认人设").unwrap() < prior);
-        assert!(system.contains("用户：u1"));
-        assert!(system.contains("助手：a1"));
-        assert_eq!(system.matches("用户：u1").count(), 1);
+        assert_eq!(messages[0].content, "默认人设");
+        assert!(!messages[0].content.contains("先前上下文"));
         assert_eq!(
             messages
                 .iter()
                 .skip(1)
                 .map(|m| m.content.as_str())
                 .collect::<Vec<_>>(),
-            vec!["u2", "a2", "u3"]
+            vec!["u1", "a1", "u2", "a2", "u3"]
         );
         assert!(session::recent_turns(&pool, key, 20)
             .await
             .unwrap()
             .iter()
-            .all(|m| m.content != "u1"));
+            .any(|m| m.content == "u1"));
 
         let again = plan_chat(&pool, &cfg, key, 3, "u3", 6, true).await.unwrap();
         let ChatPlan::Speak { messages: second } = again else {
             panic!("expected a chat");
         };
-        assert_eq!(second[0].content, *system);
+        assert_eq!(second[0].content, messages[0].content);
     }
 
     #[tokio::test]
@@ -716,7 +738,7 @@ mod tests {
                 .skip(1)
                 .map(|m| m.content.as_str())
                 .collect::<Vec<_>>(),
-            vec!["u2", "a2", "u3"]
+            vec!["u1", "a1", "u2", "a2", "u3"]
         );
         assert_eq!(
             session::recent_turns(&pool, key, 20).await.unwrap().len(),
@@ -731,11 +753,11 @@ mod tests {
             4
         );
 
-        session::fold_overflow(&pool, key, 1).await.unwrap();
-        assert!(session::summary_of(&pool, key)
+        sqlx::query("UPDATE sessions SET summary = '用户：u1' WHERE session_key = ?1")
+            .bind(key)
+            .execute(&pool)
             .await
-            .unwrap()
-            .contains("用户：u1"));
+            .unwrap();
         let hidden = plan_chat(&pool, &cfg, key, 4, "u4", 8, true).await.unwrap();
         let ChatPlan::Speak { messages } = hidden else {
             panic!("expected a chat");
@@ -744,7 +766,7 @@ mod tests {
         assert!(!messages[0].content.contains("用户：u1"));
         assert_eq!(
             session::recent_turns(&pool, key, 20).await.unwrap().len(),
-            2
+            4
         );
     }
 
@@ -762,6 +784,11 @@ mod tests {
         session::set_persona(&pool, key, "strict", 1).await.unwrap();
         save_exchange(&pool, key, 1, "u1", "a1").await.unwrap();
         save_exchange(&pool, key, 1, "u2", "a2").await.unwrap();
+        sqlx::query("UPDATE sessions SET summary = '用户：u1' WHERE session_key = ?1")
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
         let plan = plan_chat(&pool, &cfg, key, 1, "u3", 5, true).await.unwrap();
         let ChatPlan::Speak { messages } = plan else {
             panic!("expected a chat");
@@ -783,7 +810,7 @@ mod tests {
         assert_eq!(session::summary_of(&pool, key).await.unwrap(), "");
         assert_eq!(
             session::recent_turns(&pool, key, 20).await.unwrap().len(),
-            2
+            4
         );
         assert_eq!(
             session::persona_of(&pool, key).await.unwrap().as_deref(),

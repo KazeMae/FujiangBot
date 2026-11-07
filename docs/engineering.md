@@ -53,3 +53,20 @@ cargo clippy -p fujiang-plugin-agent --all-targets --no-deps -- -D warnings
 ```
 
 `-D warnings` 把警告当成失败。
+
+## 2026-11-07 上下文预算与交接摘要
+
+协调者在本机跑过下面这些命令。这一轮没有测生产环境、NapCat，也没有打真实 provider。字节上界不是精确 tokenizer 验收。工作区沙箱没有实现。图片在视觉 token 无法核定时 fail closed。交接摘要那一次模型调用的 usage 没有计入 `usage_daily`。
+
+在仓库根目录：
+
+```
+cargo fmt --all -- --check
+cargo clippy -p fujiang-plugin-agent --all-targets --no-deps -- -D warnings
+cargo test --workspace
+scripts/check-file-length.sh
+scripts/run-tlc.sh
+cargo llvm-cov -p fujiang-plugin-agent --summary-only
+```
+
+当时的结果：`fmt` 检查通过。clippy 在 `-D warnings` 下通过。`cargo test --workspace` 216 项通过，0 失败，0 ignored；其中 `fujiang-plugin-agent` 134 项通过。`scripts/check-file-length.sh` 通过。`scripts/run-tlc.sh` 的 ToolLoop 和 Session 都没有错误；ToolLoop 54 个 distinct states，Session 688 个 distinct states。`cargo llvm-cov -p fujiang-plugin-agent --summary-only` 的行覆盖是 92.62%。`compact.rs` 81.57%，`context_budget.rs` 98.89%，`speaker.rs` 97.88%。
