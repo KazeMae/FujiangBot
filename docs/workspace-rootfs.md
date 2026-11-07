@@ -1,6 +1,6 @@
 # 工作区 rootfs 准备
 
-**检查点（2026-11-07）：** 当前本地门禁已由协调者独立跑完，不是未关闭的锁失败。`cargo fmt --all --check` 通过。agent 严格 clippy（全部 target、`--offline -D warnings`）通过。`cargo test --workspace --offline` 连续三次完整跑完，每次 286 通过、0 失败、0 ignored，其中 agent 204；日志 `apt-final-workspace-{1,2,3}.log`。owner 锁的旧失败只属于历史：`flock` 挂在 open file description 上，`O_CLOEXEC` 在 `exec` 才关 FD。无关子进程停在 `pre_exec` 时仍共享该 OFD，只 `close` 不会解锁（确定性回归曾 exit 101 / EAGAIN）。正常 `OwnerLock` 在 `Drop` 时 `LOCK_UN`，这条已进当前 286。导入 writer 租约不解锁。GC 专项 14 通过，含父进程死后真实孤儿 writer。Python 归档 28 通过。rootfs 准备 stub 通过。本机真实 gpgv 14 条因缺工具明确 SKIP，不是加密通过。六模型 TLC 用缓存 jar 通过，distinct states 54/688/512/346/17/16。文件长度与 `git diff --check` 通过。没有新覆盖率数字，不把 89.80% 当成这次结果。这段检查点对应的是已推送的代码提交 `8d7eda1f302d05d9b29cbbc7225e4c348447c399`，不是之后单独的文档提交。该代码的 CI run `42374926956` 全部步骤于 2026-11-07 21:04:03 Asia/Shanghai 成功：https://github.com/KazeMae/FujiangBot/actions/runs/42374926956 。其中 Install gpgv、`REQUIRE_GPGV=1` 的真实 gpgv、fmt、clippy、agent、fujiang、rootfs、length、llvm-cov、coverage 都成功。先前基线 CI 是 `aaa7291` / run `42370884522`。生产仍关闭。官方 rootfs 和完整多 UID/GID 与 capability 接线仍然没有。这不等于 apt 或 Ubuntu 成功。
+**检查点（2026-11-07，本地，本段尚未成为新的 CI）：** runner 已接标准 `newuidmap`/`newgidmap`（路径钉住、参数 `fd:N`）、内核核对后的 user namespace FD，以及 bwrap `--userns`。`--cap-drop ALL` 之后只加五个命名空间 capability。生产路径要求 `setgroups=allow` 和两段映射；单 ID 加 `setgroups=deny` 只是无特权探测。嵌套命名空间由仅在子进程安装的 seccomp 拒绝。本机没有 root 所属 04755 辅助程序，`bootstrap` 失败关闭，没有真实完整映射，也没有 apt 或官方 rootfs 验收。先前干净提交 `d0cb317` 的 CI `42375477574` 是这一切片之前的历史。全量测试计数这次未知。不报新覆盖率。生产仍关闭。
 
 消费侧已经接到执行器。每次调用用这一轮真实 `MemoCallScope` 做成 `HostTurn`，`handle_tool_with` 重新 resolve，不复用上一名说话人。群里只有当前 actor 显式选过本人（表键是群号+actor）才进个人 owner，否则是当前群。私聊 source 与 actor 不一致则拒绝。
 
@@ -28,7 +28,7 @@ python3 scripts/verify-workspace-bundle.py --unpack /绝对source /私有parent/
 
 九字段批准只在真实工件和下面仍未完成的运行时条件都接受之后才允许手工写入。没有自动晋升。本文不创建 `acceptance.json`。环境变量保持未设置。没有真实成功的 bash、Python、Ubuntu、apt 或在线 QQ。有限结构切片仍见文末。
 
-还不能批准，而且不只是缺官方工件。runner 仍是 `--cap-drop ALL`，没有加 capability，只把容器内 uid 0 映到宿主 1000。因此 apt 不能工作。多 ID 用户命名空间引导，以及 `CAP_CHOWN`、`CAP_DAC_OVERRIDE`、`CAP_FOWNER`、`CAP_SETUID`、`CAP_SETGID` 的运行时接线，都还没有实现。这需要正常的 uidmap 辅助程序；当前未安装，缓存也是空的。`box:100000:65536` 已经分配。把 root 映到非零宿主 UID 是基本隔离。安全挂载核对仍未做，不把 nosuid 或 FUSE 写成“必须先有整套平台才算没有宿主 root”。普通网络已经去掉 `--unshare-net`，不是门禁。代理、slirp、cgroup 和聚合配额都不是前置。固定预算不保证全部包能装完。最低后续准备是：在合法环境装上发行版 uidmap，再拿到合法签名的官方工件，然后做真实端到端。这里不重试 DNS、不改软件源、不借 CI 下载。
+还不能批准。五个命名空间 capability 和完整 UID/GID 引导已经接到 runner，但本机没有发行版 `newuidmap`/`newgidmap`，所以没有真实完整内核映射，apt 仍不能工作。`box:100000:65536` 是显式部署范围。最低后续是：在合法环境装上这两个 04755 辅助程序，再拿到合法签名的官方 rootfs，然后做真实端到端。这里不重试 DNS、不改软件源、不借 CI 下载，也不自造 setuid 辅助程序。
 
 启动用 block-fd 握手：先阻塞，再 pin init 的 pidfd，然后才释放 payload。确认 init 死亡并回收 wrapper 之后，才 join 输出。join 可以取消。返回成功时，进程清理和 reader 回收都已经完成。清理结果未知时不能标成功。没有宿主 exec 降级。
 
@@ -52,7 +52,7 @@ python3 scripts/verify-workspace-bundle.py --unpack /绝对source /私有parent/
 
 调用者不是 root。路径逐级 NOFOLLOW，打开用 NONBLOCK，避免对预打开对象阻塞。拒 FIFO、目录、符号链接和硬链接。父目录是 0700 且属于本人。目标独占创建。私有副本文件是 0600。摘要精确匹配 SHA256。不解包，不执行。receipt 的 gate 为 false。`gpgv` 壁钟 15 秒、CPU 10 秒、地址空间 256MiB，单文件输出上限 1MiB。`gpgv` 必须退出 0，且 status 里恰好一个 `VALIDSIG`，其 primary 指纹等于上述固定官方指纹。绝不能把 `GOODSIG` 或给人看的 stderr 当成信任。`gpgv` 的 stdout 仅按 status 协议解析。本脚本 CLI 成功时 stdout 一行 receipt JSON；失败时 stderr 固定 error，退出并非 0。
 
-无 `--unpack` 的 receipt 不是 runtime 授权。仍未完成的是多 ID 映射、最小 capability 接线和真实 rootfs 端到端，见文首。三块要分开：QQ 宿主授权是真代码；owner 持久是真实文件系统测试；bash/Python 路由是真代码，终端成功夹具是模拟。在线 QQ 与完整 Ubuntu/apt 未验证。
+无 `--unpack` 的 receipt 不是 runtime 授权。多 ID 引导代码已接上，真实辅助程序、完整内核映射和官方 rootfs 端到端仍未完成。在线 QQ 与 Ubuntu/apt 未验证。
 
 本机 `gpg` 2.4.7 存在，`gpgv` 缺失。2026-11-07 17:26 Asia/Shanghai 用正常包管理安装时失败：`mirrors.aliyun.com` Temporary failure resolving。已停止。不改软件源、DNS 或代理，也不绕路。本机真实 `gpgv` 测试必须明确 skip。CI 安装 `gpgv`、`gpg`、`gpg-agent`、`gpgconf` 之后运行 `python3 scripts/test-workspace-bundle.py` 和 `REQUIRE_GPGV=1 python3 scripts/test-workspace-bundle-gpgv.py`，无 `continue-on-error`，强制真实签名、错签名和篡改。
 
@@ -66,7 +66,7 @@ python3 scripts/verify-workspace-bundle.py --unpack /绝对source /私有parent/
 
 私有 stage 由受控 fork 写入。限额是 CPU 10 秒、硬限制 11 秒、地址空间 512MiB、壁钟 15 秒。失败先 kill，再 wait，然后删除 stage，不发布。成功之后才发布 rootfs 和 receipt。
 
-目录打开使用 `FD_NOFOLLOW`，新建文件使用 `O_EXCL`。重复的规范路径拒绝，并计入隐式目录 nodes。条目上限 50000，展开上限 1GiB，单文件 256MiB，膨胀比 200，计算包含头 padding 和尾部。v2 写出普通 rwx，目录可带 sticky；外层包装 0700，其内 root 0755。不 chown，不写 xattr 或 capability。setuid/setgid 仍拒绝。只读清理先 `chmod` 属主目录再递归。失败时的原子清理和 `execution_accepted: false` 不变。Rust 与 Python 的 v2 黄金摘要独立一致：`d4c7888733e446897db069da80dbd6dc00fc402689b3050f98ac36bc295d8dca`。Python 侧黄金已改，最终重跑还没做。
+目录打开使用 `FD_NOFOLLOW`，新建文件使用 `O_EXCL`。重复的规范路径拒绝，并计入隐式目录 nodes。条目上限 50000，展开上限 1GiB，单文件 256MiB，膨胀比 200，计算包含头 padding 和尾部。v2 写出普通 rwx，目录可带 sticky；外层包装 0700，其内 root 0755。不 chown，不写 xattr 或 capability。setuid/setgid 仍拒绝。只读清理先 `chmod` 属主目录再递归。失败时的原子清理和 `execution_accepted: false` 不变。Rust 与 Python 的 v2 黄金摘要独立一致：`d4c7888733e446897db069da80dbd6dc00fc402689b3050f98ac36bc295d8dca`。Python 归档 28 已经通过，不是待重跑。
 
 `--unpack` 的 receipt 含 `extracted: true`、`execution_accepted: false`、`tree_sha256` 和 `tree_policy`。这是提案，不是接受。
 
@@ -106,12 +106,12 @@ python3 scripts/verify-workspace-bundle.py --unpack /绝对source /私有parent/
 
 ## 本切片变更
 
-已经落地：POSIX v2（普通 rwx 与 sticky 目录）、外层 0700 内 root 0755、v2 摘要、只读清理时先改属主目录再递归、runner 去掉 `--unshare-net`、有界私有租约 GC、正常 owner 锁在临界区结束时 `LOCK_UN`。运行时不覆盖 `RLIMIT_FSIZE`，继承宿主限制且不提高 hard limit。导入界仍是单文件 256MiB、合计 1GiB、节点 50000。`/tmp` 是私有持久 owner root 上的目录，root bind 之后 `--chmod 1777`，不是 64MiB tmpfs。`/run` 与 `/sys` 仍是 64MiB 空 tmpfs，不是包缓存。apt 的 `var/cache/apt` 与 `var/lib/apt` 在持久 root 上。磁盘占用没有配额硬门。壁钟 300s、CPU 120s、地址空间 512MiB、输出 64KiB 仍是有限通用轮廓，不保证全部 apt。仍是 `--cap-drop ALL` 和单 UID `0 → 宿主 1000`，所以还不是 apt 就绪。下一步仍是代码：用已分配的 subuid/gid 和正常 uidmap 辅助程序做完整 UID/GID 映射，在 payload 的 no-new-privs 之前把钉住的 user namespace FD 交给 bwrap，映射 `_apt`，只在命名空间内给最小 capability，并补生命周期与负向 OS 证明，然后再做已签名 rootfs 的运行时验收。这些辅助程序当前缺失，包索引 DNS 被挡，不重试、不经 CI 传包。生产关闭。普通网络允许。代理、slirp、cgroup、聚合配额都不是门禁。
+本切片在既有 runner 上接了标准 uidmap 辅助程序、`fd:N`、`setgroups=allow`、核对过的 namespace FD、bwrap `--userns`，以及 `--cap-drop ALL` 之后的五个命名空间 capability。holder 在 `unshare` 之前用 `close_range` 关掉除两根管道以外的 FD。缺已安装的辅助程序、真实完整映射和官方 rootfs，所以不是 apt。生产关闭。
 
 ## 本切片验证记录
 
 历史（不是当前门禁）：曾有 `cargo test --workspace --offline` 284 通过（agent 202）。其后一轮 agent 201 通过、1 失败，失败项 `existing_runner_failclosed_on_incomplete_root`，owner lock EAGAIN。该失败已由 `OwnerLock` 的 `LOCK_UN` 修掉，并包含在下面的 286 里。
 
-当前门禁：`cargo fmt --all --check` 通过。agent 严格 clippy（全部 target、offline、`-D warnings`）通过。`cargo test --workspace --offline` 连续三次完整跑完，每次 286 通过、0 失败、0 ignored，agent 各 204，日志 `apt-final-workspace-1.log`、`apt-final-workspace-2.log`、`apt-final-workspace-3.log`。导入/GC 专项 14 通过，含真实孤儿 writer 租约，该租约不因 owner 锁修复而解锁。Python 归档 28 通过。rootfs 准备 stub 通过。本机真实 gpgv 14 条因缺工具明确 SKIP，不是加密通过。六模型 TLC 用缓存 jar 通过，distinct states 54/688/512/346/17/16。文件长度与 `git diff --check` 通过。没有新覆盖率百分比。这些本地结果对应代码提交 `8d7eda1f302d05d9b29cbbc7225e4c348447c399`，该提交已推送，CI run `42374926956` 于 2026-11-07 21:04:03 Asia/Shanghai 全绿。先前基线 CI 是 `aaa7291` / `42370884522`。生产仍关闭。`--cap-drop ALL` 与单 UID 映射还在，官方 rootfs 和完整多映射/capability 代码仍缺，所以还不是 apt 就绪。这些不等于 apt 或 Ubuntu 成功。
+本切片是本地检查点，全量 Rust 计数未知，不写成新的 CI 全绿。历史干净 CI 是 `d0cb317` / `42375477574`。Python 归档 28、rootfs stub 和六模型 TLC 在这一轮之前已经通过。缺正常辅助程序时没有真实完整映射或 apt。
 
 三块原状：QQ 绑定是真代码，没有 NapCat 在线；owner 持久是真实文件系统夹具；工具路由是真代码，终端成功回调是模拟。没有真实 bash、Python、Ubuntu 或 apt 的生产端到端。

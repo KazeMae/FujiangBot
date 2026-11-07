@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 #[path = "workspace_runner_io.rs"]
 mod workspace_runner_io;
 
+#[path = "workspace_userns.rs"]
+mod workspace_userns;
+
 use workspace_runner_io::{recv_bound, spawn_drain};
 
 use anyhow::{bail, Context, Result};
@@ -204,6 +207,10 @@ pub fn run(root: BorrowedFd<'_>, work: BorrowedFd<'_>, payload: Payload) -> Resu
     ensure_host()?;
     ensure_bwrap()?;
     ensure_root_layout(root)?;
+    // Helpers run here, before the bwrap child sets no-new-privs.
+    let pinned = workspace_userns::bootstrap().context("userns bootstrap")?;
+    let userns_fd = dup_high(pinned.as_raw_fd()).context("dup userns fd")?;
+    drop(pinned);
     let root_fd = dup_high(root.as_raw_fd()).context("dup root fd")?;
     let work_fd = dup_high(work.as_raw_fd()).context("dup work fd")?;
     let seccomp = seccomp_memfd().context("seccomp memfd")?;
@@ -214,6 +221,7 @@ pub fn run(root: BorrowedFd<'_>, work: BorrowedFd<'_>, payload: Payload) -> Resu
     require_high(info_w.as_raw_fd())?;
     require_high(block_r.as_raw_fd())?;
     require_high(seccomp.as_raw_fd())?;
+    require_high(userns_fd.as_raw_fd())?;
 
     let mut cmd = Command::new("/usr/bin/bwrap");
     cmd.stdin(Stdio::null())
@@ -227,6 +235,7 @@ pub fn run(root: BorrowedFd<'_>, work: BorrowedFd<'_>, payload: Payload) -> Resu
         info_w.as_raw_fd(),
         block_r.as_raw_fd(),
         seccomp.as_raw_fd(),
+        userns_fd.as_raw_fd(),
     );
     match &payload {
         Payload::Bash(script) => {
@@ -250,6 +259,7 @@ pub fn run(root: BorrowedFd<'_>, work: BorrowedFd<'_>, payload: Payload) -> Resu
         info_w.as_raw_fd(),
         block_r.as_raw_fd(),
         seccomp.as_raw_fd(),
+        userns_fd.as_raw_fd(),
     );
 
     let deadline = Instant::now() + WALL;
@@ -279,6 +289,7 @@ pub fn run(root: BorrowedFd<'_>, work: BorrowedFd<'_>, payload: Payload) -> Resu
     drop(seccomp);
     drop(root_fd);
     drop(work_fd);
+    drop(userns_fd);
 
     let mut stdout_rx = spawn_drain(stdout).context("stdout reader")?;
     let mut stderr_rx = spawn_drain(stderr).context("stderr reader")?;
@@ -333,8 +344,10 @@ fn push_fixed_args(
     info: RawFd,
     block: RawFd,
     seccomp: RawFd,
+    userns: RawFd,
 ) {
-    cmd.arg("--unshare-user")
+    cmd.arg("--userns")
+        .arg(userns.to_string())
         .arg("--uid")
         .arg("0")
         .arg("--gid")
@@ -342,10 +355,18 @@ fn push_fixed_args(
         .arg("--unshare-pid")
         .arg("--unshare-ipc")
         .arg("--unshare-uts")
-        .arg("--disable-userns")
-        .arg("--assert-userns-disabled")
         .arg("--cap-drop")
         .arg("ALL")
+        .arg("--cap-add")
+        .arg("CAP_CHOWN")
+        .arg("--cap-add")
+        .arg("CAP_DAC_OVERRIDE")
+        .arg("--cap-add")
+        .arg("CAP_FOWNER")
+        .arg("--cap-add")
+        .arg("CAP_SETUID")
+        .arg("--cap-add")
+        .arg("CAP_SETGID")
         .arg("--new-session")
         .arg("--die-with-parent")
         .arg("--bind-fd")
@@ -397,8 +418,9 @@ fn install_pre_exec(
     info: RawFd,
     block: RawFd,
     seccomp: RawFd,
+    userns: RawFd,
 ) {
-    let keep = [root, work, info, block, seccomp];
+    let keep = [root, work, info, block, seccomp, userns];
     unsafe {
         cmd.pre_exec(move || {
             deny_new_privs()?;
@@ -558,26 +580,84 @@ fn build_filter() -> Result<Vec<libc::sock_filter>> {
         stmt(libc::BPF_RET | libc::BPF_K, errno_eperm()),
         stmt(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, off_nr()),
     ];
+    let mut to_eperm = Vec::new();
     #[cfg(target_arch = "x86_64")]
+    {
+        to_eperm.push(prog.len());
+        prog.push(jump(
+            libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K,
+            X32_SYSCALL_BIT,
+            0,
+            0,
+        ));
+    }
+    for nr in blocked_syscalls() {
+        to_eperm.push(prog.len());
+        prog.push(jump(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, nr, 0, 0));
+    }
+    for nr in [libc::SYS_unshare, libc::SYS_setns] {
+        to_eperm.push(prog.len());
+        prog.push(jump(
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+            nr as u32,
+            0,
+            0,
+        ));
+    }
+    let clone3_at = prog.len();
     prog.push(jump(
-        libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K,
-        X32_SYSCALL_BIT,
+        libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+        libc::SYS_clone3 as u32,
         0,
         0,
     ));
-    for nr in blocked_syscalls() {
-        prog.push(jump(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, nr, 0, 0));
-    }
+    let clone_at = prog.len();
+    prog.push(jump(
+        libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+        libc::SYS_clone as u32,
+        0,
+        0,
+    ));
     prog.push(stmt(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_ALLOW));
+    let flags_at = prog.len();
+    prog.push(stmt(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, off_arg0()));
+    let mask_at = prog.len();
+    prog.push(jump(
+        libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K,
+        namespace_clone_mask(),
+        0,
+        0,
+    ));
+    prog.push(stmt(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_ALLOW));
+    let eperm_at = prog.len();
     prog.push(stmt(libc::BPF_RET | libc::BPF_K, errno_eperm()));
-    let errno_at = prog.len() - 1;
-    let allow_at = prog.len() - 2;
-    for (i, insn) in prog.iter_mut().enumerate().take(allow_at).skip(4) {
-        let jt = u8::try_from(errno_at - (i + 1)).context("seccomp jump")?;
-        insn.jt = jt;
-        insn.jf = 0;
+    let enosys_at = prog.len();
+    prog.push(stmt(
+        libc::BPF_RET | libc::BPF_K,
+        libc::SECCOMP_RET_ERRNO | (libc::ENOSYS as u32),
+    ));
+    for i in to_eperm {
+        prog[i].jt = u8::try_from(eperm_at - (i + 1)).context("seccomp jump")?;
     }
+    prog[clone3_at].jt = u8::try_from(enosys_at - (clone3_at + 1)).context("seccomp jump")?;
+    prog[clone_at].jt = u8::try_from(flags_at - (clone_at + 1)).context("seccomp jump")?;
+    prog[mask_at].jt = u8::try_from(eperm_at - (mask_at + 1)).context("seccomp jump")?;
     Ok(prog)
+}
+
+fn namespace_clone_mask() -> u32 {
+    (libc::CLONE_NEWNS
+        | libc::CLONE_NEWUTS
+        | libc::CLONE_NEWIPC
+        | libc::CLONE_NEWUSER
+        | libc::CLONE_NEWPID
+        | libc::CLONE_NEWNET
+        | libc::CLONE_NEWCGROUP
+        | libc::CLONE_NEWTIME) as u32
+}
+
+fn off_arg0() -> u32 {
+    std::mem::offset_of!(libc::seccomp_data, args) as u32
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -823,111 +903,8 @@ fn syscall_fd(rc: libc::c_long) -> io::Result<OwnedFd> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::parse_child_pid;
-
-    #[test]
-    fn package_budget_is_fixed_and_finite() {
-        assert_eq!(super::WALL, std::time::Duration::from_secs(300));
-        assert_eq!(super::CPU_SECONDS, 120);
-        assert_eq!(super::TMPFS_SIZE, "67108864");
-        assert_eq!(super::OUT_CAP, 64 * 1024);
-        assert_eq!(super::REAP_BOUND, std::time::Duration::from_secs(1));
-    }
-
-    #[test]
-    fn parses_top_level_child_pid() {
-        assert_eq!(
-            parse_child_pid(
-                br#"{"ok":true,"child-pid":42,"nested":{"child-pid":"9"}}"#,
-                false
-            ),
-            Some(42)
-        );
-        assert_eq!(
-            parse_child_pid(br#"{"child-pid":2147483647}"#, true),
-            Some(2147483647)
-        );
-    }
-
-    #[test]
-    fn rejects_child_pid_shapes() {
-        let bad: &[&[u8]] = &[
-            br#"{"child-pid":"1"}"#,
-            br#"{"child-pid":-1}"#,
-            br#"{"child-pid":0}"#,
-            br#"{"child-pid":1.5}"#,
-            br#"{"child-pid":2147483648}"#,
-            br#"{"child-pid":{"n":1}}"#,
-            br#"{"child-pid":1,"child-pid":2}"#,
-            br#"{"child-pid":1}{}"#,
-            br#"{"child-pid":"#,
-            b"",
-        ];
-        for sample in bad {
-            assert_eq!(parse_child_pid(sample, true), None);
-        }
-        assert_eq!(parse_child_pid(br#"{"child-pid":"#, false), None);
-    }
-
-    #[test]
-    fn child_set_limits_keeps_inherited_fsize() {
-        use std::os::unix::process::CommandExt;
-
-        let mut parent = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        assert_eq!(
-            unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut parent) },
-            0
-        );
-        let parent_cur = parent.rlim_cur;
-        let parent_max = parent.rlim_max;
-        let mut cmd = std::process::Command::new("/bin/true");
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        unsafe {
-            cmd.pre_exec(move || {
-                let mut inherited = libc::rlimit {
-                    rlim_cur: 0,
-                    rlim_max: 0,
-                };
-                if libc::getrlimit(libc::RLIMIT_FSIZE, &mut inherited) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if inherited.rlim_cur != parent_cur || inherited.rlim_max != parent_max {
-                    return Err(std::io::Error::other("inherited fsize differs from parent"));
-                }
-                super::set_limits()?;
-                let mut after = libc::rlimit {
-                    rlim_cur: 0,
-                    rlim_max: 0,
-                };
-                if libc::getrlimit(libc::RLIMIT_FSIZE, &mut after) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if after.rlim_cur != inherited.rlim_cur || after.rlim_max != inherited.rlim_max {
-                    return Err(std::io::Error::other("set_limits changed fsize"));
-                }
-                Ok(())
-            });
-        }
-        let status = cmd.status().expect("spawn /bin/true");
-        assert!(status.success(), "{status}");
-        let mut again = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        assert_eq!(
-            unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut again) },
-            0
-        );
-        assert_eq!(again.rlim_cur, parent_cur);
-        assert_eq!(again.rlim_max, parent_max);
-    }
-}
+#[path = "workspace_runner_tests.rs"]
+mod tests;
 
 #[cfg(test)]
 #[path = "workspace_runner_lifecycle_tests.rs"]

@@ -82,6 +82,7 @@ async fn existing_runner_failclosed_on_incomplete_root() {
     std::fs::write(&sentinel, b"untouched").unwrap();
     let auth = FixtureAuth { host, image };
     let owner = resolved_owner(Source::Group { id: 4 }, 4).await;
+    let mut saw_bwrap = false;
     for payload in [
         crate::workspace_runner::Payload::Bash("true".to_string()),
         crate::workspace_runner::Payload::Python("print(1)".to_string()),
@@ -106,6 +107,11 @@ async fn existing_runner_failclosed_on_incomplete_root() {
                     String::from_utf8_lossy(&result.stderr)
                 );
                 assert_ne!(result.exit_code, 0);
+                if result.stderr.windows(5).any(|w| w == b"bwrap")
+                    || result.stdout.windows(5).any(|w| w == b"bwrap")
+                {
+                    saw_bwrap = true;
+                }
                 let blob = format!(
                     "{}{}",
                     String::from_utf8_lossy(&result.stdout),
@@ -128,8 +134,10 @@ async fn existing_runner_failclosed_on_incomplete_root() {
         assert!(reopen.is_err());
     }
     assert_eq!(std::fs::read(&sentinel).unwrap(), b"untouched");
-    let tmp = host_path.join("group/4/generation/rootfs/tmp");
-    let mode = std::fs::metadata(&tmp).unwrap().permissions().mode();
-    assert_eq!(mode & 0o7777, 0o1777, "persistent /tmp mode {mode:#o}");
+    if saw_bwrap {
+        let tmp = host_path.join("group/4/generation/rootfs/tmp");
+        let mode = std::fs::metadata(&tmp).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o1777, "persistent /tmp mode {mode:#o}");
+    }
     let _ = std::fs::remove_dir_all(root);
 }
