@@ -1,14 +1,16 @@
 # 工作区 rootfs 准备
 
-**检查点（2026-11-08 03:04–03:05 Asia/Shanghai）：** 协调者完整门禁已过，证据 `continue-20261108-gates-summary.json`。`cargo test --workspace --offline` 连续三次，每次 310 个唯一通过、0 失败、1 个 ignored。唯一计数不含嵌套 `--exact` 子进程；三次日志里被排除的行数分别是 3、4、4，不写成固定个数。agent 228。其中探针夹具 11 个通过。`cargo fmt --all`、agent 全 target 严格 clippy（`--offline -D warnings`）、Python bundle 28、rootfs stub、六模型 TLC（54/688/512/346/17/16）、长度和 `git diff --check` 通过。探针 879 行，夹具文件 289 行。本机 gpgv 14 条是 SKIP（缺工具），不是通过。三次全量里含 Rust GC 的 lease、active、unmarked、writer-outlives-parent。
+**当前（2026-11-08 DNS 门禁）：** 已完成。证据 `dns-20261108-gates-summary.json`，前缀 `dns-20261108-gate`。三次 `cargo test --workspace --offline` 各 313 个唯一通过、0 失败、1 ignored；agent 231，DNS 夹具三组。fmt、agent 严格 clippy（`-D warnings`）、Python 28、rootfs stub、六模型 TLC 都过。本机 gpgv 14 条是 SKIP，不是通过。03:05 的 310×3（`continue-20261108-gates-summary.json`）是历史，不含这次 DNS。更早 308×3 与 `feb96d0` 的 299×3 也是历史。基线 `07bf850` CI `42384023945`（2026-11-07 23:01:25）不含本段。新提交的 CI 看 PR 62，推送前不能写成远端已绿。PR 正文 403 不再重试。不重复预检，不下载，不改全局 DNS 或软件源。
 
-同一晚独立跑了一次原始名字 `workspace_store::acceptance::rootfs_probe::admin_real_rootfs_acceptance`，证据 `continue-20261108-real-preflight.json` 与 `.log`。空的私有源，Rust exit 101，实际 1 个测试，九个用例全是 `unrun`，工作叶子没创建，预检目录已删，子进程没有生产变量，runtime 探针为 0。这只是负面预检。先前的 `unshare --map-root-user` 只证明简单 user namespace，不是 rootfs 成功。
+生产关闭。普通网络，没有 `--unshare-net`。仍缺 `gpgv`、`uidmap`、`libsubid5` 和官方四件工件。唯一当前投递目录是 `/workspace/agent-tools/fujiang-local-20261107/offline-inbox`。`sandbox-lab/offline-inbox` 仍是空目录，只是历史路径，不监视、不移动、不删除。
 
-生产关闭。普通网络，没有 `--unshare-net`。仍缺 `gpgv`、`uidmap`、`libsubid5` 和官方工件；inbox 仍是空的 0700 目录。导入仍拒绝 setuid、setgid 和 file capability，官方归档未检查。runner 继承网络命名空间，但不写客人 DNS。这些都还不是可用的 Ubuntu/apt。
+DNS：固定从 `/` 做 root 所有、不跟随的目录 FD 走到 `etc/resolv.conf`。先 `O_NONBLOCK` 再看元数据。普通文件必须 root、0644、nlink 1。只允许精确指向 `/run/systemd/resolve/stub-resolv.conf` 或 `resolv.conf` 的一层链接；链接本身必须 root、nlink 1。快照含 ctime，但时钟可以不动：同一 FD 上第二次有界 `pread` 必须与第一次的字节和长度一致。同长度改内容并恢复 mtime 的夹具会被拒绝。正文只保留不超过 4096 的 ASCII，以及实际支持的指令，不另加解析器。`127.0.0.53`、`127.0.0.1`、`::1` 是继承网络里的本机回环，不需要代理，也不保证底层 DNS 成功。客人 `etc` 必须是属主可写的真实目录。属主的 0444 普通文件拒绝且内容不动。最终符号链接不先 unlink；stage 写完并 fsync 之后才 `renameat` 换目录项、不跟随。临时名冲突时原链接、外面的目标和无关文件都保持不动。`Drop` 只删本次创建的 `.resolv.<pid>.<seq>.tmp`。崩溃留下的旧临时名不再是固定名字，所以不会卡住下一次；没有实现主动清扫。解析夹具三组。没有真实 Ubuntu、apt 或在线 QQ。
+
+元数据 v3 代码仍未实现。v2 仍拒绝 SUID、SGID 和 capability PAX；只有 atime/mtime/ctime 的 PAX 可以通过。依据是 Ubuntu Noble shadow 源码 <https://git.launchpad.net/ubuntu/+source/shadow/tree/debian/rules?h=ubuntu/noble> 里 `override_dh_builddeb-arch` 对 passwd/chfn/chsh/gpasswd/newgrp `chmod u+s`、对 chage/expiry `chmod g+s`。这只证明普通 Noble 包会带这些位，不是已经打开的 rootfs。下一步才是版本化剥离、新的 receipt/树摘要策略，并使旧批准失效。这些都还没做。
 
 三条仍分开：QQ 绑定是真代码，无 NapCat 在线；owner 持久是文件系统夹具，无官方 Ubuntu Base；工具路由是真代码，成功回调是模拟。都还没有真实验收。
 
-历史本地计数包括 308×3 和 `feb96d0` 的 299×3，不是这次门禁。基线 `07bf850` 的 CI `42384023945` 在 2026-11-07 23:01:25 Asia/Shanghai 成功，不含这次本地证据。这次提交的 CI 看 PR 62；本地证据不能代替远端。PR 正文 403 不再重试。
+历史计数只留在上面。这次提交的 CI 看 PR 62；本地日志不能代替远端。PR 正文 403 不再重试。
 
 消费侧已经接到执行器。每次调用用这一轮真实 `MemoCallScope` 做成 `HostTurn`，`handle_tool_with` 重新 resolve，不复用上一名说话人。群里只有当前 actor 显式选过本人（表键是群号+actor）才进个人 owner，否则是当前群。私聊 source 与 actor 不一致则拒绝。
 
@@ -106,7 +108,7 @@ python3 scripts/verify-workspace-bundle.py --unpack /绝对source /私有parent/
 
 ### 提交前本地验收记录
 
-历史本地记录（不是当前门禁）：fmt 通过；agent clippy 全部 target、`--no-deps --offline -D warnings` 通过；`cargo test --workspace --offline` 278 通过（agent 196），0 失败、0 ignored。当时覆盖率重跑后 TOTAL 行覆盖 89.80%（10100 行，1030 未覆盖）。同一输出里的 region 87.39% 不是行覆盖。`workspace_acceptance` 行覆盖 77.80%，树模块 86.24%。Python bundle 当时 27。真实 gpgv 14 条 SKIP。rootfs stub 11。六模型 TLC 54/688/512/346/17/16。验证器脚本 1000 行。文件长度与 `git diff --check` 通过。行覆盖 89.80% 只属于这段历史。当前门禁见文末「本切片验证记录」。
+历史本地记录（不是当前门禁）：fmt 通过；agent clippy 全部 target、`--no-deps --offline -D warnings` 通过；`cargo test --workspace --offline` 278 通过（agent 196），0 失败、0 ignored。当时覆盖率重跑后 TOTAL 行覆盖 89.80%（10100 行，1030 未覆盖）。同一输出里的 region 87.39% 不是行覆盖。`workspace_acceptance` 行覆盖 77.80%，树模块 86.24%。Python bundle 当时 27。真实 gpgv 14 条 SKIP。rootfs stub 11。六模型 TLC 54/688/512/346/17/16。验证器脚本 1000 行。文件长度与 `git diff --check` 通过。行覆盖 89.80% 只属于这段历史。当前状态见文首 03:42 DNS，不把这段历史当成现门禁。
 
 `acceptance.json` 必须恰好九键：`version`（JSON 数字 1）、`kind`（`runtime_safety_approval`）、`source`、`host`、`archive_sha256`、`primary`（`843938DF228D22F7B3742BC0D94AA3F0EFE21092`）、`policy`（`workspace-rootfs-runtime-v2`）、`tree_sha256`、`approved`（JSON `true`）。两枚摘要是 64 位小写十六进制。文件上限 8192 字节，mode 0600，属 bot euid。信任目录 mode 0700。v1 的 `policy` 拒绝。当前没有这份文件。
 
@@ -141,7 +143,7 @@ FUJIANG_ROOTFS_SOURCE=/绝对/私有0700源 FUJIANG_ROOTFS_WORK=/绝对/0700父�
 - 预检工具是 `/usr/bin/gpgv`、`/usr/bin/newuidmap`、`/usr/bin/newgidmap`、`/usr/bin/bwrap`、`/usr/bin/python3`，加上官方 metadata。归档只要求有普通 `.tar.gz`；签名文件名和 24.04 版本仍由现有验证器选择。
 - 缺件时九个用例都是 `unrun`，进程非 0。2026-11-08 只读预检：仍缺 gpgv、newuidmap、newgidmap。`bwrap` 是 0755。`/usr/bin/python3` 是 0777 符号链接，`stat -L` 的目标是 root:root 0755，不是 0777 的可执行文件。包缓存是空的。配置源 `https://mirrors.aliyun.com/debian` trixie/main 的缓存候选（不是当场联网复核）是 `uidmap` `1:4.17.4-2`、同时缺失的 `libsubid5` `1:4.17.4-2`、`gpgv` `2.4.7-21+deb13u1+b5`。其余 uidmap/gpgv 依赖已安装。inbox `/workspace/agent-tools/fujiang-local-20261107/offline-inbox` 仍是 0700 空目录，没有覆盖工件。2026-11-07 17:26 的记录只证明 `mirrors.aliyun.com` `Temporary failure resolving`，不能证明策略 403。不重试该域名；普通网络并没有全部关掉。安装只走以后批准过的正常包管理，不在这里下载。
 
-用例顺序是 shell、persist、isolate、apt、root-iso、python、proc-fd、maps-caps、sgid。客人里已有 `python3` 时 apt 打出单独一行 `PYTHON_PRESENT`，只安装尚不存在的 `hello`；没有 `python3` 时打出 `MISSING_PYTHON` 并同时安装 `python3-minimal`。`hello` 已经装好仍是未满足的前提。第一次 verifier/seal 的完整 receipt（archive、sha256、bytes、tree、primary、policy、`extracted=true`、`execution_accepted=false`）钉住整次运行；后来的 acquire 若身份不同，先丢掉这次 base，再拒绝，不跑 payload。成功行必须整行等于 `用例: ok` 加这一份身份。裸 `ok`、缺字段或混用身份都不算真通过。`root-iso` 在 apt 之后由 owner A 写 `/etc/fujiang-root-mark`；同号群 owner 和另一名个人 owner 必须先有 `dpkg-query`，marker 不存在，且 `hello` 不是 `install ok installed`，然后 exit 0 打印 `ABSENT`。夹具只做 `bash -n` 和报告绑定，不在宿主执行会写 `/etc` 的客人脚本。这些运行时步骤本机没有执行，不是 Ubuntu apt 通过。先前 `runtime-final` 的 308×3 是历史门禁。当前探针是 879 行，夹具文件 289 行。导入仍拒绝 setuid、setgid 和 file capability，官方归档还没打开检查，所以不能说只差环境。继承的网络命名空间已接上，runner 不会自动写客人 DNS 解析配置；官方 rootfs 的 DNS、软件源和一次真实 apt 仍要真正跑过。不把代理、cgroup 或配额算成这道门。现有 apt/capability 范围不是所有包的兼容证明。若工件带当前导入拒绝的 metadata，或客人没有可用的解析配置，代码路径仍会失败。生产门禁关闭。解包根 0755 的怀疑已撤回，不记成修复。
+用例顺序是 shell、persist、isolate、apt、root-iso、python、proc-fd、maps-caps、sgid。客人里已有 `python3` 时 apt 打出单独一行 `PYTHON_PRESENT`，只安装尚不存在的 `hello`；没有 `python3` 时打出 `MISSING_PYTHON` 并同时安装 `python3-minimal`。`hello` 已经装好仍是未满足的前提。第一次 verifier/seal 的完整 receipt（archive、sha256、bytes、tree、primary、policy、`extracted=true`、`execution_accepted=false`）钉住整次运行；后来的 acquire 若身份不同，先丢掉这次 base，再拒绝，不跑 payload。成功行必须整行等于 `用例: ok` 加这一份身份。裸 `ok`、缺字段或混用身份都不算真通过。`root-iso` 在 apt 之后由 owner A 写 `/etc/fujiang-root-mark`；同号群 owner 和另一名个人 owner 必须先有 `dpkg-query`，marker 不存在，且 `hello` 不是 `install ok installed`，然后 exit 0 打印 `ABSENT`。夹具只做 `bash -n` 和报告绑定，不在宿主执行会写 `/etc` 的客人脚本。这些运行时步骤本机没有执行，不是 Ubuntu apt 通过。先前 `runtime-final` 的 308×3 和 03:05 的 310×3 都是历史门禁。元数据 v3 仍未写。继承的网络命名空间已接上，runner 按文首的 DNS 规则写客人 `etc/resolv.conf`。官方 rootfs 的软件源和一次真实 apt 仍要真正跑过。条数看 `dns-20261108-gate`。不把代理、cgroup 或配额算成这道门。现有 apt/capability 范围不是所有包的兼容证明。若工件带当前导入拒绝的 metadata，或客人没有可用的解析配置，代码路径仍会失败。生产门禁关闭。解包根 0755 的怀疑已撤回，不记成修复。
 
 2026-11-08 02:58 Asia/Shanghai 只读：宿主 uid/gid 1000；当前用户的 `/etc/subuid` 和 `/etc/subgid` 仍都是 `100000:65536`，没有改。`/proc/sys/user/max_user_namespaces` 是 63991。`/usr/bin/unshare --user --map-root-user -- /usr/bin/id -u` 退出 0，stdout 是 `0`。这次没有挂载、没有改文件系统、没有辅助程序、没有网络。它只说明当前用户能做一个简单 user namespace，不是标准 newuidmap 全映射、bwrap 或 apt。`apt-get -s --no-download install gpgv uidmap` 还会带上 `libsubid5`，然后因为缓存是空的无法取得归档；没有下载或安装。只在本任务证据目录里按文件名递归找过，不跟随链接，没有官方工件或 `.deb`。不能据此说整块磁盘都没有。
 

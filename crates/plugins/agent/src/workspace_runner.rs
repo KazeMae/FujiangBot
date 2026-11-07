@@ -13,6 +13,9 @@ mod workspace_runner_io;
 #[path = "workspace_userns.rs"]
 mod workspace_userns;
 
+#[path = "workspace_resolv.rs"]
+mod workspace_resolv;
+
 use workspace_runner_io::{recv_bound, spawn_drain};
 
 use anyhow::{bail, Context, Result};
@@ -207,6 +210,7 @@ pub fn run(root: BorrowedFd<'_>, work: BorrowedFd<'_>, payload: Payload) -> Resu
     ensure_host()?;
     ensure_bwrap()?;
     ensure_root_layout(root)?;
+    workspace_resolv::install(root.as_raw_fd()).context("unavailable: resolver")?;
     // Helpers run here, before the bwrap child sets no-new-privs.
     let pinned = workspace_userns::bootstrap().context("userns bootstrap")?;
     let userns_fd = dup_high(pinned.as_raw_fd()).context("dup userns fd")?;
