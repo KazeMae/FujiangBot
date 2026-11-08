@@ -6,4 +6,8 @@
 
 已在本地跑通：bash、Python、`/work` 再次打开仍在，以及一个自建 `.deb` 经 `apt-get install --no-download` 从绝对缓存路径装入后再次打开仍在（子进程退出码 0，且是 newly installed）。宿主哨兵和其他 owner 的字节在故意继承可读可写描述符以及目录描述符之后保持不变。客人内部的硬链接和符号链接对照成功。
 
-私人 root 可以带上本机已有的 apt `http`/`https` 方法和 `/etc/ssl/certs/ca-certificates.crt`。远程 apt 没有通过：还缺客人软件源、签名验证器和密钥。没有多 UID 包，没有官方 rootfs。`chown` 到未映射 UID 会失败。
+私人 root 可以带上本机已有的 apt `http`/`https` 方法和 `/etc/ssl/certs/ca-certificates.crt`。标准库符号链接只在最终仍位于 `/usr/lib`、`/usr/lib64`、`/lib`、`/lib64` 时物化成私人普通文件。唯一省略的是 `/usr/lib/python3.<数字>/sitecustomize.py`（或 `lib64`）词法指向 `/etc/python3.<同一数字>/sitecustomize.py`，不读 `/etc`。其它越界失败。目录符号链接拒绝。
+
+本地门已过：fmt、严格 clippy、文件长度、diff；workspace 离线测试三遍，每遍 agent 207 通过、0 失败、0 忽略；五个未改 TLC 通过。新 CI 还没有结果，不能写成已绿。
+
+远程 apt 仍缺三样：客人软件源、签名验证器、公钥环。都没有拷入，也没有联网安装。单 UID、无 capability，不安装系统服务，`chown` 到未映射 UID 会失败。在线 QQ 未验收。生产默认关闭。

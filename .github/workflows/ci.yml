@@ -24,6 +24,9 @@ jobs:
             fi
           done
           bwrap --help | grep -F -- '--bind-fd'
+          std=$(/usr/bin/python3 -I -S -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')
+          echo "python stdlib $std"
+          find "$std" -type l -printf '%p -> %l\n'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

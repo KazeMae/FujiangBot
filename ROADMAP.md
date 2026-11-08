@@ -3,7 +3,8 @@
 > 仓库：https://github.com/KazeMae/FujiangBot  
 > 看板：https://github.com/users/KazeMae/projects/2  
 > 总追踪：#19  
-> 更新：2026-11-08 04:15 Asia/Shanghai。证据前缀 `v3-gc-20261108-gate`，摘要 `v3-gc-20261108-rust-gates-summary.json` 与 `v3-gc-20261108-offline-gates-summary.json`，冻结源清单未改。`cargo fmt --all -- --check` 通过；agent 全目标严格 clippy（`--offline -- -D warnings`）通过；`cargo test --workspace --offline` 完整三遍，每遍 319 个唯一通过、0 失败、1 忽略（agent 237 通过、1 忽略），嵌套过滤的 worker 摘要不计入。Python bundle 29 通过；本机 gpgv 14 是 SKIP，不是真通过；rootfs stub 分支通过；六个已缓存 TLC 模型通过，不同状态数 54/688/512/346/17/16；文件长度和 diff 通过。远端 CI 在正常 push 之后再读，当前远端不记成已绿。`1daeef8` 的 313×3、agent 231 是历史。本机已实现 V3 危险元数据规范化，以及带完整标记的 DNS stage 回收；活动锁、继承 FD 和真实 `Stage` 子进程不走 `Drop` 退出都已测过。空的、半截的、无标记的和旧 hold/tmp 按保守策略留下。`.resolv.*` 不是客人存储。真实官方 rootfs、shell、Python、apt 和在线 QQ 未验收。04:09 只读：缺 uidmap、libsubid5、gpgv，`/usr/bin/newuidmap`、`/usr/bin/newgidmap`、`/usr/bin/gpgv` 都不在；两个 inbox 都是 root 0700 空目录；acceptance 环境变量未设置。唯一投递目录是 `/workspace/agent-tools/fujiang-local-20261107/offline-inbox`，实验目录不监视。不下载，不改宿主 DNS、软件源或全局配置，不重试 PR 正文 403，不合并、不部署、不重启，没有生产门禁，也没有工件批准。细节见 `docs/workspace-rootfs.md`。
+> 历史（不是当前前提）：2026-11-08 04:15 `v3-gc-20261108-gate` 三遍各 319 通过、0 失败、1 忽略（agent 237、1 忽略）。`1daeef8` 的 313×3、agent 231 更早。当时的 bundle、gpgv、rootfs stub 和六模型 TLC 只属于那棵旧树。
+> 当前本地门（尚未推上的新 CI，不能写成已绿）：fmt、严格 clippy、文件长度、diff 通过；`cargo test --workspace --offline` 三遍，每遍 agent 207 通过、0 失败、0 忽略；五个未改的 TLC 模型通过。生产默认关闭。在线 QQ 与远程 apt 未验收。细节见 `docs/workspace-rootfs.md`。
 
 本文档是规划源。Issue / Milestone / Project 与此对齐。冲突时以已合并 Issue 的验收为准，并回写本文档。
 
@@ -102,9 +103,8 @@
 | #60 T3 | 技能包 `fun` 与 `contest` | Done | 不进常驻。打开后仍走 ServiceHub。`fun.learn` / `fun.search` 仍由宿主写入当前群 |
 | 群发言人展示 | 群提示里的当前与历史 QQ、昵称、名片、引用 ID | Done | 当前与历史昵称、名片来自真实 `MessageEvent.sender` 快照，值仍按 untrusted 清理控制字符和双向控制符。`host_reply.message_id` 只是事件所带引用 ID，不取正文、不推断作者。旧行 NULL 不回填。真实 ID 不改变权限。私聊不包装。不改 Session / ToolLoop 状态机 |
 | 上下文预算与 LLM 交接摘要 | 500000、90% 摘要、模型上限、CAS、官方看图、摘要用量 | 已实现，待 PR 验收 | 有效预算是配置与已核实上限的较小值。官方 `https://api.deepseek.com` 的 `deepseek-flash` 按 2026-11-07 定价页为 100 万，看图页每图 1024 且多图相加。只适用于该主机名和该模型名，不是 OpenAI、Anthropic 或其它模型的 tile/detail 上界。预算含投影 JSON、工具 schema、已核实图像上界和发出的 `max_output_tokens` 4096。usage 按字段保留有效非负整数；缺字段记 `unknown_calls`，不把缺的 0 当成测得值。旧行迁移后标未确认。记账失败仍走 CompactFail |
-| 工作区绑定与独立 owner | 每次真实 resolve；个人/群目录；bash/code 规格默认不广告 | 生产关闭。`v3-gc-20261108-gate` 为三遍各 319 通过、0 失败、1 忽略。远端 CI 等正常 push 之后，当前不记已绿。`1daeef8` 的 313×3、agent 231 是历史 DNS 门 | 三块仍未在线验收。缺 uidmap、libsubid5、gpgv 和官方四件。v3 只在导入剥离 SUID/SGID 并丢弃 capability PAX。完整标记的 stage 才回收；半截、无标记和旧 `.tmp` 留下，不当成可删。`.resolv.*` 不是客人存储。DNS 走法、0444 拒绝、fsync 后 rename 不变。inbox 只认 `/workspace/agent-tools/fujiang-local-20261107/offline-inbox`。详见 `docs/workspace-rootfs.md`。 |
-| 工作区运行时 | 公开系统解释器的私人副本，bwrap 单 UID | 默认关闭。`FUJIANG_WORKSPACE_MVP` 指向宿主目录才打开 | 不下载 Ubuntu，不验签，不装 `newuidmap`。本地绝对路径 `.deb` 可离线装入私人 root。远程 apt 未验收。详见 `docs/workspace-rootfs.md`。 |
-| `--unpack SOURCE NEWTARGET` | 签名检查后的私有解包与树提案 | receipt 带 `tree_sha256` 与 v3 `tree_policy`，`execution_accepted` 恒 false。v1 和 v2 批准拒绝。没有 `acceptance.json` | 运行时不设 `RLIMIT_FSIZE`。`/tmp` 持久且 `--chmod 1777`。`/run` 与 `/sys` 仍是 64MiB tmpfs。runner 是 bwrap `--unshare-user --uid 0 --gid 0`，`--cap-drop ALL`。种子是公开系统运行时的私人副本。`FUJIANG_WORKSPACE_MVP` 才打开，默认关。没有 `newuidmap`，没有批准文件。单 UID 不能 chown 未映射 UID。远程 apt 未验收。 |
+| 工作区绑定与独立 owner | 每次调用真实 resolve；个人与群目录按发言人分开；bash/code 默认不广告 | 生产关闭。未设 `FUJIANG_WORKSPACE_MVP` 则不启动 | 在线 QQ 未验收。同一宿主用户之外没有第二套 UID。owner 锁、重开和原子发布仍在。详见 `docs/workspace-rootfs.md`。 |
+| 工作区运行时 | 公开系统解释器的私人副本，bwrap 单 UID | 默认关闭。`FUJIANG_WORKSPACE_MVP` 指向宿主目录才打开 | 标准库链接只物化仍在 `/usr/lib`、`/usr/lib64`、`/lib`、`/lib64` 的普通文件；仅省略对应版本的 sitecustomize 钩子。本地绝对路径 `.deb` 可离线装入私人 root。远程 apt 未验收。新 CI 尚未出结果，不记已绿。详见 `docs/workspace-rootfs.md`。 |
 
 前置：agent 热路径改动优先落在 `command.rs` / `plan.rs` / 新模块；单文件勿超 1000 行。
 

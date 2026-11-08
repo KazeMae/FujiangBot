@@ -1,5 +1,6 @@
 //! Private copy of a fixed public system runtime. Not an approval or an archive.
-use std::ffi::CString;
+use std::collections::VecDeque;
+use std::ffi::{CString, OsStr};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -267,6 +268,7 @@ fn discover_python() -> io::Result<(PathBuf, PathBuf)> {
     let python = validated_exec(Path::new("/usr/bin/python3"))?;
     let mut cmd = Command::new(&python);
     cmd.arg("-I")
+        .arg("-S")
         .arg("-c")
         .arg("import sys,sysconfig\nprint(sys.executable)\nprint(sysconfig.get_path('stdlib'))\n");
     let out = output_timeout(&mut cmd)?;
@@ -446,10 +448,16 @@ fn copy_stdlib(stage: &Path, src: &Path) -> io::Result<()> {
     let rel = src.strip_prefix("/").unwrap_or(src);
     let dst = stage.join(rel);
     fs::create_dir_all(&dst)?;
-    copy_dir(src, &dst, stage)
+    copy_dir(src, &dst, stage, 0)
 }
 
-fn copy_dir(src: &Path, dst: &Path, stage: &Path) -> io::Result<()> {
+fn copy_dir(src: &Path, dst: &Path, stage: &Path, depth: u32) -> io::Result<()> {
+    if depth > 32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "stdlib link limit",
+        ));
+    }
     for ent in fs::read_dir(src)? {
         let ent = ent?;
         let name = ent.file_name();
@@ -457,10 +465,13 @@ fn copy_dir(src: &Path, dst: &Path, stage: &Path) -> io::Result<()> {
         let to = dst.join(&name);
         let kind = ent.file_type()?;
         if kind.is_symlink() {
+            if optional_sitecustomize(&from) {
+                continue;
+            }
             place_link(&from, &to, stage)?;
         } else if kind.is_dir() {
             fs::create_dir(&to)?;
-            copy_dir(&from, &to, stage)?;
+            copy_dir(&from, &to, stage, depth + 1)?;
         } else if kind.is_file() {
             copy_public_file(&from, stage, to.strip_prefix(stage).unwrap(), 0o644)?;
             if name.as_bytes().ends_with(b".so") {
@@ -471,23 +482,436 @@ fn copy_dir(src: &Path, dst: &Path, stage: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn place_link(src: &Path, dst: &Path, stage: &Path) -> io::Result<()> {
-    let text = fs::read_link(src)?;
-    if text.is_absolute() {
-        // Do not plant a symlink that leaves the private root.
-        let _ = (src, stage);
-        return Ok(());
+const PUBLIC_ROOTS: &[&str] = &["/usr/lib", "/usr/lib64", "/lib", "/lib64"];
+
+fn optional_sitecustomize(path: &Path) -> bool {
+    let Ok(text) = fs::read_link(path) else {
+        return false;
+    };
+    sitecustomize_hook(path, &text)
+}
+
+fn sitecustomize_hook(src: &Path, link: &Path) -> bool {
+    let loss = src.to_string_lossy();
+    let Some(rest) = loss
+        .strip_prefix("/usr/lib/python3.")
+        .or_else(|| loss.strip_prefix("/usr/lib64/python3."))
+    else {
+        return false;
+    };
+    let Some((minor, tail)) = rest.split_once('/') else {
+        return false;
+    };
+    if tail != "sitecustomize.py" || minor.is_empty() || !minor.chars().all(|c| c.is_ascii_digit())
+    {
+        return false;
     }
-    if text.components().any(|c| {
-        matches!(
-            c,
-            std::path::Component::ParentDir | std::path::Component::RootDir
+    let joined = if link.is_absolute() {
+        link.to_path_buf()
+    } else {
+        let Some(parent) = src.parent() else {
+            return false;
+        };
+        parent.join(link)
+    };
+    let Some(norm) = lexical(&joined) else {
+        return false;
+    };
+    norm.as_os_str() == std::ffi::OsStr::new(&format!("/etc/python3.{minor}/sitecustomize.py"))
+}
+
+fn place_link(src: &Path, dst: &Path, _stage: &Path) -> io::Result<()> {
+    materialize_public_link(src, dst, PUBLIC_ROOTS, true)
+}
+
+fn materialize_public_link(
+    src: &Path,
+    dst: &Path,
+    roots: &[&str],
+    enforce: bool,
+) -> io::Result<()> {
+    let parent = src
+        .parent()
+        .ok_or_else(|| link_err("stdlib link race", src, ""))?;
+    let name = src
+        .file_name()
+        .ok_or_else(|| link_err("stdlib link race", src, ""))?;
+    let dir = open_anchored(parent, enforce)?;
+    let cname = CString::new(name.as_bytes()).map_err(|_| link_err("stdlib link race", src, ""))?;
+    let text = symlink_text(dir.as_raw_fd(), &cname, src)?;
+    let show = text.to_string_lossy().into_owned();
+    let root_fd = open_dir(Path::new("/"))?;
+    let mut logical = if text.is_absolute() {
+        PathBuf::from("/")
+    } else {
+        parent.to_path_buf()
+    };
+    let mut cur = if text.is_absolute() {
+        dup_owned(root_fd.as_raw_fd())?
+    } else {
+        dup_owned(dir.as_raw_fd())?
+    };
+    let mut pending: VecDeque<std::ffi::OsString> = text
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(n) => Some(n.to_os_string()),
+            std::path::Component::ParentDir => Some(OsStr::new("..").to_os_string()),
+            std::path::Component::CurDir => None,
+            std::path::Component::RootDir => None,
+            _ => Some(OsStr::new("").to_os_string()),
+        })
+        .collect();
+    let mut hops = 1u32;
+    while let Some(comp) = pending.pop_front() {
+        if comp.is_empty() {
+            return Err(link_err("stdlib link escape", src, &show));
+        }
+        if comp == ".." {
+            if !logical.pop() || !can_traverse(&logical, roots) {
+                return Err(link_err("stdlib link escape", src, &show));
+            }
+            cur = open_at(cur.as_raw_fd(), c"..", true)?;
+            if enforce {
+                trusted_dir(&fstat_fd(cur.as_raw_fd())?, src, &show)?;
+            }
+            continue;
+        }
+        logical.push(&comp);
+        if !can_traverse(&logical, roots) {
+            return Err(link_err("stdlib link escape", src, &show));
+        }
+        let cn = CString::new(comp.as_bytes())
+            .map_err(|_| link_err("stdlib link escape", src, &show))?;
+        let mut st = unsafe { std::mem::zeroed() };
+        if unsafe {
+            libc::fstatat(
+                cur.as_raw_fd(),
+                cn.as_ptr(),
+                &mut st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
+            hops += 1;
+            if hops > 8 {
+                return Err(link_err("stdlib link limit", src, &show));
+            }
+            let next = readlink_at(cur.as_raw_fd(), &cn)?;
+            logical.pop();
+            if next.is_absolute() {
+                logical = PathBuf::from("/");
+                cur = dup_owned(root_fd.as_raw_fd())?;
+            }
+            for c in next.components().rev() {
+                match c {
+                    std::path::Component::Normal(n) => pending.push_front(n.to_os_string()),
+                    std::path::Component::ParentDir => {
+                        pending.push_front(OsStr::new("..").to_os_string())
+                    }
+                    std::path::Component::CurDir | std::path::Component::RootDir => {}
+                    _ => return Err(link_err("stdlib link escape", src, &show)),
+                }
+            }
+            continue;
+        }
+        if pending.is_empty() {
+            if !is_inside(&logical, roots) {
+                return Err(link_err("stdlib link escape", src, &show));
+            }
+            return finish_target(Finish {
+                dir: cur.as_raw_fd(),
+                name: &cn,
+                st: &st,
+                dst,
+                enforce,
+                src,
+                show: &show,
+            });
+        }
+        if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return Err(link_err(
+                &format!("stdlib link type mode={:o}", st.st_mode),
+                src,
+                &show,
+            ));
+        }
+        if enforce {
+            trusted_dir(&st, src, &show)?;
+        }
+        cur = open_at(cur.as_raw_fd(), &cn, true)?;
+        if enforce {
+            trusted_dir(&fstat_fd(cur.as_raw_fd())?, src, &show)?;
+        }
+    }
+    Err(link_err("stdlib link escape", src, &show))
+}
+
+struct Finish<'a> {
+    dir: libc::c_int,
+    name: &'a CString,
+    st: &'a libc::stat,
+    dst: &'a Path,
+    enforce: bool,
+    src: &'a Path,
+    show: &'a str,
+}
+
+fn finish_target(job: Finish<'_>) -> io::Result<()> {
+    let Finish {
+        dir,
+        name,
+        st,
+        dst,
+        enforce,
+        src,
+        show,
+    } = job;
+    let kind = st.st_mode & libc::S_IFMT;
+    if kind == libc::S_IFDIR {
+        return Err(link_err("stdlib link type directory", src, show));
+    }
+    if kind != libc::S_IFREG {
+        return Err(link_err(
+            &format!(
+                "stdlib link type uid={} gid={} mode={:o} regular=false",
+                st.st_uid, st.st_gid, st.st_mode
+            ),
+            src,
+            show,
+        ));
+    }
+    if !enforce && st.st_mode & 0o6000 != 0 {
+        return Err(link_err("stdlib link type setid", src, show));
+    }
+    #[cfg(test)]
+    race_swap_now();
+    let fd = unsafe {
+        libc::openat(
+            dir,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
         )
-    }) {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "stdlib link"));
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
     }
-    std::os::unix::fs::symlink(&text, dst)?;
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    let again = file.metadata()?;
+    if !again.is_file()
+        || MetadataExt::dev(&again) != st.st_dev
+        || MetadataExt::ino(&again) != st.st_ino
+    {
+        return Err(link_err("stdlib link race", src, show));
+    }
+    let mode = MetadataExt::mode(&again);
+    if enforce
+        && (MetadataExt::uid(&again) != 0
+            || mode & 0o022 != 0
+            || mode & 0o004 == 0
+            || mode & 0o6000 != 0)
+    {
+        return Err(link_err(
+            &format!(
+                "stdlib link trust uid={} gid={} mode={:o}",
+                MetadataExt::uid(&again),
+                MetadataExt::gid(&again),
+                mode
+            ),
+            src,
+            show,
+        ));
+    }
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut out = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(dst)?;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        out.write_all(&buf[..n])?;
+    }
     Ok(())
+}
+
+fn symlink_text(dir: libc::c_int, name: &CString, src: &Path) -> io::Result<PathBuf> {
+    let mut st = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatat(dir, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if st.st_mode & libc::S_IFMT != libc::S_IFLNK {
+        return Err(link_err(
+            &format!("stdlib link race mode={:o}", st.st_mode),
+            src,
+            "",
+        ));
+    }
+    readlink_at(dir, name)
+}
+
+fn readlink_at(dir: libc::c_int, name: &CString) -> io::Result<PathBuf> {
+    let mut buf = [0u8; 4096];
+    let n = unsafe {
+        libc::readlinkat(
+            dir,
+            name.as_ptr(),
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+        )
+    };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if n as usize >= buf.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "stdlib link limit",
+        ));
+    }
+    Ok(PathBuf::from(OsStr::from_bytes(&buf[..n as usize])))
+}
+
+fn is_inside(path: &Path, roots: &[&str]) -> bool {
+    roots.iter().any(|root| {
+        let root = Path::new(root);
+        path == root || path.starts_with(root)
+    })
+}
+
+fn can_traverse(path: &Path, roots: &[&str]) -> bool {
+    if path == Path::new("/") || is_inside(path, roots) {
+        return true;
+    }
+    roots.iter().any(|root| Path::new(root).starts_with(path))
+}
+
+fn trusted_dir(st: &libc::stat, src: &Path, show: &str) -> io::Result<()> {
+    if st.st_mode & libc::S_IFMT != libc::S_IFDIR || st.st_uid != 0 || st.st_mode & 0o022 != 0 {
+        return Err(link_err(
+            &format!(
+                "stdlib link trust uid={} gid={} mode={:o}",
+                st.st_uid, st.st_gid, st.st_mode
+            ),
+            src,
+            show,
+        ));
+    }
+    Ok(())
+}
+
+fn open_anchored(path: &Path, enforce: bool) -> io::Result<OwnedFd> {
+    let mut cur = open_dir(Path::new("/"))?;
+    if enforce {
+        trusted_dir(&fstat_fd(cur.as_raw_fd())?, path, "")?;
+    }
+    for comp in path.components() {
+        let std::path::Component::Normal(name) = comp else {
+            if matches!(comp, std::path::Component::RootDir) {
+                continue;
+            }
+            return Err(link_err("stdlib link escape", path, ""));
+        };
+        let cn =
+            CString::new(name.as_bytes()).map_err(|_| link_err("stdlib link escape", path, ""))?;
+        let mut st = unsafe { std::mem::zeroed() };
+        if unsafe {
+            libc::fstatat(
+                cur.as_raw_fd(),
+                cn.as_ptr(),
+                &mut st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if enforce {
+            trusted_dir(&st, path, "")?;
+        } else if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return Err(link_err("stdlib link type", path, ""));
+        }
+        cur = open_at(cur.as_raw_fd(), &cn, true)?;
+        let live = fstat_fd(cur.as_raw_fd())?;
+        if live.st_dev != st.st_dev || live.st_ino != st.st_ino {
+            return Err(link_err("stdlib link race", path, ""));
+        }
+        if enforce {
+            trusted_dir(&live, path, "")?;
+        }
+    }
+    Ok(cur)
+}
+
+#[cfg(test)]
+thread_local! {
+    static RACE_SWAP: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_race_swap(path: Option<PathBuf>) {
+    RACE_SWAP.with(|slot| *slot.borrow_mut() = path);
+}
+
+#[cfg(test)]
+fn race_swap_now() {
+    let path = RACE_SWAP.with(|slot| slot.borrow_mut().take());
+    let Some(path) = path else {
+        return;
+    };
+    let _ = fs::remove_file(&path);
+    if let Ok(c) = CString::new(path.as_os_str().as_bytes()) {
+        unsafe {
+            libc::mkfifo(c.as_ptr(), 0o644);
+        }
+    }
+}
+
+fn link_err(kind: &str, src: &Path, text: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{kind} src={} text={text}", src.display()),
+    )
+}
+
+fn open_at(dir: libc::c_int, name: &std::ffi::CStr, directory: bool) -> io::Result<OwnedFd> {
+    let mut flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
+    if directory {
+        flags |= libc::O_DIRECTORY;
+    }
+    let fd = unsafe { libc::openat(dir, name.as_ptr(), flags) };
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+fn dup_owned(fd: libc::c_int) -> io::Result<OwnedFd> {
+    let d = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if d < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(d) })
+    }
+}
+
+fn fstat_fd(fd: libc::c_int) -> io::Result<libc::stat> {
+    let mut st = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(st)
+    }
 }
 
 fn open_dir(path: &Path) -> io::Result<OwnedFd> {
@@ -507,34 +931,5 @@ fn open_dir(path: &Path) -> io::Result<OwnedFd> {
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn failed_stage_directory_is_removed() {
-        let name = format!(
-            "fujiang-runtime-abandon-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let path = std::env::temp_dir().join(&name);
-        let err = super::abandon_fresh_stage(&name).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::Other);
-        assert!(!path.exists(), "{}", path.display());
-    }
-
-    #[test]
-    fn discovery_timeout_drains_and_reaps() {
-        use std::process::Command;
-        use std::time::{Duration, Instant};
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg("-I").arg("-c").arg(
-            "import sys,time; sys.stdout.write('Z'*200000); sys.stdout.flush(); time.sleep(30)",
-        );
-        let start = Instant::now();
-        let err = super::output_timeout(&mut cmd).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
-        assert!(start.elapsed() < Duration::from_secs(8));
-    }
-}
+#[path = "workspace_runtime_tests.rs"]
+mod tests;
