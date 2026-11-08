@@ -415,7 +415,14 @@ fn copy_public_file(src: &Path, stage: &Path, rel: &Path, mode: u32) -> io::Resu
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("refused public file {}", src.display()),
+            format!(
+                "refused public file {} uid={} gid={} mode={:o} regular={}",
+                src.display(),
+                MetadataExt::uid(&st),
+                MetadataExt::gid(&st),
+                MetadataExt::mode(&st),
+                st.is_file()
+            ),
         ));
     }
     let mut out = fs::OpenOptions::new()

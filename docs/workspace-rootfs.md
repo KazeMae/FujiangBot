@@ -10,4 +10,4 @@ runner 使用 bwrap 自带的 `--unshare-user --uid 0 --gid 0`，`--cap-drop ALL
 
 旧的 `scripts/verify-workspace-bundle.py`、`prepare-workspace-rootfs.sh`、`test-workspace-bundle.py`、`test-workspace-rootfs.py` 已删除。CI 不再安装 gpgv，也不再跑这些脚本。QQ 每次调用仍真实 resolve；500000 与 90% 摘要、身份展示不改。
 
-之前 `v3-gc-20261108-gate` 的三遍 319 是旧树的历史门禁，不是这次提交的结果。远端 CI 要等正常 push 之后再看。
+之前 `v3-gc-20261108-gate` 的三遍 319 是旧树的历史门禁，不是这次提交的结果。`869f581` 的本地三遍 Rust 与五份 TLC 通过，不等于远端全绿。CI run `42450488129` 在 bwrap 之前失败：`refused public file /usr/share/dpkg/cputable`（`workspace_backend_tests` 182 与 431）。策略仍是 root 拥有、他人不可写、全世界可读的普通文件。下一次 CI 会 `--reinstall dpkg` 并打印这些表的 uid/gid/mode，拒绝信息也会带上同一组元数据。
