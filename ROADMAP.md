@@ -4,7 +4,7 @@
 > 看板：https://github.com/users/KazeMae/projects/2  
 > 总追踪：#19  
 > 历史（不是当前前提）：2026-11-08 04:15 `v3-gc-20261108-gate` 三遍各 319 通过、0 失败、1 忽略（agent 237、1 忽略）。`1daeef8` 的 313×3、agent 231 更早。当时的 bundle、gpgv、rootfs stub 和六模型 TLC 只属于那棵旧树。
-> 已验证的整体绿仍是 CI `42453053742`（`6e28eb9`，2026-11-08 14:06 Asia/Shanghai）。更早的 `a538be7` 只作历史。`983f41b` 的 CI `42454743976` 已红：209 通过、3 失败、1 忽略，原因是 CI 上 `/usr/share/apt/default-sequoia.config` mode 100777，信任检查拒绝，不是加密不兼容。CI 只重装所属包来恢复元数据，新的绿还没有。远程 apt 未验收：owner 里对 `deb.debian.org` 的记录是 DNS `Temporary failure resolving`，不是已证明的策略拒绝。生产默认关闭。在线 QQ 未验收。细节见 `docs/workspace-rootfs.md`。
+> 本诊断提交之前的整体绿基线是 `1b392b9`，CI `42455208601`（2026-11-08 14:38 Asia/Shanghai）。这不是尚未跑的新 CI。远程 apt 未通过。本轮仅宿主一次与客人一次同域名对照，之后未追加解析或 apt 重试。宿主 14:42:25 的 `getaddrinfo` 是 5 秒时限到点（退出码 124）。原客人诊断失败且保持忽略：过滤后一条 `nameserver 10.0.0.2`，NSS 符号在 libc 中，UDP 套接字不是 seccomp 拒绝，`getaddrinfo` 为 `EAI_AGAIN` -3 后闹钟打断打印。没有重跑。解析器以下原因未知，不能写成完全没有代码问题。不要求改 DNS、软件源或代理。生产默认关闭。在线 QQ 未验收。细节见 `docs/workspace-rootfs.md`。
 
 本文档是规划源。Issue / Milestone / Project 与此对齐。冲突时以已合并 Issue 的验收为准，并回写本文档。
 

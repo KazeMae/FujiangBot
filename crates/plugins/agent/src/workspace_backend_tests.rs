@@ -701,6 +701,72 @@ raise SystemExit(0 if u.returncode else 1)
 }
 
 #[tokio::test]
+#[ignore = "one guest getaddrinfo comparison; fails on DNS; not an apt retry. cargo test -p fujiang-plugin-agent --lib --offline workspace_backend::tests::guest_deb_debian_org_getaddrinfo -- --ignored --exact"]
+async fn guest_deb_debian_org_getaddrinfo() {
+    let root = std::env::temp_dir().join(format!(
+        "ws-dns-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let host = root.join("host");
+    std::fs::create_dir_all(&host).unwrap();
+    let mode = std::fs::Permissions::from_mode(0o700);
+    std::fs::set_permissions(&root, mode.clone()).unwrap();
+    std::fs::set_permissions(&host, mode).unwrap();
+    let auth = PublicAuth { host: host.clone() };
+    let owner = resolved_owner(Source::Friend { id: 9 }, 9).await;
+    let script = r#"
+import ctypes, os, socket, subprocess, sys
+def show(path):
+    try:
+        st=os.lstat(path)
+        print("PATH", path, "mode", oct(st.st_mode), "size", st.st_size, "symlink", os.path.islink(path))
+    except FileNotFoundError:
+        print("PATH", path, "absent")
+for path in ("/etc/resolv.conf","/etc/nsswitch.conf","/lib/runtime/libnss_dns.so.2","/lib/runtime/libc.so.6"):
+    show(path)
+print("RESOLV")
+print(open("/etc/resolv.conf").read(), end="")
+try:
+    fn=ctypes.CDLL(None)._nss_dns_gethostbyname4_r
+    print("NSS_SYM", bool(fn))
+except AttributeError:
+    print("NSS_SYM absent")
+s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.close()
+print("UDP_CLOSED")
+try:
+    done=subprocess.run([sys.executable,"-c",'import socket\nrows=socket.getaddrinfo("deb.debian.org",443)\nprint("ADDR",len(rows))\n'],timeout=5,capture_output=True,text=True)
+except subprocess.TimeoutExpired:
+    print("TIMEOUT")
+    raise SystemExit(124)
+print(done.stdout, end="")
+print(done.stderr, end="")
+print("CHILD", done.returncode)
+if done.returncode:
+    raise SystemExit(done.returncode)
+"#;
+    let run = execute_with(
+        owner,
+        crate::workspace_runner::Payload::Python(script.to_string()),
+        &auth,
+        crate::workspace_runner::run,
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    let run = run.unwrap();
+    let out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.exit_code, 0, "{out}");
+    assert!(out.contains("ADDR"), "{out}");
+}
+
+#[tokio::test]
 #[ignore = "external network prerequisite known DNS failure: deb.debian.org Temporary failure resolving during owner apt-get update; not a proved policy denial. Do not run until an administrator confirms ordinary network is restored. Then: cargo test -p fujiang-plugin-agent --lib --offline workspace_backend::tests::remote_debian_signed_install_persists -- --ignored --exact"]
 async fn remote_debian_signed_install_persists() {
     let root = std::env::temp_dir().join(format!(
