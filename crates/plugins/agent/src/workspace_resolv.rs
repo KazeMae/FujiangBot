@@ -48,8 +48,8 @@ fn read_under(root: RawFd, uid: u32) -> io::Result<String> {
         Err(err) if err.raw_os_error() == Some(libc::ELOOP) => {
             let link = read_link(etc.as_raw_fd(), c"resolv.conf", uid)?;
             let parts = canonical(link.as_str()).ok_or_else(|| unavailable("symlink"))?;
-            let fd = walk_file(root, parts, uid)?;
-            read_stable(fd.as_raw_fd(), uid)
+            let (fd, owner) = walk_file(root, parts, uid)?;
+            read_stable(fd.as_raw_fd(), owner)
         }
         Err(err) => Err(err),
     }
@@ -81,10 +81,96 @@ fn walk_dir(root: RawFd, parts: &[&CStr], uid: u32) -> io::Result<OwnedFd> {
     held.ok_or_else(|| unavailable("parent"))
 }
 
-fn walk_file(root: RawFd, parts: &[&CStr], uid: u32) -> io::Result<OwnedFd> {
-    let parent = walk_dir(root, &parts[..parts.len() - 1], uid)?;
-    let fd = open_at(parent.as_raw_fd(), parts[parts.len() - 1], OPEN_FILE)?;
-    Ok(fd)
+fn walk_file(root: RawFd, parts: &[&CStr], root_uid: u32) -> io::Result<(OwnedFd, u32)> {
+    let mut current = root;
+    let mut held: Option<OwnedFd> = None;
+    let mut owner = root_uid;
+    let mut path = String::new();
+    for (i, name) in parts.iter().enumerate() {
+        if !path.is_empty() {
+            path.push('/');
+        }
+        path.push_str(&name.to_string_lossy());
+        let last = i + 1 == parts.len();
+        let next =
+            open_at(current, name, if last { OPEN_FILE } else { OPEN_DIR }).map_err(|err| {
+                io::Error::new(
+                    err.kind(),
+                    format!("unavailable: resolver parent path={path} os={err}"),
+                )
+            })?;
+        let st = fstat(next.as_raw_fd())?;
+        if last {
+            if !source_ok(&st, owner) {
+                return Err(meta("source", &path, &st));
+            }
+            return Ok((next, owner));
+        }
+        if *name == c"resolve" {
+            owner = resolve_dir_uid(&st, root_uid, &path)?;
+            between();
+            let again = fstat(next.as_raw_fd())?;
+            if snap(&st) != snap(&again) || again.st_uid != owner {
+                return Err(meta("parent", &path, &again));
+            }
+        } else if !dir_ok_st(&st, root_uid) {
+            return Err(meta("parent", &path, &st));
+        }
+        current = next.as_raw_fd();
+        held = Some(next);
+    }
+    drop(held);
+    Err(unavailable("parent"))
+}
+
+fn dir_ok_st(st: &libc::stat, uid: u32) -> bool {
+    st.st_mode & libc::S_IFMT == libc::S_IFDIR && st.st_uid == uid && st.st_mode & 0o022 == 0
+}
+
+fn resolve_dir_uid(st: &libc::stat, root_uid: u32, path: &str) -> io::Result<u32> {
+    if st.st_mode & libc::S_IFMT != libc::S_IFDIR || st.st_mode & 0o022 != 0 {
+        return Err(meta("parent", path, st));
+    }
+    if st.st_uid == root_uid {
+        return Ok(root_uid);
+    }
+    match systemd_resolve_uid() {
+        Ok(uid) if uid == st.st_uid => Ok(uid),
+        _ => Err(meta("parent", path, st)),
+    }
+}
+
+fn systemd_resolve_uid() -> io::Result<u32> {
+    let mut buf = [0u8; 4096];
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getpwnam_r(
+            c"systemd-resolve".as_ptr(),
+            &mut pwd,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() {
+        return Err(unavailable("parent"));
+    }
+    let uid = unsafe { (*result).pw_uid };
+    if uid == 0 {
+        return Err(unavailable("parent"));
+    }
+    Ok(uid)
+}
+
+fn meta(what: &str, path: &str, st: &libc::stat) -> io::Error {
+    io::Error::new(
+        ErrorKind::InvalidData,
+        format!(
+            "unavailable: resolver {what} path={path} uid={} gid={} mode={:o}",
+            st.st_uid, st.st_gid, st.st_mode
+        ),
+    )
 }
 
 fn open_at(dir: RawFd, name: &CStr, flags: i32) -> io::Result<OwnedFd> {
@@ -743,6 +829,33 @@ mod tests {
         .unwrap();
         let linked = read_under(fd.as_raw_fd(), uid).unwrap();
         assert!(linked.contains("192.0.2.10"));
+        let resolve_dir = root.join("run/systemd/resolve");
+        let mut dir_mode = fs::metadata(&resolve_dir).unwrap().permissions();
+        dir_mode.set_mode(0o777);
+        fs::set_permissions(&resolve_dir, dir_mode.clone()).unwrap();
+        assert!(read_under(fd.as_raw_fd(), uid).is_err());
+        dir_mode.set_mode(0o755);
+        fs::set_permissions(&resolve_dir, dir_mode).unwrap();
+        BETWEEN.with(|slot| {
+            let path = resolve_dir.clone();
+            *slot.borrow_mut() = Some(Box::new(move || {
+                let mut mode = fs::metadata(&path).unwrap().permissions();
+                mode.set_mode(0o777);
+                fs::set_permissions(&path, mode).unwrap();
+            }));
+        });
+        assert!(read_under(fd.as_raw_fd(), uid).is_err());
+        let mut restored = fs::metadata(&resolve_dir).unwrap().permissions();
+        restored.set_mode(0o755);
+        fs::set_permissions(&resolve_dir, restored).unwrap();
+        assert!(read_under(fd.as_raw_fd(), uid)
+            .unwrap()
+            .contains("192.0.2.10"));
+        fs::rename(&resolve_dir, root.join("run/systemd/real-resolve")).unwrap();
+        std::os::unix::fs::symlink("real-resolve", &resolve_dir).unwrap();
+        assert!(read_under(fd.as_raw_fd(), uid).is_err());
+        fs::remove_file(&resolve_dir).unwrap();
+        fs::rename(root.join("run/systemd/real-resolve"), &resolve_dir).unwrap();
         let etc_fd = open_at(fd.as_raw_fd(), c"etc", OPEN_DIR).unwrap();
         assert!(read_link(etc_fd.as_raw_fd(), c"resolv.conf", uid.wrapping_add(1)).is_err());
         let alias = CString::new(root.join("etc/link2").as_os_str().as_bytes()).unwrap();

@@ -8,6 +8,6 @@
 
 私人 root 可以带上本机已有的 apt `http`/`https` 方法和 `/etc/ssl/certs/ca-certificates.crt`。标准库符号链接只在最终仍位于 `/usr/lib`、`/usr/lib64`、`/lib`、`/lib64` 时物化成私人普通文件。唯一省略的是 `/usr/lib/python3.<数字>/sitecustomize.py`（或 `lib64`）词法指向 `/etc/python3.<同一数字>/sitecustomize.py`，不读 `/etc`。其它越界失败。目录符号链接拒绝。
 
-本地门已过：fmt、严格 clippy、文件长度、diff；workspace 离线测试三遍，每遍 agent 207 通过、0 失败、0 忽略；五个未改 TLC 通过。新 CI 还没有结果，不能写成已绿。
+本地门曾过 agent 207。CI `42452313303` 上标准库三条链接已核对通过，但 205 通过、2 失败：`unavailable: resolver parent`。还不能写成已绿。
 
 远程 apt 仍缺三样：客人软件源、签名验证器、公钥环。都没有拷入，也没有联网安装。单 UID、无 capability，不安装系统服务，`chown` 到未映射 UID 会失败。在线 QQ 未验收。生产默认关闭。

@@ -27,6 +27,15 @@ jobs:
           std=$(/usr/bin/python3 -I -S -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')
           echo "python stdlib $std"
           find "$std" -type l -printf '%p -> %l\n'
+          for p in /etc/resolv.conf /run /run/systemd /run/systemd/resolve /run/systemd/resolve/stub-resolv.conf /run/systemd/resolve/resolv.conf; do
+            if [ -e "$p" ] || [ -L "$p" ]; then
+              stat -c '%n uid=%u gid=%g mode=%a type=%F' "$p"
+              if [ -L "$p" ]; then readlink "$p"; fi
+            else
+              echo "$p absent"
+            fi
+          done
+          getent passwd systemd-resolve || echo "systemd-resolve absent"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

@@ -104,7 +104,7 @@
 | 群发言人展示 | 群提示里的当前与历史 QQ、昵称、名片、引用 ID | Done | 当前与历史昵称、名片来自真实 `MessageEvent.sender` 快照，值仍按 untrusted 清理控制字符和双向控制符。`host_reply.message_id` 只是事件所带引用 ID，不取正文、不推断作者。旧行 NULL 不回填。真实 ID 不改变权限。私聊不包装。不改 Session / ToolLoop 状态机 |
 | 上下文预算与 LLM 交接摘要 | 500000、90% 摘要、模型上限、CAS、官方看图、摘要用量 | 已实现，待 PR 验收 | 有效预算是配置与已核实上限的较小值。官方 `https://api.deepseek.com` 的 `deepseek-flash` 按 2026-11-07 定价页为 100 万，看图页每图 1024 且多图相加。只适用于该主机名和该模型名，不是 OpenAI、Anthropic 或其它模型的 tile/detail 上界。预算含投影 JSON、工具 schema、已核实图像上界和发出的 `max_output_tokens` 4096。usage 按字段保留有效非负整数；缺字段记 `unknown_calls`，不把缺的 0 当成测得值。旧行迁移后标未确认。记账失败仍走 CompactFail |
 | 工作区绑定与独立 owner | 每次调用真实 resolve；个人与群目录按发言人分开；bash/code 默认不广告 | 生产关闭。未设 `FUJIANG_WORKSPACE_MVP` 则不启动 | 在线 QQ 未验收。同一宿主用户之外没有第二套 UID。owner 锁、重开和原子发布仍在。详见 `docs/workspace-rootfs.md`。 |
-| 工作区运行时 | 公开系统解释器的私人副本，bwrap 单 UID | 默认关闭。`FUJIANG_WORKSPACE_MVP` 指向宿主目录才打开 | 标准库链接只物化仍在 `/usr/lib`、`/usr/lib64`、`/lib`、`/lib64` 的普通文件；仅省略对应版本的 sitecustomize 钩子。本地绝对路径 `.deb` 可离线装入私人 root。远程 apt 未验收。新 CI 尚未出结果，不记已绿。详见 `docs/workspace-rootfs.md`。 |
+| 工作区运行时 | 公开系统解释器的私人副本，bwrap 单 UID | 默认关闭。`FUJIANG_WORKSPACE_MVP` 指向宿主目录才打开 | 标准库链接只物化仍在 `/usr/lib`、`/usr/lib64`、`/lib`、`/lib64` 的普通文件；仅省略对应版本的 sitecustomize 钩子。本地绝对路径 `.deb` 可离线装入私人 root。远程 apt 未验收。CI `42452313303` 标准库链接已过，两条测试仍因 `resolver parent` 失败，当前不记已绿。详见 `docs/workspace-rootfs.md`。 |
 
 前置：agent 热路径改动优先落在 `command.rs` / `plan.rs` / 新模块；单文件勿超 1000 行。
 

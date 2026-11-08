@@ -295,3 +295,31 @@ fn real_stage_crash_is_reclaimed_and_drop_keeps_replacement() {
     }));
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn resolve_dir_accepts_only_root_or_systemd_resolve() {
+    use super::{resolve_dir_uid, systemd_resolve_uid};
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    st.st_mode = libc::S_IFDIR | 0o755;
+    st.st_uid = 0;
+    assert_eq!(resolve_dir_uid(&st, 0, "run/systemd/resolve").unwrap(), 0);
+    st.st_mode = libc::S_IFDIR | 0o777;
+    assert!(resolve_dir_uid(&st, 0, "run/systemd/resolve").is_err());
+    st.st_mode = libc::S_IFLNK | 0o777;
+    assert!(resolve_dir_uid(&st, 0, "run/systemd/resolve").is_err());
+    st.st_mode = libc::S_IFDIR | 0o755;
+    st.st_uid = 1;
+    let text = resolve_dir_uid(&st, 0, "run/systemd/resolve")
+        .unwrap_err()
+        .to_string();
+    assert!(text.contains("uid=1"), "{text}");
+    assert!(text.contains("path=run/systemd/resolve"), "{text}");
+    if let Ok(uid) = systemd_resolve_uid() {
+        assert_ne!(uid, 0);
+        st.st_uid = uid;
+        st.st_mode = libc::S_IFDIR | 0o755;
+        assert_eq!(resolve_dir_uid(&st, 0, "run/systemd/resolve").unwrap(), uid);
+        st.st_uid = uid.wrapping_add(1);
+        assert!(resolve_dir_uid(&st, 0, "run/systemd/resolve").is_err());
+    }
+}

@@ -10,10 +10,10 @@ runner 使用 bwrap 自带的 `--unshare-user --uid 0 --gid 0`，`--cap-drop ALL
 
 旧的 `scripts/verify-workspace-bundle.py`、`prepare-workspace-rootfs.sh`、`test-workspace-bundle.py`、`test-workspace-rootfs.py` 已删除。CI 不再安装 gpgv，也不再跑这些脚本。QQ 每次调用仍真实 resolve；500000 与 90% 摘要、身份展示不改。
 
-标准库符号链接不原样种进客人。最终路径必须落在 `/usr/lib`、`/usr/lib64`、`/lib`、`/lib64`（不是整个 `/usr`）。祖先只允许路过。打开后的设备号、inode、uid 和 mode 来自该 FD。目录符号链接拒绝。唯一省略且不读 `/etc` 的钩子：源路径正好是 `/usr/lib/python3.<数字>/sitecustomize.py` 或 `/usr/lib64` 下同名文件，词法归一后的链接文本正好是 `/etc/python3.<同一数字>/sitecustomize.py`（含 `../../../etc/python3.14/sitecustomize.py` 这种 `dh_link` 相对形式）。其它越界都是错误。CI `42450907521` 的具体链接文本还没记下来，不能先认定是哪一条。
+标准库符号链接不原样种进客人。最终路径必须落在 `/usr/lib`、`/usr/lib64`、`/lib`、`/lib64`（不是整个 `/usr`）。祖先只允许路过。打开后的设备号、inode、uid 和 mode 来自该 FD。目录符号链接拒绝。唯一省略且不读 `/etc` 的钩子：源路径正好是 `/usr/lib/python3.<数字>/sitecustomize.py` 或 `/usr/lib64` 下同名文件，词法归一后的链接文本正好是 `/etc/python3.<同一数字>/sitecustomize.py`（含 `../../../etc/python3.14/sitecustomize.py` 这种 `dh_link` 相对形式）。其它越界都是错误。CI `42452313303` 已核对这三条：`libpython3.14.so` → `../../x86_64-linux-gnu/libpython3.14.so.1`，`sitecustomize.py` → `/etc/python3.14/sitecustomize.py`，`_sysconfigdata__x86_64-linux-gnu.py` → 同目录的 linux 前缀文件。
 
-历史：`v3-gc-20261108-gate` 三遍各 319（agent 237、1 忽略）只属于旧树。CI `42450488129`、`42450907521` 是更早的失败，不是这次结果。
+历史：`v3-gc-20261108-gate` 三遍各 319（agent 237、1 忽略）只属于旧树。CI `42450488129`、`42450907521` 是更早的失败。
 
-这次本地门：fmt、严格 clippy、文件长度、diff 通过；workspace 离线测试三遍，每遍 agent 207 通过、0 失败、0 忽略；五个未改 TLC 模型通过。新的 CI 还没有结果，不能写成已绿。
+CI `42452313303`（`a538be7`）205 通过、2 失败，两条本机测试在载荷前是 `unavailable: resolver parent`。`/run` 与 `/run/systemd` 仍须 root 且他人不可写；只有固定的 `resolve` 目录可以属于 `systemd-resolve`，下面的文件必须是同一属主。这次修复还没有新的 CI，不能写成已绿。本地此前三遍 agent 207 不覆盖这台 CI 的 resolved 目录。
 
 仍缺的远程 apt：客人自己的软件源、签名验证器，以及对应的公钥环。这三样都没有拷入，也没有发起过网络安装。单 UID、无 capability，不安装系统服务，也不能为包创建其它 UID。在线 QQ 未验收。生产默认关闭。
