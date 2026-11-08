@@ -258,8 +258,8 @@ struct FixtureAuth {
 impl crate::workspace_backend::RootfsAuthority for FixtureAuth {
     fn acquire(
         &self,
-    ) -> anyhow::Result<(std::path::PathBuf, crate::workspace_store::VerifiedBase)> {
-        let base = crate::workspace_store::VerifiedBase::fixture(&self.image, self.identity)?;
+    ) -> anyhow::Result<(std::path::PathBuf, crate::workspace_store::PublicRuntime)> {
+        let base = crate::workspace_store::PublicRuntime::fixture(&self.image, self.identity)?;
         Ok((self.host.clone(), base))
     }
 }

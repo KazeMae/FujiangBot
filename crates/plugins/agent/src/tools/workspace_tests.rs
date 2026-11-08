@@ -21,7 +21,7 @@ use crate::client::Role;
 use crate::config::AgentConfig;
 use crate::session;
 use crate::workspace::{command, WorkspaceCmd, RUNNER_UNAVAILABLE};
-use crate::workspace_backend::{self, RootfsAuthority, VerifiedBase};
+use crate::workspace_backend::{self, PublicRuntime, RootfsAuthority};
 use crate::workspace_runner::{Payload, RunResult};
 use crate::workspace_store::{Owner, WorkspaceStore};
 
@@ -42,10 +42,10 @@ struct FixtureAuth {
 }
 
 impl RootfsAuthority for FixtureAuth {
-    fn acquire(&self) -> anyhow::Result<(PathBuf, VerifiedBase)> {
+    fn acquire(&self) -> anyhow::Result<(PathBuf, PublicRuntime)> {
         Ok((
             self.host.clone(),
-            VerifiedBase::fixture(&self.image, IDENTITY)?,
+            PublicRuntime::fixture(&self.image, IDENTITY)?,
         ))
     }
 }
@@ -236,7 +236,7 @@ fn read_mark(work: BorrowedFd<'_>) -> Option<Vec<u8>> {
 }
 
 fn stored(host: &Path, image: &Path, owner: Owner) -> Option<Vec<u8>> {
-    let base = VerifiedBase::fixture(image, IDENTITY).unwrap();
+    let base = PublicRuntime::fixture(image, IDENTITY).unwrap();
     let store = WorkspaceStore::open(host, owner, &base).unwrap();
     read_mark(store.as_fd())
 }

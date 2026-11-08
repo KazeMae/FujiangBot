@@ -1,7 +1,7 @@
 use std::ffi::CString;
 use std::io::{self, ErrorKind};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
@@ -68,7 +68,7 @@ impl AsFd for WorkspaceStore {
 }
 
 impl WorkspaceStore {
-    pub fn open(host: &Path, owner: Owner, base: &VerifiedBase) -> io::Result<Self> {
+    pub fn open(host: &Path, owner: Owner, base: &PublicRuntime) -> io::Result<Self> {
         let (ns, id_s, id) = match owner {
             Owner::Personal(id) => ("personal", id.to_string(), id),
             Owner::Group(id) => ("group", id.to_string(), id),
@@ -282,11 +282,8 @@ mod workspace_seed;
 #[path = "workspace_seed_tests.rs"]
 mod workspace_seed_tests;
 
-#[path = "workspace_acceptance.rs"]
-mod acceptance;
+#[path = "workspace_runtime.rs"]
+mod runtime;
 
-pub(crate) fn acquire_accepted(trust: &Path) -> io::Result<(PathBuf, VerifiedBase)> {
-    acceptance::acquire(trust)
-}
-
-pub(crate) use workspace_seed::VerifiedBase;
+pub(crate) use runtime::stage_public;
+pub(crate) use workspace_seed::PublicRuntime;

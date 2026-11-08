@@ -10,9 +10,6 @@ use std::time::{Duration, Instant};
 #[path = "workspace_runner_io.rs"]
 mod workspace_runner_io;
 
-#[path = "workspace_userns.rs"]
-mod workspace_userns;
-
 #[path = "workspace_resolv.rs"]
 mod workspace_resolv;
 
@@ -211,10 +208,6 @@ pub fn run(root: BorrowedFd<'_>, work: BorrowedFd<'_>, payload: Payload) -> Resu
     ensure_bwrap()?;
     ensure_root_layout(root)?;
     workspace_resolv::install(root.as_raw_fd()).context("unavailable: resolver")?;
-    // Helpers run here, before the bwrap child sets no-new-privs.
-    let pinned = workspace_userns::bootstrap().context("userns bootstrap")?;
-    let userns_fd = dup_high(pinned.as_raw_fd()).context("dup userns fd")?;
-    drop(pinned);
     let root_fd = dup_high(root.as_raw_fd()).context("dup root fd")?;
     let work_fd = dup_high(work.as_raw_fd()).context("dup work fd")?;
     let seccomp = seccomp_memfd().context("seccomp memfd")?;
@@ -225,7 +218,6 @@ pub fn run(root: BorrowedFd<'_>, work: BorrowedFd<'_>, payload: Payload) -> Resu
     require_high(info_w.as_raw_fd())?;
     require_high(block_r.as_raw_fd())?;
     require_high(seccomp.as_raw_fd())?;
-    require_high(userns_fd.as_raw_fd())?;
 
     let mut cmd = Command::new("/usr/bin/bwrap");
     cmd.stdin(Stdio::null())
@@ -239,7 +231,6 @@ pub fn run(root: BorrowedFd<'_>, work: BorrowedFd<'_>, payload: Payload) -> Resu
         info_w.as_raw_fd(),
         block_r.as_raw_fd(),
         seccomp.as_raw_fd(),
-        userns_fd.as_raw_fd(),
     );
     match &payload {
         Payload::Bash(script) => {
@@ -263,7 +254,6 @@ pub fn run(root: BorrowedFd<'_>, work: BorrowedFd<'_>, payload: Payload) -> Resu
         info_w.as_raw_fd(),
         block_r.as_raw_fd(),
         seccomp.as_raw_fd(),
-        userns_fd.as_raw_fd(),
     );
 
     let deadline = Instant::now() + WALL;
@@ -293,7 +283,6 @@ pub fn run(root: BorrowedFd<'_>, work: BorrowedFd<'_>, payload: Payload) -> Resu
     drop(seccomp);
     drop(root_fd);
     drop(work_fd);
-    drop(userns_fd);
 
     let mut stdout_rx = spawn_drain(stdout).context("stdout reader")?;
     let mut stderr_rx = spawn_drain(stderr).context("stderr reader")?;
@@ -348,10 +337,9 @@ fn push_fixed_args(
     info: RawFd,
     block: RawFd,
     seccomp: RawFd,
-    userns: RawFd,
 ) {
-    cmd.arg("--userns")
-        .arg(userns.to_string())
+    // One uid: bwrap's own user namespace. No newuidmap and no extra caps.
+    cmd.arg("--unshare-user")
         .arg("--uid")
         .arg("0")
         .arg("--gid")
@@ -361,18 +349,6 @@ fn push_fixed_args(
         .arg("--unshare-uts")
         .arg("--cap-drop")
         .arg("ALL")
-        .arg("--cap-add")
-        .arg("CAP_CHOWN")
-        .arg("--cap-add")
-        .arg("CAP_DAC_OVERRIDE")
-        .arg("--cap-add")
-        .arg("CAP_FOWNER")
-        .arg("--cap-add")
-        .arg("CAP_FSETID")
-        .arg("--cap-add")
-        .arg("CAP_SETUID")
-        .arg("--cap-add")
-        .arg("CAP_SETGID")
         .arg("--new-session")
         .arg("--die-with-parent")
         .arg("--bind-fd")
@@ -401,20 +377,46 @@ fn push_fixed_args(
         .arg("--clearenv")
         .arg("--setenv")
         .arg("PATH")
-        .arg("/usr/bin:/bin")
+        .arg("/usr/sbin:/usr/bin:/bin")
+        .arg("--setenv")
+        .arg("LD_LIBRARY_PATH")
+        .arg("/lib/runtime")
         .arg("--setenv")
         .arg("HOME")
         .arg("/work")
         .arg("--setenv")
         .arg("LANG")
-        .arg("C")
-        .arg("--info-fd")
+        .arg("C");
+    if guest_ca(root) {
+        cmd.arg("--setenv")
+            .arg("SSL_CERT_FILE")
+            .arg("/etc/ssl/certs/ca-certificates.crt");
+    }
+    cmd.arg("--info-fd")
         .arg(info.to_string())
         .arg("--block-fd")
         .arg(block.to_string())
         .arg("--seccomp")
         .arg(seccomp.to_string())
         .arg("--");
+}
+
+fn guest_ca(root: RawFd) -> bool {
+    let fd = unsafe {
+        libc::openat(
+            root,
+            c"etc/ssl/certs/ca-certificates.crt".as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return false;
+    }
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let ok =
+        unsafe { libc::fstat(fd, &mut st) } == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFREG;
+    unsafe { libc::close(fd) };
+    ok
 }
 
 fn install_pre_exec(
@@ -424,13 +426,16 @@ fn install_pre_exec(
     info: RawFd,
     block: RawFd,
     seccomp: RawFd,
-    userns: RawFd,
 ) {
-    let keep = [root, work, info, block, seccomp, userns];
+    let keep = [root, work, info, block, seccomp];
     unsafe {
         cmd.pre_exec(move || {
             deny_new_privs()?;
             set_limits()?;
+            // close_range marks every fd >= 3 cloexec before exec. Unknown
+            // descriptors die at exec. The whitelist is cleared so bwrap
+            // still receives --bind-fd, info, block, and seccomp. Do not
+            // close them here: Rust's spawn error pipe is also fd >= 3.
             close_from_stdio()?;
             for fd in keep {
                 clear_cloexec(fd)?;
@@ -524,6 +529,15 @@ fn ensure_bwrap() -> Result<()> {
     }
     if st.st_mode & libc::S_ISUID != 0 {
         bail!("bwrap must not be setuid");
+    }
+    let help = std::process::Command::new("/usr/bin/bwrap")
+        .arg("--help")
+        .env_clear()
+        .output()
+        .context("bwrap --help")?;
+    let text = String::from_utf8_lossy(&help.stdout);
+    if !text.contains("--bind-fd") {
+        bail!("bwrap has no --bind-fd");
     }
     Ok(())
 }

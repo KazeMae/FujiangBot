@@ -39,4 +39,3 @@ run_model Session
 run_model Workspace
 run_model OwnerLayer
 run_model Runner
-run_model Bundle

@@ -2,6 +2,8 @@
 
 这三项检查对着 `fujiang-plugin-agent`。规划里的总表在 [路线图](../ROADMAP.md)。
 
+2026-11-08：`scripts/verify-workspace-bundle.py`、`scripts/test-workspace-bundle.py`、`scripts/test-workspace-bundle-gpgv.py`、`scripts/prepare-workspace-rootfs.sh`、`scripts/test-workspace-rootfs.py` 已删除。下文命令块里出现它们，只是当时基线的历史记录，不能再执行。当前工作区入口见 [workspace-rootfs](workspace-rootfs.md)：默认关闭，`FUJIANG_WORKSPACE_MVP` 才打开，远程 apt 未验收。
+
 ## 量 fujiang-plugin-agent 的行覆盖率
 
 行覆盖的目标是至少 80%。在仓库根目录执行。

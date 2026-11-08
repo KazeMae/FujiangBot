@@ -1,9 +1,9 @@
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::PathBuf;
 
-const RUNNER_UNAVAILABLE: &str = "accepted official rootfs unavailable";
+const RUNNER_UNAVAILABLE: &str = "workspace mvp disabled";
 
-pub(crate) use crate::workspace_store::VerifiedBase;
+pub(crate) use crate::workspace_store::PublicRuntime;
 
 pub(crate) fn production_available() -> bool {
     ProductionSupply.acquire().is_ok()
@@ -58,22 +58,22 @@ fn map_owner(
 }
 
 pub(crate) trait RootfsAuthority {
-    fn acquire(&self) -> anyhow::Result<(PathBuf, VerifiedBase)>;
+    fn acquire(&self) -> anyhow::Result<(PathBuf, PublicRuntime)>;
 }
 
 struct ProductionSupply;
 
 impl RootfsAuthority for ProductionSupply {
-    fn acquire(&self) -> anyhow::Result<(PathBuf, VerifiedBase)> {
-        // Model payloads never reach here. Only an administrator process env can
-        // name the trust directory, and a present path is still not acceptance.
-        let raw = std::env::var_os("FUJIANG_WORKSPACE_ACCEPTANCE")
+    fn acquire(&self) -> anyhow::Result<(PathBuf, PublicRuntime)> {
+        // Opt-in names the private host directory only. No approval file.
+        let raw = std::env::var_os("FUJIANG_WORKSPACE_MVP")
             .ok_or_else(|| anyhow::anyhow!(RUNNER_UNAVAILABLE))?;
         if raw.is_empty() {
             return Err(anyhow::anyhow!(RUNNER_UNAVAILABLE));
         }
-        crate::workspace_store::acquire_accepted(std::path::Path::new(&raw))
-            .map_err(|err| anyhow::anyhow!("{RUNNER_UNAVAILABLE}: {err}"))
+        let runtime = crate::workspace_store::stage_public()
+            .map_err(|err| anyhow::anyhow!("{RUNNER_UNAVAILABLE}: {err}"))?;
+        Ok((std::path::PathBuf::from(raw), runtime))
     }
 }
 

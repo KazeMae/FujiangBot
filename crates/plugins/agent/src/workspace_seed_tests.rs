@@ -10,7 +10,7 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use super::{Owner, VerifiedBase, WorkspaceStore};
+use super::{Owner, PublicRuntime, WorkspaceStore};
 
 const DIGEST: [u8; 32] = [0x11; 32];
 const TOOL: &[u8] = b"tool-bytes";
@@ -219,8 +219,8 @@ fn seed_base(base: &Path) {
     symlink("/usr/bin/tool", base.join("alternatives/tool")).unwrap();
 }
 
-fn fixture(base: &Path, digest: [u8; 32]) -> VerifiedBase {
-    VerifiedBase::fixture(base, digest).unwrap()
+fn fixture(base: &Path, digest: [u8; 32]) -> PublicRuntime {
+    PublicRuntime::fixture(base, digest).unwrap()
 }
 
 fn host_dir(root: &Path) -> PathBuf {

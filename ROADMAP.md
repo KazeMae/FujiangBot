@@ -103,8 +103,8 @@
 | 群发言人展示 | 群提示里的当前与历史 QQ、昵称、名片、引用 ID | Done | 当前与历史昵称、名片来自真实 `MessageEvent.sender` 快照，值仍按 untrusted 清理控制字符和双向控制符。`host_reply.message_id` 只是事件所带引用 ID，不取正文、不推断作者。旧行 NULL 不回填。真实 ID 不改变权限。私聊不包装。不改 Session / ToolLoop 状态机 |
 | 上下文预算与 LLM 交接摘要 | 500000、90% 摘要、模型上限、CAS、官方看图、摘要用量 | 已实现，待 PR 验收 | 有效预算是配置与已核实上限的较小值。官方 `https://api.deepseek.com` 的 `deepseek-flash` 按 2026-11-07 定价页为 100 万，看图页每图 1024 且多图相加。只适用于该主机名和该模型名，不是 OpenAI、Anthropic 或其它模型的 tile/detail 上界。预算含投影 JSON、工具 schema、已核实图像上界和发出的 `max_output_tokens` 4096。usage 按字段保留有效非负整数；缺字段记 `unknown_calls`，不把缺的 0 当成测得值。旧行迁移后标未确认。记账失败仍走 CompactFail |
 | 工作区绑定与独立 owner | 每次真实 resolve；个人/群目录；bash/code 规格默认不广告 | 生产关闭。`v3-gc-20261108-gate` 为三遍各 319 通过、0 失败、1 忽略。远端 CI 等正常 push 之后，当前不记已绿。`1daeef8` 的 313×3、agent 231 是历史 DNS 门 | 三块仍未在线验收。缺 uidmap、libsubid5、gpgv 和官方四件。v3 只在导入剥离 SUID/SGID 并丢弃 capability PAX。完整标记的 stage 才回收；半截、无标记和旧 `.tmp` 留下，不当成可删。`.resolv.*` 不是客人存储。DNS 走法、0444 拒绝、fsync 后 rename 不变。inbox 只认 `/workspace/agent-tools/fujiang-local-20261107/offline-inbox`。详见 `docs/workspace-rootfs.md`。 |
-| 工作区离线验证入口 | `python3 scripts/verify-workspace-bundle.py /绝对source /私有parent/新snapshot` | 入口已实现。`v3-gc-20261108-gate` 为三遍各 319。`1daeef8` 的 313×3 是历史。远端 CI 等正常 push 之后，当前不记已绿。PR 62 | 只接受 `source target` 或 `--unpack source target`。`--help` 报错。无 `--unpack` 只验证。主指纹 `843938DF228D22F7B3742BC0D94AA3F0EFE21092`。不自动写 `approved: true`。 |
-| `--unpack SOURCE NEWTARGET` | 签名检查后的私有解包与树提案 | receipt 带 `tree_sha256` 与 v3 `tree_policy`，`execution_accepted` 恒 false。v1 和 v2 批准拒绝。没有 `acceptance.json` | 运行时不设 `RLIMIT_FSIZE`。`/tmp` 持久且 `--chmod 1777`。`/run` 与 `/sys` 仍是 64MiB tmpfs。本切片已把标准 uidmap、`fd:N`、`setgroups=allow`、bwrap `--userns` 和六个命名空间 capability（CHOWN、DAC_OVERRIDE、FOWNER、FSETID、SETUID、SETGID）接进 runner。`CAP_FSETID` 用来保住非本组 SGID；`CAP_FOWNER` 不够，而且不是宿主 capability。缺已安装的 04755 辅助程序、真实完整映射和官方 rootfs 验收，所以还不是 apt，也没有真实跨 GID 的 SGID。`box:100000:65536` 仍是显式部署范围。不重试 DNS、改源或 CI 下载。 |
+| 工作区运行时 | 公开系统解释器的私人副本，bwrap 单 UID | 默认关闭。`FUJIANG_WORKSPACE_MVP` 指向宿主目录才打开 | 不下载 Ubuntu，不验签，不装 `newuidmap`。本地绝对路径 `.deb` 可离线装入私人 root。远程 apt 未验收。详见 `docs/workspace-rootfs.md`。 |
+| `--unpack SOURCE NEWTARGET` | 签名检查后的私有解包与树提案 | receipt 带 `tree_sha256` 与 v3 `tree_policy`，`execution_accepted` 恒 false。v1 和 v2 批准拒绝。没有 `acceptance.json` | 运行时不设 `RLIMIT_FSIZE`。`/tmp` 持久且 `--chmod 1777`。`/run` 与 `/sys` 仍是 64MiB tmpfs。runner 是 bwrap `--unshare-user --uid 0 --gid 0`，`--cap-drop ALL`。种子是公开系统运行时的私人副本。`FUJIANG_WORKSPACE_MVP` 才打开，默认关。没有 `newuidmap`，没有批准文件。单 UID 不能 chown 未映射 UID。远程 apt 未验收。 |
 
 前置：agent 热路径改动优先落在 `command.rs` / `plan.rs` / 新模块；单文件勿超 1000 行。
 
@@ -131,10 +131,9 @@
 | `spec/tla/ToolLoop.tla` | 轮数硬顶；工具错误不离开降级态；无 tools 时单次 complete | P0 |
 | `spec/tla/Session.tla` | reset 清空消息和摘要并保留人设；forget 只清空摘要；fold 不改人设 | P1 |
 | `spec/tla/Runner.tla` | 抽象顺序：阻塞、pin init pidfd、释放 payload、确认 init 死亡并回收 wrapper、join、成功。拒绝时零 spawn。正常finish解除看护前确认init和wrapper清理；Drop仅尽力清理，不证明未知错误下最终无残留。成功前进程清理和 reader 回收都完成。未知清理不能标成功。不证明 OS 隔离或真实 apt | P1 |
-| `spec/tla/Bundle.tla` | 抽象顺序：刚验证通过、密封归档、worker 写私有 stage、成功回收、再发布 rootfs 和 receipt。失败先 kill/reap 再 cleanup，且不发布。`executionAccepted` 始终 FALSE。发布前须 verified/hash、sealed、workerReaped。失败没有可用 rootfs。不证明密码、OS、CPU 或权限 | P1 |
 | `spec/tla/OwnerLayer.tla` | 生产 `prod` 恒假、base 不变。两 owner 的 inode 彼此不同且不同于 base。policy 为假时零字节、无 metadata、无 partial、锁空闲。staging 持锁且 partial；running 要求 metadata 正常且无 partial。不证明 OS 隔离、配额或官方 rootfs | P1 |
 
-实现须对照模型；改 loop、session、runner、owner 层或 bundle 解包顺序时先改 TLA+ 或同步改。
+实现须对照模型；改 loop、session、runner 或 owner 层时先改 TLA+ 或同步改。归档批准模型 `Bundle.tla` 已删除，不再代表当前运行时。
 
 ## 覆盖率范围
 

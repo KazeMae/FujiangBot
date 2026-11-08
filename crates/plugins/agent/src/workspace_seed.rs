@@ -20,7 +20,7 @@ struct LiveCleanup {
     lease: OwnedFd,
 }
 
-pub(crate) struct VerifiedBase {
+pub(crate) struct PublicRuntime {
     root: OwnedFd,
     identity: [u8; 32],
     live: Option<LiveCleanup>,
@@ -28,7 +28,7 @@ pub(crate) struct VerifiedBase {
     check_tree: bool,
 }
 
-impl Drop for VerifiedBase {
+impl Drop for PublicRuntime {
     fn drop(&mut self) {
         if let Some(live) = self.live.take() {
             let _lock = live.lease.as_raw_fd();
@@ -37,7 +37,7 @@ impl Drop for VerifiedBase {
     }
 }
 
-impl VerifiedBase {
+impl PublicRuntime {
     #[cfg(test)]
     pub(crate) fn fixture(root: &Path, identity: [u8; 32]) -> io::Result<Self> {
         Ok(Self {
@@ -48,18 +48,7 @@ impl VerifiedBase {
         })
     }
 
-    /// Test-only sealed base. Still checked at seed; not a receipt constructor.
-    #[cfg(test)]
-    pub(crate) fn checking(root: &Path, identity: [u8; 32]) -> io::Result<Self> {
-        Ok(Self {
-            root: open_host(root)?,
-            identity,
-            live: None,
-            check_tree: true,
-        })
-    }
-
-    /// Sealed directory FD plus the approved tree digest. Not a path constructor.
+    /// Directory FD plus the tree digest of this private stage. Not a receipt.
     pub(crate) fn from_sealed(
         root: OwnedFd,
         identity: [u8; 32],
@@ -87,15 +76,21 @@ impl VerifiedBase {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn copy_tree(source: RawFd, dest: RawFd) -> io::Result<()> {
     copy::populate(source, dest)
 }
 
+#[cfg(test)]
 pub(crate) fn remove_tree(parent: RawFd, name: &CString) -> io::Result<()> {
     copy::remove_partial(parent, name)
 }
 
-pub(super) fn ensure_host_outside_base(host: RawFd, base: &VerifiedBase) -> io::Result<()> {
+pub(super) fn discard_stage(parent: RawFd, name: &CString) -> io::Result<()> {
+    copy::remove_partial(parent, name)
+}
+
+pub(super) fn ensure_host_outside_base(host: RawFd, base: &PublicRuntime) -> io::Result<()> {
     let base_st = fstat(base.root.as_raw_fd())?;
     let mut cur = dup_fd(host)?;
     for _ in 0..1024 {
@@ -116,7 +111,7 @@ pub(super) fn ensure_host_outside_base(host: RawFd, base: &VerifiedBase) -> io::
 pub(super) fn ensure_rootfs(
     owner_fd: RawFd,
     owner: Owner,
-    base: &VerifiedBase,
+    base: &PublicRuntime,
 ) -> io::Result<OwnedFd> {
     private_dir(owner_fd)?;
     private_dir(open_dir(owner_fd, &one_component("work")?)?.as_raw_fd())?;
@@ -138,7 +133,7 @@ fn open_published(
     owner_fd: RawFd,
     name: &CString,
     owner: Owner,
-    base: &VerifiedBase,
+    base: &PublicRuntime,
 ) -> io::Result<OwnedFd> {
     let generation = open_dir(owner_fd, name)?;
     private_dir(generation.as_raw_fd())?;
@@ -154,7 +149,7 @@ fn seed(
     stage: &CString,
     published: &CString,
     owner: Owner,
-    base: &VerifiedBase,
+    base: &PublicRuntime,
 ) -> io::Result<OwnedFd> {
     if unsafe { libc::mkdirat(owner_fd, stage.as_ptr(), 0o700) } != 0 {
         return Err(io::Error::last_os_error());

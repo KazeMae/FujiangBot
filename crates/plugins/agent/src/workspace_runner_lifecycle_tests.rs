@@ -226,7 +226,7 @@ fn seccomp_blocks_nested_namespaces_without_blocking_plain_clone() {
 #[test]
 fn push_fixed_args_block_fd_unshare_without_as_pid_1() {
     let mut cmd = Command::new("bwrap");
-    push_fixed_args(&mut cmd, 10, 11, 12, 13, 14, 15);
+    push_fixed_args(&mut cmd, 10, 11, 12, 13, 14);
     let args: Vec<String> = cmd
         .get_args()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -235,7 +235,7 @@ fn push_fixed_args_block_fd_unshare_without_as_pid_1() {
         .windows(2)
         .any(|pair| pair[0] == "--block-fd" && pair[1] == "13"));
     for flag in [
-        "--userns",
+        "--unshare-user",
         "--unshare-pid",
         "--unshare-ipc",
         "--unshare-uts",
@@ -248,37 +248,8 @@ fn push_fixed_args_block_fd_unshare_without_as_pid_1() {
         .windows(2)
         .any(|pair| pair[0] == "--cap-drop" && pair[1] == "ALL"));
     assert!(args
-        .windows(2)
-        .any(|pair| pair[0] == "--userns" && pair[1] == "15"));
-    for cap in [
-        "CAP_CHOWN",
-        "CAP_DAC_OVERRIDE",
-        "CAP_FOWNER",
-        "CAP_FSETID",
-        "CAP_SETUID",
-        "CAP_SETGID",
-    ] {
-        assert!(args
-            .windows(2)
-            .any(|pair| pair[0] == "--cap-add" && pair[1] == cap));
-    }
-    let added: Vec<&str> = args
-        .windows(2)
-        .filter(|pair| pair[0] == "--cap-add")
-        .map(|pair| pair[1].as_str())
-        .collect();
-    assert_eq!(
-        added,
-        [
-            "CAP_CHOWN",
-            "CAP_DAC_OVERRIDE",
-            "CAP_FOWNER",
-            "CAP_FSETID",
-            "CAP_SETUID",
-            "CAP_SETGID"
-        ]
-    );
-    assert!(args.iter().all(|arg| arg != "--unshare-user"));
+        .iter()
+        .all(|arg| arg != "--userns" && arg != "--cap-add"));
     assert!(args
         .windows(2)
         .any(|pair| pair[0] == "--size" && pair[1] == "67108864"));
