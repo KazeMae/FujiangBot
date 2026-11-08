@@ -10,4 +10,4 @@
 
 历史：CI `42452313303`（`a538be7`）205 通过、2 失败，是 `unavailable: resolver parent`。已验证的整体绿是 `6e28eb9` 的 CI `42453053742`（2026-11-08 14:06 Asia/Shanghai）；日志里 `resolve` 目录 uid 989、mode 755，stub 是 644。
 
-远程 apt 未验收，这片还没推，新 CI 待跑。Debian/Ubuntu 的官方 HTTPS 源和公钥环种进私人 root，并且是正常启用的；种的时候不拉取。`APT::Sandbox::User "root"` 是 bwrap 用户命名空间里的 uid 0，映射到宿主非特权 uid，不是宿主 root。owner 里对 `deb.debian.org` 的 `apt-get update` 得到 `Temporary failure resolving`，这是 DNS 失败，没有证明策略拒绝。不再由代理重试。本地夹具已通过正确密钥安装、错钥和篡改拒绝，以及 CA 拷贝失败清理；宿主和其他 owner 未改。这不是官方安装。被忽略的 `sensible-utils` 验收没有跑，不能写成通过。单 UID、无 capability，不安装系统服务。在线 QQ 未验收。生产默认关闭。
+远程 apt 未验收。CI `42454743976`（`983f41b`）209 通过、3 失败、1 忽略：`default-sequoia.config` 在 CI 上是 root 但 mode 100777，信任检查正确地拒绝了。CI 用所属包的普通重装恢复元数据，还不能写成已绿。Debian/Ubuntu 的官方 HTTPS 源和公钥环种进私人 root，并且是正常启用的；种的时候不拉取。`APT::Sandbox::User "root"` 是 bwrap 用户命名空间里的 uid 0，映射到宿主非特权 uid，不是宿主 root。owner 里对 `deb.debian.org` 的 `apt-get update` 得到 `Temporary failure resolving`，这是 DNS 失败，没有证明策略拒绝。不再由代理重试。本地夹具已通过正确密钥安装、错钥和篡改拒绝，以及 CA 拷贝失败清理；宿主和其他 owner 未改。这不是官方安装。被忽略的 `sensible-utils` 验收没有跑，不能写成通过。单 UID、无 capability，不安装系统服务。在线 QQ 未验收。生产默认关闭。

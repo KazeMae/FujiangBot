@@ -4,7 +4,7 @@
 > 看板：https://github.com/users/KazeMae/projects/2  
 > 总追踪：#19  
 > 历史（不是当前前提）：2026-11-08 04:15 `v3-gc-20261108-gate` 三遍各 319 通过、0 失败、1 忽略（agent 237、1 忽略）。`1daeef8` 的 313×3、agent 231 更早。当时的 bundle、gpgv、rootfs stub 和六模型 TLC 只属于那棵旧树。
-> 已验证的整体绿：CI `42453053742`（`6e28eb9`，2026-11-08 14:06 Asia/Shanghai）。更早的 `a538be7` / `42452313303` 是 `resolver parent` 失败，只作历史。其后的远程 apt 片还在本地，新 CI 未推、不能写成已绿。远程 apt 未验收：owner 里对 `deb.debian.org` 的记录是 DNS `Temporary failure resolving`，不是已证明的策略拒绝。生产默认关闭。在线 QQ 未验收。细节见 `docs/workspace-rootfs.md`。
+> 已验证的整体绿仍是 CI `42453053742`（`6e28eb9`，2026-11-08 14:06 Asia/Shanghai）。更早的 `a538be7` 只作历史。`983f41b` 的 CI `42454743976` 已红：209 通过、3 失败、1 忽略，原因是 CI 上 `/usr/share/apt/default-sequoia.config` mode 100777，信任检查拒绝，不是加密不兼容。CI 只重装所属包来恢复元数据，新的绿还没有。远程 apt 未验收：owner 里对 `deb.debian.org` 的记录是 DNS `Temporary failure resolving`，不是已证明的策略拒绝。生产默认关闭。在线 QQ 未验收。细节见 `docs/workspace-rootfs.md`。
 
 本文档是规划源。Issue / Milestone / Project 与此对齐。冲突时以已合并 Issue 的验收为准，并回写本文档。
 
