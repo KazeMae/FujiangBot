@@ -1,4 +1,39 @@
 #[test]
+fn ca_copy_failure_removes_the_stage() {
+    let name = format!(
+        "fujiang-runtime-badca-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let parent = std::env::temp_dir();
+    let stage = parent.join(&name);
+    let ca = parent.join(format!("{name}-ca"));
+    std::fs::create_dir(&ca).unwrap();
+    let err = super::abandon_bad_ca(&name, &ca).unwrap_err();
+    assert!(err.to_string().contains("ca invalid"), "{err}");
+    assert!(!stage.exists(), "{}", stage.display());
+    let _ = std::fs::remove_dir(&ca);
+    let name2 = format!("{name}-copy");
+    let stage2 = parent.join(&name2);
+    let err = super::abandon_ca_dest_blocked(&name2).unwrap_err();
+    assert!(err.to_string().contains("ca copy"), "{err}");
+    assert!(!stage2.exists(), "{}", stage2.display());
+}
+
+#[test]
+fn invalid_ca_metadata_is_explicit() {
+    assert!(super::ca_meta_ok(true, 0, 0o644).is_ok());
+    let err = super::ca_meta_ok(false, 0, 0o644).unwrap_err();
+    assert!(err.to_string().contains("ca invalid"), "{err}");
+    assert!(super::ca_meta_ok(true, 1, 0o644).is_err());
+    assert!(super::ca_meta_ok(true, 0, 0o666).is_err());
+    assert!(super::ca_meta_ok(true, 0, 0o644 | 0o4000).is_err());
+}
+
+#[test]
 fn failed_stage_directory_is_removed() {
     let name = format!(
         "fujiang-runtime-abandon-{}-{}",

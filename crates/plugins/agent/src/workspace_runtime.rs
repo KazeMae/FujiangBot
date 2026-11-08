@@ -71,9 +71,15 @@ pub(crate) fn stage_public() -> io::Result<PublicRuntime> {
         let mut bins: Vec<PathBuf> = BINS.iter().map(PathBuf::from).collect();
         bins.push(python.clone());
         for method in [
+            "/usr/bin/sqv",
+            "/usr/lib/apt/methods/copy",
             "/usr/lib/apt/methods/file",
             "/usr/lib/apt/methods/http",
             "/usr/lib/apt/methods/https",
+            "/usr/lib/apt/methods/sqv",
+            "/usr/lib/apt/methods/gpgv",
+            "/usr/lib/apt/methods/store",
+            "/usr/bin/gpgv",
         ] {
             if Path::new(method).exists() {
                 bins.push(PathBuf::from(method));
@@ -98,14 +104,8 @@ pub(crate) fn stage_public() -> io::Result<PublicRuntime> {
             }
         }
         copy_stdlib(&stage, &stdlib)?;
-        if let Some(ca) = public_ca() {
-            let _ = copy_public_file(
-                &ca,
-                &stage,
-                Path::new("etc/ssl/certs/ca-certificates.crt"),
-                0o644,
-            );
-        }
+        copy_ca(&stage)?;
+        apt::seed(&stage)?;
         fs::create_dir_all(stage.join("etc"))?;
         let mut etc = fs::metadata(stage.join("etc"))?.permissions();
         etc.set_mode(0o755);
@@ -138,6 +138,35 @@ impl Drop for StageHold {
             let _ = super::workspace_seed::discard_stage(parent.as_raw_fd(), &self.name);
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn abandon_bad_ca(name: &str, ca: &Path) -> io::Result<()> {
+    let parent = std::env::temp_dir();
+    let stage = parent.join(name);
+    fs::create_dir(&stage)?;
+    let parent_fd = open_dir(&parent)?;
+    let cname = CString::new(name).map_err(|_| io::Error::other("name"))?;
+    let _hold = StageHold {
+        parent: Some(parent_fd),
+        name: cname,
+    };
+    copy_ca_at(&stage, ca)
+}
+
+#[cfg(test)]
+pub(crate) fn abandon_ca_dest_blocked(name: &str) -> io::Result<()> {
+    let parent = std::env::temp_dir();
+    let stage = parent.join(name);
+    fs::create_dir(&stage)?;
+    fs::write(stage.join("etc"), b"not-a-directory")?;
+    let parent_fd = open_dir(&parent)?;
+    let cname = CString::new(name).map_err(|_| io::Error::other("name"))?;
+    let _hold = StageHold {
+        parent: Some(parent_fd),
+        name: cname,
+    };
+    copy_ca_at(&stage, Path::new("/etc/ssl/certs/ca-certificates.crt"))
 }
 
 #[cfg(test)]
@@ -328,18 +357,49 @@ fn place_libs(bin: &Path, stage: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn public_ca() -> Option<PathBuf> {
-    let path = Path::new("/etc/ssl/certs/ca-certificates.crt");
-    let meta = fs::symlink_metadata(path).ok()?;
-    if !meta.file_type().is_file() {
-        return None;
+pub(crate) fn ca_meta_ok(is_file: bool, uid: u32, mode: u32) -> io::Result<()> {
+    if !is_file || uid != 0 || mode & 0o022 != 0 || mode & 0o004 == 0 || mode & 0o6000 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("ca invalid uid={uid} mode={mode:o} regular={is_file}"),
+        ));
     }
-    let mode = MetadataExt::mode(&meta);
-    if MetadataExt::uid(&meta) != 0 || mode & 0o022 != 0 || mode & 0o004 == 0 {
-        return None;
-    }
-    Some(path.to_path_buf())
+    Ok(())
 }
+
+fn copy_ca(stage: &Path) -> io::Result<()> {
+    copy_ca_at(stage, Path::new("/etc/ssl/certs/ca-certificates.crt"))
+}
+
+fn copy_ca_at(stage: &Path, path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(io::Error::new(err.kind(), "ca metadata")),
+        Ok(meta) => {
+            ca_meta_ok(
+                meta.file_type().is_file(),
+                MetadataExt::uid(&meta),
+                MetadataExt::mode(&meta),
+            )
+            .map_err(|err| {
+                io::Error::new(
+                    err.kind(),
+                    format!("ca invalid path={}: {err}", path.display()),
+                )
+            })?;
+        }
+    }
+    copy_public_file(
+        path,
+        stage,
+        Path::new("etc/ssl/certs/ca-certificates.crt"),
+        0o644,
+    )
+    .map_err(|err| io::Error::new(err.kind(), format!("ca copy: {err}")))
+}
+
+#[path = "workspace_apt.rs"]
+mod apt;
 
 fn lexical(path: &Path) -> Option<PathBuf> {
     let mut out = PathBuf::new();

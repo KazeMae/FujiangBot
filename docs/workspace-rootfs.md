@@ -6,7 +6,7 @@
 
 runner 使用 bwrap 自带的 `--unshare-user --uid 0 --gid 0`，`--cap-drop ALL`，继承普通网络。启动前要求 `/usr/bin/bwrap --help` 含 `--bind-fd`（看功能，不看版本号）。父进程在 exec 前用 `close_range` 把 3 号及以上标成 cloexec，再只对 root、work、info、block、seccomp 清掉 cloexec。不在 `pre_exec` 里扫描 `/proc/self/fd`。客人 DNS 仍由现有的固定走法写入私人 `etc/resolv.conf`。
 
-单 UID、无 capability 时，root 拥有的本地 `.deb` 可以装进私人 root，并在下次打开后还在。apt 必须看到**绝对**缓存路径；相对文件名会被拒。客人源列表保持为空。若本机已有 apt 的 `file`/`http`/`https` 方法和 `/etc/ssl/certs/ca-certificates.crt`，会拷进私人 root，客人 `SSL_CERT_FILE` 只指向这份沙箱路径。远程 apt 仍未验收：它还需要客人自己的软件源，以及签名验证器（例如 `gpgv`）和密钥材料。这些都没有拷入，也没有测过。多 UID 包仍未验收。`chown` 到未映射 UID 得到 `EINVAL`。
+单 UID、无 capability 时，root 拥有的本地 `.deb` 可以装进私人 root，并在下次打开后还在。apt 必须看到**绝对**缓存路径；相对文件名会被拒。若本机已有 apt 的 `file`/`http`/`https`/`copy`/`store` 方法、`sqv`，以及存在的 `gpgv` 方法，会拷进私人 root。`/usr/share/apt/default-sequoia.config` 原样拷贝，不放宽 SHA1。`/etc/ssl/certs/ca-certificates.crt` 必须是合格的普通文件；拷贝失败会删掉 stage，不会改走 HTTP。客人 `SSL_CERT_FILE` 只指向这份沙箱路径。多 UID 包仍未验收。`chown` 到未映射 UID 得到 `EINVAL`。
 
 旧的 `scripts/verify-workspace-bundle.py`、`prepare-workspace-rootfs.sh`、`test-workspace-bundle.py`、`test-workspace-rootfs.py` 已删除。CI 不再安装 gpgv，也不再跑这些脚本。QQ 每次调用仍真实 resolve；500000 与 90% 摘要、身份展示不改。
 
@@ -14,6 +14,6 @@ runner 使用 bwrap 自带的 `--unshare-user --uid 0 --gid 0`，`--cap-drop ALL
 
 历史：`v3-gc-20261108-gate` 三遍各 319（agent 237、1 忽略）只属于旧树。CI `42450488129`、`42450907521` 是更早的失败。
 
-CI `42452313303`（`a538be7`）205 通过、2 失败，两条本机测试在载荷前是 `unavailable: resolver parent`。`/run` 与 `/run/systemd` 仍须 root 且他人不可写；只有固定的 `resolve` 目录可以属于 `systemd-resolve`，下面的文件必须是同一属主。这次修复还没有新的 CI，不能写成已绿。本地此前三遍 agent 207 不覆盖这台 CI 的 resolved 目录。
+历史：CI `42452313303`（`a538be7`）205 通过、2 失败，两条测试在载荷前是 `unavailable: resolver parent`。随后的 `6e28eb9` 已在 CI `42453053742` 整体通过（2026-11-08 14:06 Asia/Shanghai）。该次日志确认 `/run/systemd/resolve` 的 uid 是 989、mode 是 755，`stub-resolv.conf` 是 644。`/run` 与 `/run/systemd` 仍须 root 且他人不可写；只有固定的 `resolve` 目录可以属于 `systemd-resolve`，下面的文件必须是同一属主。
 
-仍缺的远程 apt：客人自己的软件源、签名验证器，以及对应的公钥环。这三样都没有拷入，也没有发起过网络安装。单 UID、无 capability，不安装系统服务，也不能为包创建其它 UID。在线 QQ 未验收。生产默认关闭。
+远程 apt 未验收，但官方源是正常启用的（不写 `Enabled: no`）。只读 `/usr/lib/os-release`（`O_NOFOLLOW`，root，不超过 4096 字节），不读宿主 `/etc/apt`。Debian 写入 `https://deb.debian.org/debian` 加 `debian-archive-keyring.gpg`；Ubuntu 写入 `https://archive.ubuntu.com/ubuntu` 加 `ubuntu-archive-keyring.gpg`。都只含发行版代号和 `main`。公钥字节来自解析后的公开密钥环。缺发行版或密钥环才写 `remote unsupported`。种源本身不联网。客人 `APT::Sandbox::User "root"` 只表示 bwrap 用户命名空间里的 uid 0；那个 uid 映射到宿主上的非特权 uid，不是宿主 root。范围不变。离线夹具用 `Dir::Etc` 换掉全部源；`--no-download` 的本地 `.deb` 也不拉取。本地已通过的夹具：正确临时密钥经 `sqv` 与 apt 装入并读到标记；错钥和篡改后的 `Packages` 被拒。这是夹具，不是 Debian 安装。CA 在场但非法或拷贝失败时 stage 被删掉。宿主哨兵和其他 owner 的字节保持不变。本机 owner 里曾对 `deb.debian.org` 做 `apt-get update`，三次 `Ign` 后是 `Temporary failure resolving 'deb.debian.org'`。这是 DNS 解析失败，没有证明是网络策略拒绝。该名和更早的 `archive.ubuntu.com`、`mirrors.aliyun.com` 都不再由代理重试。没有官方安装通过。`workspace_backend::tests::remote_debian_signed_install_persists` 是真实的 `#[ignore]` 用例（`Error-Mode=any`、`Retries=0`、`sensible-utils`、重开、另一 owner 与宿主哨兵），不能写成已通过。这轮没有运行它。须先由管理员确认日常网络已恢复，然后才手动：`cargo test -p fujiang-plugin-agent --lib --offline workspace_backend::tests::remote_debian_signed_install_persists -- --ignored --exact`。签名链以 Debian 手册 [apt-secure(8)](https://manpages.debian.org/trixie/apt/apt-secure.8.en.html) 和 [sources.list(5)](https://manpages.debian.org/trixie/apt/sources.list.5.en.html) 的 `Signed-By` 以及 Release、Packages、deb 的 SHA256 为准。在线 QQ 未验收。生产默认关闭。已验证的整体绿是 CI `42453053742`（`6e28eb9`，14:06 Asia/Shanghai）。当前 apt 改动还没推，新 CI 仍待跑。

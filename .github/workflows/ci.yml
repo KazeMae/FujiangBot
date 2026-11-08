@@ -13,7 +13,7 @@ jobs:
       - name: Sandbox packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap python3
+          sudo apt-get install -y bubblewrap python3 gpg gpg-agent gpgconf sqv
           sudo apt-get install -y --reinstall dpkg
           dpkg-query -W dpkg
           for f in /usr/share/dpkg/cputable /usr/share/dpkg/tupletable /usr/share/dpkg/triplettable /usr/share/dpkg/ostable /usr/share/dpkg/abitable; do

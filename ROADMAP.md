@@ -4,7 +4,7 @@
 > 看板：https://github.com/users/KazeMae/projects/2  
 > 总追踪：#19  
 > 历史（不是当前前提）：2026-11-08 04:15 `v3-gc-20261108-gate` 三遍各 319 通过、0 失败、1 忽略（agent 237、1 忽略）。`1daeef8` 的 313×3、agent 231 更早。当时的 bundle、gpgv、rootfs stub 和六模型 TLC 只属于那棵旧树。
-> 当前本地门（尚未推上的新 CI，不能写成已绿）：fmt、严格 clippy、文件长度、diff 通过；`cargo test --workspace --offline` 三遍，每遍 agent 207 通过、0 失败、0 忽略；五个未改的 TLC 模型通过。生产默认关闭。在线 QQ 与远程 apt 未验收。细节见 `docs/workspace-rootfs.md`。
+> 已验证的整体绿：CI `42453053742`（`6e28eb9`，2026-11-08 14:06 Asia/Shanghai）。更早的 `a538be7` / `42452313303` 是 `resolver parent` 失败，只作历史。其后的远程 apt 片还在本地，新 CI 未推、不能写成已绿。远程 apt 未验收：owner 里对 `deb.debian.org` 的记录是 DNS `Temporary failure resolving`，不是已证明的策略拒绝。生产默认关闭。在线 QQ 未验收。细节见 `docs/workspace-rootfs.md`。
 
 本文档是规划源。Issue / Milestone / Project 与此对齐。冲突时以已合并 Issue 的验收为准，并回写本文档。
 
@@ -104,7 +104,7 @@
 | 群发言人展示 | 群提示里的当前与历史 QQ、昵称、名片、引用 ID | Done | 当前与历史昵称、名片来自真实 `MessageEvent.sender` 快照，值仍按 untrusted 清理控制字符和双向控制符。`host_reply.message_id` 只是事件所带引用 ID，不取正文、不推断作者。旧行 NULL 不回填。真实 ID 不改变权限。私聊不包装。不改 Session / ToolLoop 状态机 |
 | 上下文预算与 LLM 交接摘要 | 500000、90% 摘要、模型上限、CAS、官方看图、摘要用量 | 已实现，待 PR 验收 | 有效预算是配置与已核实上限的较小值。官方 `https://api.deepseek.com` 的 `deepseek-flash` 按 2026-11-07 定价页为 100 万，看图页每图 1024 且多图相加。只适用于该主机名和该模型名，不是 OpenAI、Anthropic 或其它模型的 tile/detail 上界。预算含投影 JSON、工具 schema、已核实图像上界和发出的 `max_output_tokens` 4096。usage 按字段保留有效非负整数；缺字段记 `unknown_calls`，不把缺的 0 当成测得值。旧行迁移后标未确认。记账失败仍走 CompactFail |
 | 工作区绑定与独立 owner | 每次调用真实 resolve；个人与群目录按发言人分开；bash/code 默认不广告 | 生产关闭。未设 `FUJIANG_WORKSPACE_MVP` 则不启动 | 在线 QQ 未验收。同一宿主用户之外没有第二套 UID。owner 锁、重开和原子发布仍在。详见 `docs/workspace-rootfs.md`。 |
-| 工作区运行时 | 公开系统解释器的私人副本，bwrap 单 UID | 默认关闭。`FUJIANG_WORKSPACE_MVP` 指向宿主目录才打开 | 标准库链接只物化仍在 `/usr/lib`、`/usr/lib64`、`/lib`、`/lib64` 的普通文件；仅省略对应版本的 sitecustomize 钩子。本地绝对路径 `.deb` 可离线装入私人 root。远程 apt 未验收。CI `42452313303` 标准库链接已过，两条测试仍因 `resolver parent` 失败，当前不记已绿。详见 `docs/workspace-rootfs.md`。 |
+| 工作区运行时 | 公开系统解释器的私人副本，bwrap 单 UID | 默认关闭。`FUJIANG_WORKSPACE_MVP` 指向宿主目录才打开 | 标准库链接只物化仍在 `/usr/lib`、`/usr/lib64`、`/lib`、`/lib64` 的普通文件。本地绝对路径 `.deb` 可离线装入私人 root。Debian/Ubuntu 官方 HTTPS 源正常启用，但还没有执行远程安装。详见 `docs/workspace-rootfs.md`。 |
 
 前置：agent 热路径改动优先落在 `command.rs` / `plan.rs` / 新模块；单文件勿超 1000 行。
 
