@@ -185,6 +185,7 @@ pub(crate) fn enabled_builtins(cfg: &AgentConfig) -> tools::BuiltinTools {
         fun: cfg.enable_fun_tools,
         memory: cfg.enable_memory_tools,
         memory_write: cfg.enable_memory_write_tools,
+        view_image: crate::history_image::offered(cfg),
     }
 }
 

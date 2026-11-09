@@ -166,7 +166,7 @@ system_prompt = "只回答竞赛相关的问题。不确定就说不知道。"
 
 工具名的格式是 `服务.方法`。第一个 `.` 之前是服务名，之后是方法名。`rank.list` 调用 rank 的 `list`。`rank.get` 调用 rank 的 `get`。`contest.upcoming` 调用 contest 的 `upcoming`。`problem.today` 调用 problem 的 `today`。Responses 要求函数名匹配 `^[a-zA-Z0-9_-]+$`，所以请求里的 `name` 把 `.` 换成 `_`。`rank.list` 发出去是 `rank_list`。`rank.get` 发出去是 `rank_get`。
 
-默认带十一个常驻工具。九个是业务工具：`rank.list`、`rank.get`、`problem.today`、`memo.list`、`memory.list`、`memory.get`、`memory.upsert`、`memory.forget`、`memory.consolidate`。另外两个是 `skills.list` 和 `skills.open`，没有开关。`memo.add` 默认不带。分层记忆的读写默认都带。`fun` 和 `contest` 是技能包，不在这十一个里。fun 不注册写工具，也没有删除图库的方法。其它技能包里的工具也不在这十一个里。`schedule` 是其中一个包，打开名是 `schedule`。四个工具是 `schedule.list`、`schedule.create`、`schedule.update`、`schedule.cancel`，请求里是 `schedule_list`、`schedule_create`、`schedule_update`、`schedule_cancel`。创建者 QQ 由宿主写入当前发言人。到点只发文字：群要求创建者仍是成员，私聊只发给创建者本人。打开规则和投递见 [agent skills](agent-skills.md)。
+默认带十一个常驻工具。九个是业务工具：`rank.list`、`rank.get`、`problem.today`、`memo.list`、`memory.list`、`memory.get`、`memory.upsert`、`memory.forget`、`memory.consolidate`。另外两个是 `skills.list` 和 `skills.open`，没有开关。`view.image` 不属于这十一个，只在看图条件满足时多出来，见下文「看图」。`memo.add` 默认不带。分层记忆的读写默认都带。`fun` 和 `contest` 是技能包，不在这十一个里。fun 不注册写工具，也没有删除图库的方法。其它技能包里的工具也不在这十一个里。`schedule` 是其中一个包，打开名是 `schedule`。四个工具是 `schedule.list`、`schedule.create`、`schedule.update`、`schedule.cancel`，请求里是 `schedule_list`、`schedule_create`、`schedule_update`、`schedule_cancel`。创建者 QQ 由宿主写入当前发言人。到点只发文字：群要求创建者仍是成员，私聊只发给创建者本人。打开规则和投递见 [agent skills](agent-skills.md)。
 
 下表里的 `contest.*` 和 `fun.*` 要等对应的包打开才进入请求。`memo.add` 仍默认不注册。表里其余行在各自开关打开时属于常驻工具。
 
@@ -235,7 +235,11 @@ fun 编进 fujiang。`on_start` 执行 `ctx.provide("fun", …)`。四个读方�
 
 `vision_enabled` 为 false 时，插件不取图片。模型只看到文字。回复开头多一句「我现在还看不了图，先按文字回你。」
 
-为 true 时，插件对当前消息里的每张 `Image` 段调用 `fetch_media_bytes`。视频段不送。历史里仍只存用户原文和最终回复，不存图片字节。
+为 true 时，插件对当前消息里的每张 `Image` 段调用 `fetch_media_bytes`。视频段不送。历史里仍只存文字：用户原文、下面的图片占位符和最终回复，不存图片字节。
+
+进入这一轮之前，当前消息的每张图在用户文字后面追加 `[图片#消息号:序号]`，序号从 1 起，只数图片段。若这条消息引用了另一条，并且那条属于当前会话，再追加 `[引用图片#被引用消息号:序号]`。别的群、别人的私聊、已归档或来源对不上的引用不加占位符。这几枚记号与 `vision_enabled` 无关。
+
+`vision_enabled` 为 true，并且这一模型有已核实的图像 token 上界时，常驻工具多一个 `view.image`。请求里的函数名是 `view_image`。参数 `ids` 是字符串数组，最多 3 项，可以写 `123:1`，也可以写完整占位符。模型用它查看当前会话里已经发过的图，或上面那些引用图。宿主只按这一轮的真实会话查：群只查这张群表，私聊只查 `msg_pm` 里对方本人的行。表里没有时才向协议层要这条消息，来源必须与当前会话一致，否则告诉模型「不在当前会话或已过期」，并且不下载。下载失败会再用协议层的新地址试一次，来源仍要一致。一轮里通过这个工具交给模型的图最多 6 张。超预算或传输限制时，图不放进请求，工具结果是「超出上下文预算」。`.agent tools` 和 `inject_tool_list` 用的是同一份可见列表：条件不满足时，定义和清单里都没有它。
 
 取图失败时，回复「这张图我没取到，过一会儿再发一次。」字节数大于 `max_image_bytes` 时，回复「这张图太大了，我看不了。」内容不是 JPEG、PNG、GIF 或 WebP 时，回复「这张图的格式我看不了。」这三种情况都不调用模型。次数已经记下的这一次仍然算进每小时次数。
 

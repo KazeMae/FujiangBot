@@ -169,6 +169,39 @@ impl Store {
             .collect())
     }
 
+    pub async fn session_message_segments(
+        &self,
+        group_id: Option<i64>,
+        peer: Option<i64>,
+        message_id: i64,
+    ) -> anyhow::Result<Option<String>> {
+        if let Some(id) = group_id {
+            let table = shard_table(Some(id))?;
+            if !self.known_shards.lock().unwrap().contains(&table) {
+                return Ok(None);
+            }
+            let sql = format!("SELECT segments_json FROM {table} WHERE message_id = ? LIMIT 1");
+            return Ok(sqlx::query_scalar(&sql)
+                .bind(message_id)
+                .fetch_optional(&self.pool)
+                .await?);
+        }
+        let Some(peer) = peer else {
+            return Ok(None);
+        };
+        if !self.known_shards.lock().unwrap().contains("msg_pm") {
+            return Ok(None);
+        }
+        Ok(sqlx::query_scalar(
+            "SELECT segments_json FROM msg_pm
+             WHERE group_id IS NULL AND user_id = ? AND message_id = ? LIMIT 1",
+        )
+        .bind(peer)
+        .bind(message_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     pub async fn count_in_shard(&self, table: &str) -> anyhow::Result<i64> {
         if !valid_shard(table) {
             anyhow::bail!("invalid shard {table}");
@@ -332,4 +365,113 @@ pub fn default_archive_dir(image_root: &Path) -> PathBuf {
         .parent()
         .unwrap_or(Path::new("data"))
         .join("archive")
+}
+
+#[cfg(test)]
+mod session_segment_tests {
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::{MessageLog, Store, StoreOpts};
+
+    async fn open() -> (Store, PathBuf) {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("fj-seg-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open_opts(StoreOpts {
+            db: dir.join("t.db").to_string_lossy().into(),
+            image_root: dir.join("img"),
+            archive_dir: dir.join("archive"),
+            archive_after_days: 0,
+            archive_every_hours: 24,
+        })
+        .await
+        .unwrap();
+        (store, dir)
+    }
+
+    fn log(
+        message_id: i64,
+        user_id: i64,
+        group_id: Option<i64>,
+        segments_json: &str,
+    ) -> MessageLog {
+        MessageLog {
+            message_id,
+            time: 1,
+            self_id: 9,
+            user_id,
+            group_id,
+            nickname: None,
+            card: None,
+            raw_text: String::new(),
+            segments_json: segments_json.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_lookup_stays_inside_the_group_or_the_private_peer() {
+        let (store, dir) = open().await;
+        store
+            .insert_message(&log(42, 2, Some(100), "group-a"))
+            .await
+            .unwrap();
+        store
+            .insert_message(&log(42, 2, Some(200), "group-b"))
+            .await
+            .unwrap();
+        store
+            .insert_message(&log(42, 7, None, "friend-7"))
+            .await
+            .unwrap();
+        store
+            .insert_message(&log(99, 8, None, "friend-8"))
+            .await
+            .unwrap();
+        let got = store
+            .session_message_segments(Some(100), Some(7), 42)
+            .await
+            .unwrap();
+        assert_eq!(got.as_deref(), Some("group-a"));
+        assert_eq!(
+            store
+                .session_message_segments(Some(200), None, 42)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("group-b")
+        );
+        assert_eq!(
+            store
+                .session_message_segments(None, Some(7), 42)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("friend-7")
+        );
+        assert!(store
+            .session_message_segments(None, Some(8), 42)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .session_message_segments(None, Some(7), 99)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .session_message_segments(Some(300), None, 42)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .session_message_segments(None, None, 42)
+            .await
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

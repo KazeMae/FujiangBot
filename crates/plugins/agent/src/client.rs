@@ -90,6 +90,7 @@ pub struct LlmClient {
     timeout: Duration,
     limit: Option<u64>,
     image_cap: Option<u64>,
+    max_image_bytes: u64,
 }
 
 impl LlmClient {
@@ -181,7 +182,12 @@ impl LlmClient {
                 &cfg.model,
                 cfg.image_token_upper_bound,
             ),
+            max_image_bytes: cfg.max_image_bytes,
         }
+    }
+
+    pub(crate) fn max_image_bytes(&self) -> u64 {
+        self.max_image_bytes
     }
 
     pub(crate) fn request_bytes(
@@ -193,7 +199,7 @@ impl LlmClient {
         if self.limit.is_none() {
             return Err(LlmError::ContextClosed);
         }
-        let urls = image_urls(messages);
+        let urls = image_urls(messages, prior);
         let each = if urls.is_empty() {
             0
         } else {
@@ -302,6 +308,43 @@ pub(crate) struct PriorCall {
     pub name: String,
     pub arguments: String,
     pub output: String,
+    pub images: Vec<ImagePart>,
+    pub image_note: String,
+}
+
+impl PriorCall {
+    pub(crate) fn bare(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+        output: impl Into<String>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            name: name.into(),
+            arguments: arguments.into(),
+            output: output.into(),
+            images: Vec::new(),
+            image_note: String::new(),
+        }
+    }
+
+    pub(crate) fn from_call(call: &FunctionCall, output: impl Into<String>) -> Self {
+        Self::bare(&call.call_id, &call.name, &call.arguments, output)
+    }
+
+    pub(crate) fn with_images(
+        call: &FunctionCall,
+        output: impl Into<String>,
+        images: Vec<ImagePart>,
+        image_note: String,
+    ) -> Self {
+        Self {
+            images,
+            image_note,
+            ..Self::from_call(call, output)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -435,6 +478,12 @@ fn responses_request<'a>(
             call_id: &call.call_id,
             output: &call.output,
         });
+        if !call.images.is_empty() {
+            input.push(InputItem::UserParts {
+                role: "user",
+                content: held_parts(&call.image_note, &call.images, project_images),
+            });
+        }
     }
     let tools = tools
         .iter()
@@ -458,6 +507,25 @@ fn responses_request<'a>(
         stream: false,
         tools,
     }
+}
+
+fn held_parts<'a>(
+    note: &'a str,
+    images: &'a [ImagePart],
+    project_images: bool,
+) -> Vec<ContentPart<'a>> {
+    let mut parts = Vec::with_capacity(images.len() + 1);
+    parts.push(ContentPart::Text {
+        kind: "input_text",
+        text: note,
+    });
+    for image in images {
+        parts.push(ContentPart::Image {
+            kind: "input_image",
+            image_url: if project_images { "" } else { image.data_url() },
+        });
+    }
+    parts
 }
 
 fn user_parts(message: &ChatMessage, project_images: bool) -> Vec<ContentPart<'_>> {
@@ -490,11 +558,17 @@ fn json_string_extra(url: &str) -> Result<u64, LlmError> {
         .saturating_sub(2))
 }
 
-fn image_urls(messages: &[ChatMessage]) -> Vec<&str> {
-    messages
+fn image_urls<'a>(messages: &'a [ChatMessage], prior: &'a [PriorCall]) -> Vec<&'a str> {
+    let mut urls: Vec<&str> = messages
         .iter()
         .flat_map(|message| message.images.iter().map(|image| image.data_url()))
-        .collect()
+        .collect();
+    urls.extend(
+        prior
+            .iter()
+            .flat_map(|call| call.images.iter().map(|image| image.data_url())),
+    );
+    urls
 }
 
 fn decoded_image_bytes(url: &str) -> u64 {

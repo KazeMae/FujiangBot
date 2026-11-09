@@ -5,6 +5,7 @@ mod command;
 mod compact;
 mod config;
 mod context_budget;
+mod history_image;
 mod layered_memory;
 mod memory_consolidate;
 mod plan;
@@ -233,6 +234,7 @@ impl AgentPlugin {
         cfg: &AgentConfig,
         user_text: String,
     ) {
+        let user_text = history_image::stamp(ctx, msg, user_text).await;
         let Some(pool) = self.pool.lock().await.clone() else {
             say(ctx, msg, BUSY_REPLY).await;
             return;

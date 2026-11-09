@@ -318,12 +318,7 @@ fn serialized_request_plus_output_reserve_is_the_upper_bound() {
     };
     let with_tool = client.request_bound(&[user("hi")], &[], &[tool]).unwrap();
     assert!(with_tool > bare);
-    let prior = PriorCall {
-        call_id: "c".into(),
-        name: "rank_list".into(),
-        arguments: "{}".into(),
-        output: "x".repeat(1000),
-    };
+    let prior = PriorCall::bare("c", "rank_list", "{}", "x".repeat(1000));
     let grown = client.request_bound(&[user("hi")], &[prior], &[]).unwrap();
     assert!(grown >= bare + 1000);
     let tiny = sized_client(1_000);
@@ -562,14 +557,65 @@ fn output_reserve_is_sent_and_tool_schema_counts_in_the_projection() {
     assert_eq!(body["max_output_tokens"], 4096);
     assert_eq!(body["tools"][0]["name"], "rank_list");
     assert!(body["tools"][0]["parameters"]["properties"]["script"].is_object());
-    let prior = [PriorCall {
-        call_id: "c".into(),
-        name: "rank_list".into(),
-        arguments: "{\"handle\":\"x\"}".into(),
-        output: "{\"ok\":true}".into(),
-    }];
+    let prior = [PriorCall::bare(
+        "c",
+        "rank_list",
+        "{\"handle\":\"x\"}",
+        "{\"ok\":true}",
+    )];
     let with_prior = client.request_bytes(&messages, &prior, &tools).unwrap();
     assert!(with_prior > with_tools);
+}
+
+#[test]
+fn prior_images_add_image_cap_and_ride_after_the_tool_output() {
+    let cap = 1_024u64;
+    let client = image_client(500_000, Some(cap));
+    let url = "data:image/jpeg;base64,/9j/AA==";
+    let bare = PriorCall::bare("c", "view_image", "{}", "已返回");
+    let mut one = bare.clone();
+    one.images = vec![ImagePart::new(url.into())];
+    one.image_note = "view_image 返回的图片：42:1".into();
+    let mut two = one.clone();
+    two.images.push(ImagePart::new(url.into()));
+    two.image_note = "view_image 返回的图片：42:1 42:1".into();
+    let messages = [user("hi")];
+    let none = client
+        .request_bytes(&messages, std::slice::from_ref(&bare), &[])
+        .unwrap();
+    let first = client
+        .request_bytes(&messages, std::slice::from_ref(&one), &[])
+        .unwrap();
+    let second = client
+        .request_bytes(&messages, std::slice::from_ref(&two), &[])
+        .unwrap();
+    assert!(first >= none + cap);
+    assert_eq!(
+        second - first,
+        (projected(&client, &two) - projected(&client, &one)) + cap
+    );
+    let body = rendered_request(&client, &messages, std::slice::from_ref(&one), &[]);
+    let input = body["input"].as_array().unwrap();
+    assert_eq!(input[2]["type"], "function_call_output");
+    let parts = input[3]["content"].as_array().unwrap();
+    assert_eq!(parts[0]["type"], "input_text");
+    assert_eq!(parts[0]["text"], "view_image 返回的图片：42:1");
+    assert_eq!(parts[1]["type"], "input_image");
+    assert_eq!(parts[1]["image_url"], url);
+}
+
+fn projected(client: &LlmClient, prior: &PriorCall) -> u64 {
+    let messages = [user("hi")];
+    let request = responses_request(
+        &client.model,
+        client.temperature,
+        &messages,
+        std::slice::from_ref(prior),
+        &[],
+        crate::context_budget::OUTPUT_RESERVE,
+        true,
+    );
+    serde_json::to_vec(&request).unwrap().len() as u64
 }
 
 async fn complete_err(app: Router) -> LlmError {

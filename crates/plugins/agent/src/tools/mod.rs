@@ -6,7 +6,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use async_trait::async_trait;
-use fujiang_core::{BotContext, Messenger, Source};
+use fujiang_core::{BotContext, Media, MessageEvent, Messenger, Source};
 use serde_json::{Map, Value};
 use tracing::warn;
 
@@ -114,6 +114,23 @@ pub(crate) trait ToolHub: Send + Sync {
     async fn onebot(&self, _action: &str, _params: Value) -> anyhow::Result<Value> {
         anyhow::bail!("onebot call is not available")
     }
+
+    async fn session_message_segments(
+        &self,
+        _group_id: Option<i64>,
+        _peer: Option<i64>,
+        _message_id: i64,
+    ) -> anyhow::Result<Option<String>> {
+        anyhow::bail!("unavailable")
+    }
+
+    async fn get_message(&self, _id: i64) -> anyhow::Result<MessageEvent> {
+        anyhow::bail!("unavailable")
+    }
+
+    async fn fetch_media_bytes(&self, _media: &Media) -> anyhow::Result<Vec<u8>> {
+        anyhow::bail!("unavailable")
+    }
 }
 
 #[async_trait]
@@ -125,6 +142,25 @@ impl ToolHub for BotContext {
     async fn onebot(&self, action: &str, params: Value) -> anyhow::Result<Value> {
         let messenger = self.messenger().await;
         Messenger::onebot(messenger.as_ref(), action, params).await
+    }
+
+    async fn session_message_segments(
+        &self,
+        group_id: Option<i64>,
+        peer: Option<i64>,
+        message_id: i64,
+    ) -> anyhow::Result<Option<String>> {
+        self.store
+            .session_message_segments(group_id, peer, message_id)
+            .await
+    }
+
+    async fn get_message(&self, id: i64) -> anyhow::Result<MessageEvent> {
+        self.messenger().await.get_message(id).await
+    }
+
+    async fn fetch_media_bytes(&self, media: &Media) -> anyhow::Result<Vec<u8>> {
+        BotContext::fetch_media_bytes(self, media).await
     }
 }
 
@@ -138,6 +174,7 @@ pub(crate) struct BuiltinTools {
     pub fun: bool,
     pub memory: bool,
     pub memory_write: bool,
+    pub view_image: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,6 +188,10 @@ pub(crate) struct MemoCallScope {
 impl MemoCallScope {
     pub(crate) fn speaker(&self) -> i64 {
         self.user_id
+    }
+
+    pub(crate) fn chat_source(&self) -> Source {
+        self.workspace_turn().source
     }
 
     pub(crate) fn workspace_turn(&self) -> crate::workspace::HostTurn {
@@ -213,6 +254,7 @@ impl BuiltinTools {
         fun: true,
         memory: true,
         memory_write: true,
+        view_image: false,
     };
     pub(crate) const OFF: Self = Self {
         rank: false,
@@ -223,6 +265,7 @@ impl BuiltinTools {
         fun: false,
         memory: false,
         memory_write: false,
+        view_image: false,
     };
 }
 
@@ -373,6 +416,13 @@ fn builtin_specs(builtins: BuiltinTools) -> Vec<ToolSpec> {
             }),
         ));
     }
+    if builtins.view_image {
+        specs.push(builtin_spec(
+            crate::history_image::NAME,
+            crate::history_image::DESC,
+            crate::history_image::parameters(),
+        ));
+    }
     specs
 }
 
@@ -446,6 +496,7 @@ where
     let mut opened = BTreeSet::new();
     let mut members = HashMap::new();
     let mut prior = Vec::new();
+    let mut seen_images = 0usize;
     let mut used = 0u32;
     let mut calls = 0i64;
     let mut in_tokens = 0i64;
@@ -539,6 +590,26 @@ where
                             );
                         }
                     };
+                    if call.name == crate::history_image::WIRE
+                        && tools.iter().any(|spec| spec.wire_name() == call.name)
+                    {
+                        let next = crate::history_image::perform(
+                            crate::history_image::ViewCtx {
+                                hub,
+                                scope: pass.scope,
+                                client,
+                                messages,
+                                prior: &prior,
+                                defs: &defs,
+                                seen: &mut seen_images,
+                            },
+                            &call,
+                            &args,
+                        )
+                        .await;
+                        prior.push(next);
+                        continue;
+                    }
                     if crate::workspace::is_exec_wire(&call.name) {
                         match workspace_pack::dispatch(
                             pass.memory,
@@ -708,12 +779,10 @@ where
 }
 
 fn prior_call(call: FunctionCall, value: serde_json::Value) -> PriorCall {
-    PriorCall {
-        call_id: call.call_id,
-        name: call.name,
-        arguments: call.arguments,
-        output: serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
-    }
+    PriorCall::from_call(
+        &call,
+        serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
+    )
 }
 
 async fn memory_value(pass: &ToolPass<'_>, method: &str, args: &Value) -> anyhow::Result<Value> {
