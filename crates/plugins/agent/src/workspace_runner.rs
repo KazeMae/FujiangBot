@@ -24,6 +24,12 @@ use serde::Deserialize;
 const WALL: Duration = Duration::from_secs(300);
 const CPU_SECONDS: libc::rlim_t = 120;
 const REAP_BOUND: Duration = Duration::from_secs(1);
+// Every namespace process is already SIGKILLed, so no guest code runs.
+// The wait is kernel teardown of the mount namespace: overlay umount
+// syncs the host upper filesystem and scales with host-wide dirty data
+// (measured 0.44s at 1.1 GB dirty locally; slower CI disks exceed 1s).
+// Finite so a wedged kernel teardown still surfaces as an error.
+const INIT_EXIT_BOUND: Duration = Duration::from_secs(30);
 const OUT_CAP: usize = 64 * 1024;
 const INFO_CAP: usize = 8 * 1024;
 const CLOSE_RANGE_CLOEXEC: libc::c_long = 4;
@@ -123,7 +129,7 @@ impl Guard {
             .pidfd
             .as_ref()
             .ok_or_else(|| io::Error::other("namespace init pidfd missing"))?;
-        let deadline = Instant::now() + REAP_BOUND;
+        let deadline = Instant::now() + INIT_EXIT_BOUND;
         loop {
             let now = Instant::now();
             if now >= deadline {

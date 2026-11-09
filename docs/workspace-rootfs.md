@@ -2,7 +2,7 @@
 
 默认关闭。只有 `FUJIANG_WORKSPACE_MVP` 指向绝对的宿主目录时才打开。绑定仍是每次调用按 QQ 解析的个人或群，生产不因此打开。
 
-客人直接使用宿主的 `/usr`、`/etc`、`/var`，经 bwrap `--overlay` 叠到 owner 的空目录骨架上。骨架只补可搜索的真实目录，不跟符号链接，不跨文件系统，不拷贝普通文件。`/work` 是 owner 的工作目录。`/var/log`、`/var/cache/apt` 和 `/var/lib/apt/lists/partial` 绑定到 owner 自己的目录。apt 锁（`lock`、`lock-frontend`、`triggers/Lock`、lists 的 `lock`、`debconf/passwords.dat`）只在 upper 里放空文件。`/var/lib/dpkg/status` 和 `available` 只在该 owner 第一次创建时拷进 upper；之后 owner 的 dpkg 库与宿主后来的升级分开。`/etc/apt/auth.conf.d` 用 tmpfs 盖住。Landlock ABI 至少 6，在 exec bwrap 之前限制抽象 unix 套接字和信号；更低就拒绝，错误是 `unavailable: landlock scope`。按用户范围不隔离网络：不用 `--unshare-net`，客人与宿主共享网络。
+客人直接使用宿主的 `/usr`、`/etc`、`/var`，经 bwrap `--overlay` 叠到 owner 的空目录骨架上。骨架只补可搜索的真实目录，不跟符号链接，不跨文件系统，不拷贝普通文件。只有宿主 dpkg status 或 `/usr`、`/etc`、`/var` 顶层目录变化时才重走骨架；宿主装包之后新目录才会可写。`/work` 是 owner 的工作目录。`/var/log`、`/var/cache/apt` 和 `/var/lib/apt/lists/partial` 绑定到 owner 自己的目录。apt 锁（`lock`、`lock-frontend`、`triggers/Lock`、lists 的 `lock`、`debconf/passwords.dat`）只在 upper 里放空文件。`/var/lib/dpkg/status` 和 `available` 只在该 owner 第一次创建时拷进 upper；之后 owner 的 dpkg 库与宿主后来的升级分开。`/etc/apt/auth.conf.d` 用 tmpfs 盖住。Landlock ABI 至少 6，在 exec bwrap 之前限制抽象 unix 套接字和信号；更低就拒绝，错误是 `unavailable: landlock scope`。按用户范围不隔离网络：不用 `--unshare-net`，客人与宿主共享网络。命名空间 init 退出包含 overlay 卸载时对宿主上层文件系统的 sync，耗时随宿主脏页量增长，故 init 回收上限为 30 秒（bwrap 进程回收仍为 1 秒）。
 
 已删除、不再实现：私人 root 拷贝、解释器与库的链接物化、DNS/resolver 拷贝与回收、私人 apt 源和钥匙环供给，以及只为它们服务的 CI 步骤。
 

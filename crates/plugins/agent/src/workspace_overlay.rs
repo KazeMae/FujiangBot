@@ -25,9 +25,18 @@ pub(super) fn prepare(owner: RawFd) -> io::Result<()> {
     owned_dir(archives.as_raw_fd(), "partial")?;
     let upper = owned_dir(owner, "upper")?;
     let ovl = owned_dir(owner, "ovlwork")?;
-    for top in [c"usr".as_ptr(), c"etc".as_ptr(), c"var".as_ptr()] {
-        let name = unsafe { CStr::from_ptr(top) };
-        refresh_top(upper.as_raw_fd(), ovl.as_raw_fd(), name)?;
+    let fresh = host_stamp()?;
+    if needs_walk(read_stamp(owner)?, fresh) {
+        for top in [c"usr".as_ptr(), c"etc".as_ptr(), c"var".as_ptr()] {
+            let name = unsafe { CStr::from_ptr(top) };
+            refresh_top(upper.as_raw_fd(), ovl.as_raw_fd(), name)?;
+        }
+        write_stamp(owner, &encode(&fresh))?;
+    } else {
+        for top in [c"usr".as_ptr(), c"etc".as_ptr(), c"var".as_ptr()] {
+            let name = unsafe { CStr::from_ptr(top) };
+            ensure_top(upper.as_raw_fd(), ovl.as_raw_fd(), name)?;
+        }
     }
     for rel in SHADOWS {
         touch_absent(&upper, rel)?;
@@ -73,16 +82,223 @@ pub(crate) fn landlock_scope_ok(abi: i32) -> io::Result<()> {
 }
 
 fn refresh_top(upper: RawFd, ovl: RawFd, name: &CStr) -> io::Result<()> {
+    let host = ensure_top(upper, ovl, name)?;
+    let st = fstat(host.as_raw_fd())?;
+    let up = open_dir(upper, name.to_str().map_err(|_| invalid("top"))?)?;
+    walk(host.as_raw_fd(), up.as_raw_fd(), st.st_dev as u64, 0)?;
+    Ok(())
+}
+
+fn ensure_top(upper: RawFd, ovl: RawFd, name: &CStr) -> io::Result<OwnedFd> {
     let host = open_host_top(name)?;
     let st = fstat(host.as_raw_fd())?;
     if !include_dir(false, is_dir(&st), st.st_dev as u64, st.st_dev as u64, true) {
         return Err(invalid("overlay top"));
     }
-    let mode = dir_mode(&st);
-    mkdir_at(upper, name, mode)?;
+    mkdir_at(upper, name, dir_mode(&st))?;
     mkdir_at(ovl, name, 0o700)?;
-    let up = open_dir(upper, name.to_str().map_err(|_| invalid("top"))?)?;
-    walk(host.as_raw_fd(), up.as_raw_fd(), st.st_dev as u64, 0)?;
+    Ok(host)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileMark {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    sec: i64,
+    nsec: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DirMark {
+    dev: u64,
+    ino: u64,
+    sec: i64,
+    nsec: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stamp {
+    status: FileMark,
+    usr: DirMark,
+    etc: DirMark,
+    var: DirMark,
+}
+
+fn needs_walk(old: Option<Stamp>, new: Stamp) -> bool {
+    old != Some(new)
+}
+
+fn host_stamp() -> io::Result<Stamp> {
+    Ok(Stamp {
+        status: status_mark()?,
+        usr: dir_mark(c"usr")?,
+        etc: dir_mark(c"etc")?,
+        var: dir_mark(c"var")?,
+    })
+}
+
+fn status_mark() -> io::Result<FileMark> {
+    let fd = raw_owned(unsafe {
+        libc::open(
+            c"/var/lib/dpkg/status".as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    })?;
+    let st = fstat(fd.as_raw_fd())?;
+    require_regular(st.st_mode)?;
+    if st.st_size < 0 {
+        return Err(invalid("dpkg status size"));
+    }
+    Ok(FileMark {
+        dev: st.st_dev,
+        ino: st.st_ino,
+        size: st.st_size as u64,
+        sec: st.st_mtime,
+        nsec: st.st_mtime_nsec,
+    })
+}
+
+fn dir_mark(name: &CStr) -> io::Result<DirMark> {
+    let host = open_host_top(name)?;
+    let st = fstat(host.as_raw_fd())?;
+    if !is_dir(&st) {
+        return Err(invalid("overlay top"));
+    }
+    Ok(DirMark {
+        dev: st.st_dev,
+        ino: st.st_ino,
+        sec: st.st_mtime,
+        nsec: st.st_mtime_nsec,
+    })
+}
+
+fn encode(stamp: &Stamp) -> String {
+    let s = stamp.status;
+    format!(
+        "status {} {} {} {} {}\nusr {} {} {} {}\netc {} {} {} {}\nvar {} {} {} {}\n",
+        s.dev,
+        s.ino,
+        s.size,
+        s.sec,
+        s.nsec,
+        stamp.usr.dev,
+        stamp.usr.ino,
+        stamp.usr.sec,
+        stamp.usr.nsec,
+        stamp.etc.dev,
+        stamp.etc.ino,
+        stamp.etc.sec,
+        stamp.etc.nsec,
+        stamp.var.dev,
+        stamp.var.ino,
+        stamp.var.sec,
+        stamp.var.nsec
+    )
+}
+
+fn parse_stamp(text: &str) -> Option<Stamp> {
+    let mut lines = text.lines();
+    let status = parse_file(lines.next()?)?;
+    let usr = parse_dir(lines.next()?, "usr")?;
+    let etc = parse_dir(lines.next()?, "etc")?;
+    let var = parse_dir(lines.next()?, "var")?;
+    if lines.next().is_some() {
+        return None;
+    }
+    Some(Stamp {
+        status,
+        usr,
+        etc,
+        var,
+    })
+}
+
+fn parse_file(line: &str) -> Option<FileMark> {
+    let parts: Vec<&str> = line.split(' ').collect();
+    if parts.len() != 6 || parts[0] != "status" {
+        return None;
+    }
+    Some(FileMark {
+        dev: parts[1].parse().ok()?,
+        ino: parts[2].parse().ok()?,
+        size: parts[3].parse().ok()?,
+        sec: parts[4].parse().ok()?,
+        nsec: parts[5].parse().ok()?,
+    })
+}
+
+fn parse_dir(line: &str, label: &str) -> Option<DirMark> {
+    let parts: Vec<&str> = line.split(' ').collect();
+    if parts.len() != 5 || parts[0] != label {
+        return None;
+    }
+    Some(DirMark {
+        dev: parts[1].parse().ok()?,
+        ino: parts[2].parse().ok()?,
+        sec: parts[3].parse().ok()?,
+        nsec: parts[4].parse().ok()?,
+    })
+}
+
+fn read_stamp(owner: RawFd) -> io::Result<Option<Stamp>> {
+    let fd = unsafe {
+        libc::openat(
+            owner,
+            c"host-stamp".as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        let err = io::Error::last_os_error();
+        if matches!(err.raw_os_error(), Some(libc::ENOENT | libc::ELOOP)) {
+            return Ok(None);
+        }
+        return Err(err);
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let mut body = String::new();
+    file.read_to_string(&mut body)?;
+    Ok(parse_stamp(&body))
+}
+
+fn write_stamp(owner: RawFd, body: &str) -> io::Result<()> {
+    unlink_stamp_tmp(owner)?;
+    let fd = unsafe {
+        libc::openat(
+            owner,
+            c".host-stamp.tmp".as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o644,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    file.write_all(body.as_bytes())?;
+    drop(file);
+    if unsafe {
+        libc::renameat(
+            owner,
+            c".host-stamp.tmp".as_ptr(),
+            owner,
+            c"host-stamp".as_ptr(),
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn unlink_stamp_tmp(owner: RawFd) -> io::Result<()> {
+    if unsafe { libc::unlinkat(owner, c".host-stamp.tmp".as_ptr(), 0) } != 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ENOENT) {
+            return Err(err);
+        }
+    }
     Ok(())
 }
 
@@ -360,7 +576,7 @@ fn errno_clear() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{symlink, PermissionsExt};
 
     #[test]
     fn skeleton_predicates_skip_bad_dirs() {
@@ -382,6 +598,70 @@ mod tests {
     fn status_copy_refuses_non_regular() {
         assert!(require_regular(libc::S_IFIFO | 0o644).is_err());
         assert!(require_regular(libc::S_IFREG | 0o644).is_ok());
+    }
+
+    fn sample(size: u64, sec: i64) -> Stamp {
+        Stamp {
+            status: FileMark {
+                dev: 1,
+                ino: 2,
+                size,
+                sec,
+                nsec: 3,
+            },
+            usr: DirMark {
+                dev: 1,
+                ino: 4,
+                sec,
+                nsec: 5,
+            },
+            etc: DirMark {
+                dev: 1,
+                ino: 6,
+                sec,
+                nsec: 7,
+            },
+            var: DirMark {
+                dev: 1,
+                ino: 8,
+                sec,
+                nsec: 9,
+            },
+        }
+    }
+
+    #[test]
+    fn walk_only_when_stamp_changes() {
+        let now = sample(10, 20);
+        assert!(needs_walk(None, now));
+        assert!(!needs_walk(Some(now), now));
+        assert!(needs_walk(Some(now), sample(11, 20)));
+        let mut top = now;
+        top.usr.sec += 1;
+        assert!(needs_walk(Some(now), top));
+    }
+
+    #[test]
+    fn second_prepare_keeps_the_host_stamp() {
+        let dir = std::env::temp_dir().join(format!(
+            "ovl-stamp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let fd = std::fs::File::open(&dir).unwrap();
+        let first = prepare(fd.as_raw_fd());
+        let second = first.and_then(|()| prepare(fd.as_raw_fd()));
+        let body = std::fs::read(dir.join("host-stamp"));
+        let _ = std::fs::remove_dir_all(&dir);
+        second.unwrap();
+        let expect = encode(&host_stamp().unwrap());
+        assert_eq!(String::from_utf8(body.unwrap()).unwrap(), expect);
     }
 
     #[test]
