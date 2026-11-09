@@ -77,12 +77,13 @@ impl WorkspaceStore {
             return Err(invalid("id must be positive"));
         }
         let host_fd = open_host(host)?;
-        workspace_seed::ensure_host_outside_base(host_fd.as_raw_fd(), base)?;
+        let _ = base;
         let ns_fd = subdir(host_fd.as_raw_fd(), ns)?;
         let owner_fd = subdir(ns_fd.as_raw_fd(), &id_s)?;
         let _lock = lock_owner(owner_fd.as_raw_fd())?;
+        overlay::prepare(owner_fd.as_raw_fd())?;
         let work = subdir(owner_fd.as_raw_fd(), "work")?;
-        let rootfs = workspace_seed::ensure_rootfs(owner_fd.as_raw_fd(), owner, base)?;
+        let rootfs = raw_owned(unsafe { libc::dup(owner_fd.as_raw_fd()) })?;
         Ok(Self {
             work,
             rootfs,
@@ -268,22 +269,25 @@ fn reject_lock_stat(st: &libc::stat) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 #[path = "workspace_tree.rs"]
 mod tree;
 
-fn tree_digest(root: RawFd) -> io::Result<[u8; 32]> {
-    tree::digest(root)
+#[path = "workspace_overlay.rs"]
+mod overlay;
+
+pub(crate) use overlay::landlock_scope_ok;
+
+/// Marker kept so acquire stays a pair. The guest uses the host overlay, not a private copy.
+pub(crate) struct PublicRuntime;
+
+impl PublicRuntime {
+    pub(crate) fn current() -> io::Result<Self> {
+        Ok(Self)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(_root: &std::path::Path, _identity: [u8; 32]) -> io::Result<Self> {
+        Ok(Self)
+    }
 }
-
-#[path = "workspace_seed.rs"]
-mod workspace_seed;
-
-#[cfg(test)]
-#[path = "workspace_seed_tests.rs"]
-mod workspace_seed_tests;
-
-#[path = "workspace_runtime.rs"]
-mod runtime;
-
-pub(crate) use runtime::stage_public;
-pub(crate) use workspace_seed::PublicRuntime;

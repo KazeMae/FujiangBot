@@ -92,7 +92,7 @@ sh -n scripts/prepare-workspace-rootfs.sh
 
 `fmt` 检查通过。clippy 与 CI 相同，在 `-D warnings` 下通过。`scripts/check-file-length.sh` 通过。`cargo test --workspace` 236 项通过，0 失败，0 ignored；其中 `fujiang-plugin-agent` 154 项通过，比此前的 142 项多 12 项。`cargo llvm-cov -p fujiang-plugin-agent --summary-only` 的行覆盖是 92.03%。`compact.rs` 83.21%，`context_budget.rs` 99.40%，`session.rs` 99.16%，`workspace.rs` 91.86%。`scripts/run-tlc.sh` 的 ToolLoop、Session 和 Workspace 都没有错误；distinct states 分别是 54、688 和 640。`python3 scripts/test-workspace-rootfs.py` 的 11 个离线控制流 case 通过。`sh -n scripts/prepare-workspace-rootfs.sh` 通过。这 11 个 case 不是公开工件的加密验签，也不是沙箱端到端证明。
 
-这一批交付了真实宿主工作区绑定，以及默认关闭、不启动进程的 bash/code 路由。真实 bwrap、独立 rootfs、私有写层、网络隔离和 apt 都还没有交付。公开工件的准备说明在 [workspace-rootfs](workspace-rootfs.md)。没有测生产环境、NapCat，也没有打真实 provider。
+历史：这一批当时只交付了真实宿主工作区绑定，以及默认关闭、不启动进程的 bash/code 路由。当时还没有真实 bwrap。当前验收以 [workspace-rootfs](workspace-rootfs.md) 为准。没有测生产环境、NapCat，也没有打真实 provider。
 
 ## 2026-11-07 离线 bundle 验证
 
@@ -113,7 +113,7 @@ REQUIRE_GPGV=1 python3 scripts/test-workspace-bundle-gpgv.py
 
 上面 248 项、87.04% 和 Workspace 640 是更早一头的记录。不能写成当前 owner 头的通过。
 
-## 2026-11-07 独立 owner 写层（当前头）
+## 2026-11-07 独立 owner 写层（历史）
 
 基线 `32427e4` 的整体 CI 已成功：2026-11-07 18:42:18 Asia/Shanghai，https://github.com/KazeMae/FujiangBot/actions/runs/42364745250 。这只证明该基线。当前 head 没有新的 CI 结论。
 
@@ -146,4 +146,4 @@ git diff --check
 
 同一类命令再次独立通过：fmt；严格 agent clippy（全部 target、无依赖、offline、`-D warnings`）；`cargo test --workspace --offline` 278（agent 196），0 失败、0 ignored；行覆盖 89.80%（10100 行，1030 未覆盖），region 87.39% 不是行覆盖；acceptance 模块行覆盖 77.80%，树模块 86.24%。Python bundle 27（含黄金用例），真实 gpgv 14 条 SKIP，stub 11。TLC 仍是 54/688/512/346/17/16。验证器脚本 1000 行。文件长度与 diff check 通过。CI 以 PR 62 当前 head 的检查页为准。下文只记录已核验的 `92a7b15` 基线 CI。`FUJIANG_WORKSPACE_ACCEPTANCE` 未设置，没有真实批准文件。
 
-生产供给接线已实现，默认关闭。历史 identity 里的 `unaccepted` 不是管理员批准。不是生产已接受，也不是全部要求完成。仍缺的代码：按 owner 的隔离出口/代理；apt 的 mode、UID/GID、capability 与维护者执行策略；3 秒壁钟和 64MiB `FSIZE` 的 apt 策略；聚合 cgroup/pids/内存/磁盘/inode 配额；启动崩溃后的 `r*` / `live-*` 孤儿租约回收。正常失败和 Drop 会清理本次租约。来源目录 FD 不是不可变存储；发布前比对的是实际克隆摘要。runner 清理夹具通过，不是全部 OS 失败的强证明。QQ 授权与 owner 持久是真测试；工具路由的终端成功是模拟。在线 QQ 与完整 bash/Python/Ubuntu/apt 未验证。中文 PR 正文 403 已终止。细节见 [workspace-rootfs](workspace-rootfs.md)。
+历史：下面是当时私人写层的缺口记录，不是当前 overlay 的验收。当时生产供给默认关闭。当时 identity 里的 `unaccepted` 不是管理员批准。当时仍缺按 owner 的隔离出口、apt 策略、配额和租约回收。当时认为在线 QQ 与完整 bash/Python/Ubuntu/apt 未验证。中文 PR 正文 403 已终止。当前范围见 [workspace-rootfs](workspace-rootfs.md)。

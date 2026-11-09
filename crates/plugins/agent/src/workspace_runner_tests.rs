@@ -4,7 +4,6 @@ use super::parse_child_pid;
 fn package_budget_is_fixed_and_finite() {
     assert_eq!(super::WALL, std::time::Duration::from_secs(300));
     assert_eq!(super::CPU_SECONDS, 120);
-    assert_eq!(super::TMPFS_SIZE, "67108864");
     assert_eq!(super::OUT_CAP, 64 * 1024);
     assert_eq!(super::REAP_BOUND, std::time::Duration::from_secs(1));
 }

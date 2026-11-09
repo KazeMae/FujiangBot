@@ -13,68 +13,9 @@ jobs:
       - name: Sandbox packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap python3 gpg gpg-agent gpgconf sqv
-          sudo apt-get install -y --reinstall dpkg apt
-          dpkg-query -W dpkg apt
-          for p in \
-            /usr/share/apt/default-sequoia.config \
-            /usr/lib/os-release \
-            /etc/ssl/certs/ca-certificates.crt \
-            /usr/share/keyrings/debian-archive-keyring.gpg \
-            /usr/share/keyrings/debian-archive-keyring.pgp \
-            /usr/share/keyrings/ubuntu-archive-keyring.gpg \
-            /usr/share/keyrings/ubuntu-archive-keyring.pgp
-          do
-            if [ -L "$p" ]; then
-              stat -c '%n uid=%u gid=%g mode=%a type=%F' "$p"
-              echo "symlink $p -> $(readlink "$p")"
-              continue
-            fi
-            if [ ! -e "$p" ]; then
-              echo "$p absent"
-              continue
-            fi
-            stat -c '%n uid=%u gid=%g mode=%a type=%F' "$p"
-            owner=$(dpkg-query -S "$p" 2>/dev/null | head -n 1 | cut -d: -f1 || true)
-            echo "owner ${owner:-unknown} $p"
-            uid=$(stat -c '%u' "$p")
-            mode=$(stat -c '%a' "$p")
-            g=${mode: -2:1}
-            o=${mode: -1}
-            if [ "$uid" != 0 ] || [ $((g & 2)) -ne 0 ] || [ $((o & 2)) -ne 0 ]; then
-              test -n "$owner"
-              sudo apt-get install -y --reinstall $owner
-              stat -c 'after %n uid=%u gid=%g mode=%a type=%F' "$p"
-              uid=$(stat -c '%u' "$p")
-              mode=$(stat -c '%a' "$p")
-              g=${mode: -2:1}
-              o=${mode: -1}
-              if [ "$uid" != 0 ] || [ $((g & 2)) -ne 0 ] || [ $((o & 2)) -ne 0 ]; then
-                echo "still unsafe $p"
-                exit 1
-              fi
-            fi
-          done
-          for f in /usr/share/dpkg/cputable /usr/share/dpkg/tupletable /usr/share/dpkg/triplettable /usr/share/dpkg/ostable /usr/share/dpkg/abitable; do
-            if [ -e "$f" ]; then
-              stat -c '%n uid=%u gid=%g mode=%a ftype=%F' "$f"
-            else
-              echo "$f absent"
-            fi
-          done
+          sudo apt-get install -y bubblewrap python3
           bwrap --help | grep -F -- '--bind-fd'
-          std=$(/usr/bin/python3 -I -S -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')
-          echo "python stdlib $std"
-          find "$std" -type l -printf '%p -> %l\n'
-          for p in /etc/resolv.conf /run /run/systemd /run/systemd/resolve /run/systemd/resolve/stub-resolv.conf /run/systemd/resolve/resolv.conf; do
-            if [ -e "$p" ] || [ -L "$p" ]; then
-              stat -c '%n uid=%u gid=%g mode=%a type=%F' "$p"
-              if [ -L "$p" ]; then readlink "$p"; fi
-            else
-              echo "$p absent"
-            fi
-          done
-          getent passwd systemd-resolve || echo "systemd-resolve absent"
+          bwrap --help | grep -F -- '--overlay'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

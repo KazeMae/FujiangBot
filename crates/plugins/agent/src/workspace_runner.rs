@@ -10,10 +10,12 @@ use std::time::{Duration, Instant};
 #[path = "workspace_runner_io.rs"]
 mod workspace_runner_io;
 
-#[path = "workspace_resolv.rs"]
-mod workspace_resolv;
-
 use workspace_runner_io::{recv_bound, spawn_drain};
+
+#[path = "workspace_runner_mount.rs"]
+mod mount;
+
+use mount::{push_fixed_args, scope_landlock};
 
 use anyhow::{bail, Context, Result};
 use serde::de::{self, Deserializer, MapAccess, Visitor};
@@ -24,7 +26,6 @@ const CPU_SECONDS: libc::rlim_t = 120;
 const REAP_BOUND: Duration = Duration::from_secs(1);
 const OUT_CAP: usize = 64 * 1024;
 const INFO_CAP: usize = 8 * 1024;
-const TMPFS_SIZE: &str = "67108864";
 const CLOSE_RANGE_CLOEXEC: libc::c_long = 4;
 #[cfg(target_arch = "x86_64")]
 const AUDIT_ARCH_X86_64: u32 = 0xc000003e;
@@ -34,7 +35,14 @@ const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 const RESOLVE_BENEATH: u64 = 0x08;
-const ROOT_DIRS: [&CStr; 6] = [c"proc", c"dev", c"work", c"tmp", c"run", c"sys"];
+const ROOT_DIRS: [&CStr; 6] = [
+    c"upper",
+    c"ovlwork",
+    c"work",
+    c"varlog",
+    c"aptcache",
+    c"aptlists-partial",
+];
 
 #[repr(C)]
 struct OpenHow {
@@ -207,7 +215,6 @@ pub fn run(root: BorrowedFd<'_>, work: BorrowedFd<'_>, payload: Payload) -> Resu
     ensure_host()?;
     ensure_bwrap()?;
     ensure_root_layout(root)?;
-    workspace_resolv::install(root.as_raw_fd()).context("unavailable: resolver")?;
     let root_fd = dup_high(root.as_raw_fd()).context("dup root fd")?;
     let work_fd = dup_high(work.as_raw_fd()).context("dup work fd")?;
     let seccomp = seccomp_memfd().context("seccomp memfd")?;
@@ -330,95 +337,6 @@ fn wait_wall(guard: &mut Guard, deadline: Instant) -> Result<(ExitStatus, bool)>
     }
 }
 
-fn push_fixed_args(
-    cmd: &mut Command,
-    root: RawFd,
-    work: RawFd,
-    info: RawFd,
-    block: RawFd,
-    seccomp: RawFd,
-) {
-    // One uid: bwrap's own user namespace. No newuidmap and no extra caps.
-    cmd.arg("--unshare-user")
-        .arg("--uid")
-        .arg("0")
-        .arg("--gid")
-        .arg("0")
-        .arg("--unshare-pid")
-        .arg("--unshare-ipc")
-        .arg("--unshare-uts")
-        .arg("--cap-drop")
-        .arg("ALL")
-        .arg("--new-session")
-        .arg("--die-with-parent")
-        .arg("--bind-fd")
-        .arg(root.to_string())
-        .arg("/")
-        .arg("--chmod")
-        .arg("1777")
-        .arg("/tmp")
-        .arg("--proc")
-        .arg("/proc")
-        .arg("--dev")
-        .arg("/dev")
-        .arg("--size")
-        .arg(TMPFS_SIZE)
-        .arg("--tmpfs")
-        .arg("/run")
-        .arg("--size")
-        .arg(TMPFS_SIZE)
-        .arg("--tmpfs")
-        .arg("/sys")
-        .arg("--bind-fd")
-        .arg(work.to_string())
-        .arg("/work")
-        .arg("--chdir")
-        .arg("/work")
-        .arg("--clearenv")
-        .arg("--setenv")
-        .arg("PATH")
-        .arg("/usr/sbin:/usr/bin:/bin")
-        .arg("--setenv")
-        .arg("LD_LIBRARY_PATH")
-        .arg("/lib/runtime")
-        .arg("--setenv")
-        .arg("HOME")
-        .arg("/work")
-        .arg("--setenv")
-        .arg("LANG")
-        .arg("C");
-    if guest_ca(root) {
-        cmd.arg("--setenv")
-            .arg("SSL_CERT_FILE")
-            .arg("/etc/ssl/certs/ca-certificates.crt");
-    }
-    cmd.arg("--info-fd")
-        .arg(info.to_string())
-        .arg("--block-fd")
-        .arg(block.to_string())
-        .arg("--seccomp")
-        .arg(seccomp.to_string())
-        .arg("--");
-}
-
-fn guest_ca(root: RawFd) -> bool {
-    let fd = unsafe {
-        libc::openat(
-            root,
-            c"etc/ssl/certs/ca-certificates.crt".as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-        )
-    };
-    if fd < 0 {
-        return false;
-    }
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let ok =
-        unsafe { libc::fstat(fd, &mut st) } == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFREG;
-    unsafe { libc::close(fd) };
-    ok
-}
-
 fn install_pre_exec(
     cmd: &mut Command,
     root: RawFd,
@@ -431,6 +349,7 @@ fn install_pre_exec(
     unsafe {
         cmd.pre_exec(move || {
             deny_new_privs()?;
+            scope_landlock()?;
             set_limits()?;
             // close_range marks every fd >= 3 cloexec before exec. Unknown
             // descriptors die at exec. The whitelist is cleared so bwrap
@@ -536,8 +455,8 @@ fn ensure_bwrap() -> Result<()> {
         .output()
         .context("bwrap --help")?;
     let text = String::from_utf8_lossy(&help.stdout);
-    if !text.contains("--bind-fd") {
-        bail!("bwrap has no --bind-fd");
+    if !text.contains("--bind-fd") || !text.contains("--overlay") {
+        bail!("bwrap has no --bind-fd or --overlay");
     }
     Ok(())
 }

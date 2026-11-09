@@ -34,7 +34,7 @@ pub(crate) fn execute_with(
     let owner = map_owner(owner)?;
     let (host, base) = authority.acquire()?;
     let store = crate::workspace_store::WorkspaceStore::open(&host, owner, &base)?;
-    drop(base);
+    let _ = base;
     let result = run_callback(store.rootfs(), store.as_fd(), payload);
     drop(store);
     result
@@ -71,7 +71,7 @@ impl RootfsAuthority for ProductionSupply {
         if raw.is_empty() {
             return Err(anyhow::anyhow!(RUNNER_UNAVAILABLE));
         }
-        let runtime = crate::workspace_store::stage_public()
+        let runtime = crate::workspace_store::PublicRuntime::current()
             .map_err(|err| anyhow::anyhow!("{RUNNER_UNAVAILABLE}: {err}"))?;
         Ok((std::path::PathBuf::from(raw), runtime))
     }
