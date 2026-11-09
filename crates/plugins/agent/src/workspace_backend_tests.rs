@@ -133,37 +133,29 @@ fn text(run: &crate::workspace_runner::RunResult) -> String {
     )
 }
 
-fn build_deb(dir: &Path) -> PathBuf {
-    let src = dir.join("deb");
-    std::fs::create_dir_all(src.join("DEBIAN")).unwrap();
-    std::fs::create_dir_all(src.join("usr/bin")).unwrap();
-    std::fs::write(
-        src.join("DEBIAN/control"),
-        "Package: ovlhello\nVersion: 0.0.1\nArchitecture: all\nMaintainer: f <f@example.invalid>\nDescription: overlay fixture\n",
-    )
-    .unwrap();
-    std::fs::write(src.join("usr/bin/ovlhello"), b"#!/bin/sh\necho OVLHELLO\n").unwrap();
-    std::fs::set_permissions(
-        src.join("usr/bin/ovlhello"),
-        std::fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
-    let deb = dir.join("ovlhello.deb");
-    assert!(Command::new("dpkg-deb")
-        .args(["--root-owner-group", "--build"])
-        .arg(&src)
-        .arg(&deb)
-        .status()
+fn sha256(path: &Path) -> String {
+    let out = Command::new("sha256sum").arg(path).output().unwrap();
+    assert!(out.status.success());
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
         .unwrap()
-        .success());
-    deb
+        .to_string()
+}
+
+fn dir_names(path: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(path)
+        .unwrap()
+        .map(|ent| ent.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
 }
 
 #[tokio::test]
-async fn bash_python_and_local_deb_persist_without_touching_host() {
+async fn bash_python_and_work_persist() {
     let (root, auth) = scratch("keep");
     let owner = resolved_owner(Source::Friend { id: 9 }, 9).await;
-    let other = resolved_owner(Source::Friend { id: 8 }, 8).await;
     let bash = execute_with(
         owner,
         crate::workspace_runner::Payload::Bash("echo BASH_OK > /work/mark".to_string()),
@@ -175,97 +167,87 @@ async fn bash_python_and_local_deb_persist_without_touching_host() {
     let py = run_py(&auth, owner, "print(open('/work/mark').read().strip())");
     assert_eq!(py.exit_code, 0, "{}", text(&py));
     assert!(text(&py).contains("BASH_OK"));
-    let deb = build_deb(&root);
-    std::fs::copy(&deb, auth.host.join("personal/9/work/ovlhello.deb")).unwrap();
-    let install = run_py(
-        &auth,
-        owner,
-        r#"
-import subprocess
-r=subprocess.run(["apt-get","-o","APT::Sandbox::User=root","install","-y","/work/ovlhello.deb"],capture_output=True,text=True)
-print(r.stdout)
-print(r.stderr)
-raise SystemExit(r.returncode)
-"#,
-    );
-    let inst = text(&install);
-    assert_eq!(install.exit_code, 0, "{inst}");
-    assert!(inst.contains("newly installed"), "{inst}");
-    let again = run_py(
-        &auth,
-        owner,
-        "import subprocess; raise SystemExit(subprocess.call(['/usr/bin/ovlhello']))",
-    );
-    assert_eq!(again.exit_code, 0, "{}", text(&again));
-    assert!(text(&again).contains("OVLHELLO"));
-    assert!(!Path::new("/usr/bin/ovlhello").exists());
-    let host_dpkg = Command::new("dpkg")
-        .args(["-s", "ovlhello"])
-        .status()
-        .unwrap();
-    assert!(!host_dpkg.success());
-    let hidden = run_py(
-        &auth,
-        other,
-        "import os; print('ABSENT' if not os.path.exists('/usr/bin/ovlhello') else 'PRESENT')",
-    );
-    assert_eq!(hidden.exit_code, 0, "{}", text(&hidden));
-    assert!(text(&hidden).contains("ABSENT"), "{}", text(&hidden));
     cleanup(&root);
 }
 
 #[tokio::test]
-async fn prepare_skips_guest_symlink_that_points_outside_the_owner() {
-    let (root, auth) = scratch("escape");
-    let hostdir = root.join("hostdir");
-    std::fs::create_dir(&hostdir).unwrap();
-    let sentinel = root.join("sentinel");
-    std::fs::write(&sentinel, b"HOST-SENTINEL").unwrap();
+async fn system_dirs_read_only_and_apt_fails_without_touching_host() {
+    let (root, auth) = scratch("ro");
     let owner = resolved_owner(Source::Friend { id: 9 }, 9).await;
-    let target = hostdir.display().to_string();
-    let plant = run_py(
+    let status = Path::new("/var/lib/dpkg/status");
+    let usr_bin = Path::new("/usr/bin");
+    let before_hash = sha256(status);
+    let before_mtime = std::fs::metadata(status).unwrap().modified().unwrap();
+    let before_dir_mtime = std::fs::metadata(usr_bin).unwrap().modified().unwrap();
+    let before_names = dir_names(usr_bin);
+    let run = run_py(
         &auth,
         owner,
-        &r#"
-import os, shutil
-def plant(path, dest):
-    if os.path.islink(path):
-        os.unlink(path)
-    elif os.path.isdir(path):
-        shutil.rmtree(path)
-    elif os.path.lexists(path):
-        os.unlink(path)
-    os.symlink(dest, path)
-plant("/etc/apt/apt.conf.d", "HOSTDIR")
-plant("/var/lib/dpkg/triggers", "HOSTDIR")
-for path in (
-    "/var/lib/dpkg/lock",
-    "/var/lib/dpkg/lock-frontend",
-    "/var/lib/apt/lists/lock",
-    "/var/cache/debconf/passwords.dat",
-):
+        r#"
+import os, subprocess
+def create(path):
     try:
-        os.remove(path)
-    except FileNotFoundError:
-        pass
-print("PLANTED")
-"#
-        .replace("HOSTDIR", &target),
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        os.close(fd)
+        print("CREATE", 0)
+    except OSError as err:
+        print("CREATE", err.errno)
+def append(path):
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND)
+        os.write(fd, b"X")
+        os.close(fd)
+        print("APPEND", 0)
+    except OSError as err:
+        print("APPEND", err.errno)
+create("/usr/bin/fujiang-ro-probe")
+create("/etc/fujiang-ro-probe")
+create("/var/lib/dpkg/fujiang-ro-probe")
+append("/var/lib/dpkg/status")
+open("/work/not-a-deb","wb").write(b"not a deb\n")
+def rc(argv):
+    print("RC", subprocess.call(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+rc(["apt-get","install","-y","--no-download","/work/not-a-deb"])
+rc(["dpkg","-i","/work/not-a-deb"])
+rc(["dpkg","--configure","-a"])
+"#,
     );
-    assert_eq!(plant.exit_code, 0, "{}", text(&plant));
-    assert!(text(&plant).contains("PLANTED"), "{}", text(&plant));
-    let again = run_py(&auth, owner, "print('SECOND_OK')");
-    let again_text = text(&again);
-    let host_entries: Vec<_> = std::fs::read_dir(&hostdir)
-        .unwrap()
-        .map(|ent| ent.unwrap().file_name())
-        .collect();
-    let sent_bytes = std::fs::read(&sentinel).unwrap();
+    let guest = text(&run);
+    let after_hash = sha256(status);
+    let after_mtime = std::fs::metadata(status).unwrap().modified().unwrap();
+    let after_dir_mtime = std::fs::metadata(usr_bin).unwrap().modified().unwrap();
+    let after_names = dir_names(usr_bin);
     cleanup(&root);
-    assert_eq!(again.exit_code, 0, "{again_text}");
-    assert!(again_text.contains("SECOND_OK"), "{again_text}");
-    assert!(host_entries.is_empty(), "hostdir gained {host_entries:?}");
-    assert_eq!(sent_bytes, b"HOST-SENTINEL");
+    assert_eq!(run.exit_code, 0, "exit {}", run.exit_code);
+    let writes: Vec<&str> = guest
+        .lines()
+        .filter(|line| line.starts_with("CREATE") || line.starts_with("APPEND"))
+        .collect();
+    assert_eq!(writes.len(), 4, "write attempts {}", writes.len());
+    for line in writes {
+        let errno: i32 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+        assert!(
+            errno == libc::EROFS || errno == libc::EACCES,
+            "write errno {errno}"
+        );
+    }
+    let codes: Vec<i32> = guest
+        .lines()
+        .filter(|line| line.starts_with("RC "))
+        .map(|line| line.split_whitespace().nth(1).unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(codes.len(), 3);
+    assert!(
+        codes.iter().all(|code| *code != 0),
+        "command exits {codes:?}"
+    );
+    assert_eq!(before_hash, after_hash);
+    assert_eq!(before_mtime, after_mtime);
+    assert_eq!(before_dir_mtime, after_dir_mtime);
+    assert_eq!(before_names, after_names);
+    assert!(!Path::new("/usr/bin/fujiang-ro-probe").exists());
+    assert!(!Path::new("/etc/fujiang-ro-probe").exists());
+    assert!(!Path::new("/var/lib/dpkg/fujiang-ro-probe").exists());
 }
 
 #[tokio::test]
@@ -306,8 +288,9 @@ async fn guest_cannot_use_host_fds_env_or_abstract_sockets() {
     let sent = sentinel.display().to_string();
     let other_file = auth.host.join("personal/8/work/secret");
     let script = r#"
-import os, socket
+import os, socket, stat
 bad=False
+dirs=0
 def outside(target):
     return target.startswith("/") and target != "/work" and not target.startswith("/work/")
 for base in ("/proc/self/fd","/proc/1/fd"):
@@ -319,6 +302,11 @@ for base in ("/proc/self/fd","/proc/1/fd"):
         if not n.isdigit() or int(n) < 3:
             continue
         path=base+"/"+n
+        try:
+            if stat.S_ISDIR(os.stat(path).st_mode):
+                dirs += 1
+        except OSError:
+            pass
         try:
             target=os.readlink(path)
         except OSError:
@@ -348,8 +336,9 @@ for base in ("/proc/self/fd","/proc/1/fd"):
                 pass
             os.close(wr)
 print("FD_BAD" if bad else "FD_CLEAN")
+print("DIRFD", dirs)
 marker=b"host-marker-value"
-hit=[]
+hits=0
 for pid in os.listdir("/proc"):
     if not pid.isdigit():
         continue
@@ -358,8 +347,8 @@ for pid in os.listdir("/proc"):
     except OSError:
         continue
     if marker in env:
-        hit.append(pid)
-print("ENV_BAD" if hit else "ENV_CLEAN")
+        hits += 1
+print("ENV_HITS", hits)
 def fail(path):
     try:
         os.symlink(path, "/work/link")
@@ -374,8 +363,11 @@ def fail(path):
             pass
 fail("SENTINEL_PATH")
 fail("OTHER_PATH")
-open("/usr/bin/ovl-host-write","w").write("x")
-print("GUEST_WROTE")
+try:
+    open("/usr/bin/ovl-host-write","w").write("x")
+    print("WRITE", 0)
+except OSError as err:
+    print("WRITE", err.errno)
 s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 try:
     s.connect("\0SOCKET_NAME")
@@ -398,10 +390,34 @@ print("DONE")
     cleanup(&root);
     assert_eq!(run.exit_code, 0, "exit {} {guest}", run.exit_code);
     assert!(guest.contains("FD_CLEAN"), "{guest}");
-    assert!(guest.contains("ENV_CLEAN"), "{guest}");
+    let dirfd = guest
+        .lines()
+        .find_map(|line| line.strip_prefix("DIRFD "))
+        .unwrap_or("missing");
+    assert_eq!(dirfd, "0", "directory fds {dirfd}");
+    let env_hits = guest
+        .lines()
+        .find_map(|line| line.strip_prefix("ENV_HITS "))
+        .unwrap_or("missing");
+    assert_eq!(
+        env_hits, "0",
+        "host env marker visible in {env_hits} proc environ files"
+    );
     assert!(guest.contains("LINK"), "{guest}");
     assert!(!guest.contains("LINK_OK"), "{guest}");
-    assert!(guest.contains("GUEST_WROTE"), "{guest}");
+    let write_errno: i32 = guest
+        .lines()
+        .find(|line| line.starts_with("WRITE "))
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        write_errno == libc::EROFS || write_errno == libc::EACCES,
+        "write errno {write_errno}"
+    );
     assert!(guest.contains(&format!("SOCK {}", libc::EPERM)), "{guest}");
     assert_eq!(sent_bytes, b"HOST-SENTINEL");
     assert!(!Path::new("/usr/bin/ovl-host-write").exists());

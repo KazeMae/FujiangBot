@@ -226,7 +226,7 @@ fn seccomp_blocks_nested_namespaces_without_blocking_plain_clone() {
 #[test]
 fn push_fixed_args_block_fd_unshare_without_as_pid_1() {
     let mut cmd = Command::new("bwrap");
-    push_fixed_args(&mut cmd, 10, 11, 12, 13, 14);
+    push_fixed_args(&mut cmd, 11, 12, 13, 14);
     let args: Vec<String> = cmd
         .get_args()
         .map(|arg| arg.to_string_lossy().into_owned())
@@ -251,29 +251,31 @@ fn push_fixed_args_block_fd_unshare_without_as_pid_1() {
         .iter()
         .all(|arg| arg != "--userns" && arg != "--cap-add"));
     for lower in ["/usr", "/etc", "/var"] {
-        assert!(args
-            .windows(2)
-            .any(|pair| pair[0] == "--overlay-src" && pair[1] == lower));
-        assert!(args
-            .windows(4)
-            .any(|quad| quad[0] == "--overlay" && quad[3] == lower));
-    }
-    assert!(args
-        .iter()
-        .any(|arg| arg.contains("/proc/self/fd/10/upper/")));
-    assert!(args
-        .iter()
-        .any(|arg| arg.contains("/proc/self/fd/10/ovlwork/")));
-    for (source_tail, dest) in [
-        ("/varlog", "/var/log"),
-        ("/aptcache", "/var/cache/apt"),
-        ("/aptlists-partial", "/var/lib/apt/lists/partial"),
-    ] {
         assert!(args.windows(3).any(|triple| {
-            triple[0] == "--bind" && triple[1].ends_with(source_tail) && triple[2] == dest
+            triple[0] == "--ro-bind" && triple[1] == lower && triple[2] == lower
         }));
     }
-    for tmp in ["/etc/apt/auth.conf.d", "/tmp", "/run"] {
+    assert!(args
+        .iter()
+        .all(|arg| arg != "--overlay" && arg != "--overlay-src"));
+    assert!(args.iter().all(|arg| !arg.contains("varlog")
+        && !arg.contains("aptcache")
+        && !arg.contains("aptlists")));
+    for path in ["/var/log", "/var/tmp", "/var/cache", "/etc/apt/auth.conf.d"] {
+        if Path::new(path).is_dir() {
+            assert!(args
+                .windows(2)
+                .any(|pair| pair[0] == "--tmpfs" && pair[1] == path));
+        }
+    }
+    if Path::new("/etc/apt/auth.conf").is_file() {
+        assert!(args.windows(3).any(|triple| {
+            triple[0] == "--ro-bind"
+                && triple[1] == "/dev/null"
+                && triple[2] == "/etc/apt/auth.conf"
+        }));
+    }
+    for tmp in ["/tmp", "/run"] {
         assert!(args
             .windows(2)
             .any(|pair| pair[0] == "--tmpfs" && pair[1] == tmp));
@@ -282,10 +284,6 @@ fn push_fixed_args_block_fd_unshare_without_as_pid_1() {
     assert!(args
         .windows(2)
         .all(|pair| !(pair[0] == "--tmpfs" && pair[1] == "/sys")));
-    assert_eq!(
-        args.iter().filter(|arg| arg.as_str() == "--tmpfs").count(),
-        3
-    );
     assert_eq!(
         args.iter()
             .filter(|arg| arg.as_str() == "--bind-fd")

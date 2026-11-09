@@ -81,7 +81,6 @@ impl WorkspaceStore {
         let ns_fd = subdir(host_fd.as_raw_fd(), ns)?;
         let owner_fd = subdir(ns_fd.as_raw_fd(), &id_s)?;
         let _lock = lock_owner(owner_fd.as_raw_fd())?;
-        overlay::prepare(owner_fd.as_raw_fd())?;
         let work = subdir(owner_fd.as_raw_fd(), "work")?;
         let rootfs = raw_owned(unsafe { libc::dup(owner_fd.as_raw_fd()) })?;
         Ok(Self {
@@ -273,12 +272,7 @@ fn reject_lock_stat(st: &libc::stat) -> io::Result<()> {
 #[path = "workspace_tree.rs"]
 mod tree;
 
-#[path = "workspace_overlay.rs"]
-mod overlay;
-
-pub(crate) use overlay::landlock_scope_ok;
-
-/// Marker kept so acquire stays a pair. The guest uses the host overlay, not a private copy.
+/// Marker kept so acquire stays a pair. The guest sees host system dirs read-only.
 pub(crate) struct PublicRuntime;
 
 impl PublicRuntime {

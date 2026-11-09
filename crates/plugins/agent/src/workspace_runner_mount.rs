@@ -7,14 +7,12 @@ use std::process::Command;
 
 pub(super) fn push_fixed_args(
     cmd: &mut Command,
-    root: RawFd,
     work: RawFd,
     info: RawFd,
     block: RawFd,
     seccomp: RawFd,
 ) {
     // One uid: bwrap's own user namespace. No newuidmap and no extra caps.
-    let base = format!("/proc/self/fd/{root}");
     cmd.arg("--unshare-user")
         .arg("--uid")
         .arg("0")
@@ -27,38 +25,26 @@ pub(super) fn push_fixed_args(
         .arg("ALL")
         .arg("--new-session")
         .arg("--die-with-parent")
-        .arg("--overlay-src")
+        .arg("--ro-bind")
         .arg("/usr")
-        .arg("--overlay")
-        .arg(format!("{base}/upper/usr"))
-        .arg(format!("{base}/ovlwork/usr"))
         .arg("/usr")
-        .arg("--overlay-src")
+        .arg("--ro-bind")
         .arg("/etc")
-        .arg("--overlay")
-        .arg(format!("{base}/upper/etc"))
-        .arg(format!("{base}/ovlwork/etc"))
         .arg("/etc")
-        .arg("--overlay-src")
+        .arg("--ro-bind")
         .arg("/var")
-        .arg("--overlay")
-        .arg(format!("{base}/upper/var"))
-        .arg(format!("{base}/ovlwork/var"))
-        .arg("/var")
-        .arg("--bind")
-        .arg(format!("{base}/varlog"))
-        .arg("/var/log")
-        .arg("--bind")
-        .arg(format!("{base}/aptcache"))
-        .arg("/var/cache/apt")
-        .arg("--bind")
-        .arg(format!("{base}/aptlists-partial"))
-        .arg("/var/lib/apt/lists/partial")
-        .arg("--tmpfs")
-        .arg("/etc/apt/auth.conf.d");
+        .arg("/var");
+    for path in ["/var/log", "/var/tmp", "/var/cache"] {
+        if std::fs::metadata(path).is_ok_and(|meta| meta.is_dir()) {
+            cmd.arg("--tmpfs").arg(path);
+        }
+    }
+    if std::path::Path::new("/etc/apt/auth.conf.d").exists() {
+        cmd.arg("--tmpfs").arg("/etc/apt/auth.conf.d");
+    }
     if std::path::Path::new("/etc/apt/auth.conf").exists() {
         cmd.arg("--ro-bind")
-            .arg(format!("{base}/empty-auth"))
+            .arg("/dev/null")
             .arg("/etc/apt/auth.conf");
     }
     push_usr_links(cmd);
@@ -161,6 +147,14 @@ fn push_resolv(cmd: &mut Command) {
     }
 }
 
+pub(crate) fn landlock_scope_ok(abi: i32) -> io::Result<()> {
+    if abi < 6 {
+        Err(io::Error::other("unavailable: landlock scope"))
+    } else {
+        Ok(())
+    }
+}
+
 pub(super) fn scope_landlock() -> io::Result<()> {
     let abi = unsafe {
         libc::syscall(
@@ -170,7 +164,7 @@ pub(super) fn scope_landlock() -> io::Result<()> {
             1u32,
         )
     };
-    crate::workspace_store::landlock_scope_ok(abi as i32)?;
+    landlock_scope_ok(abi as i32)?;
     #[repr(C)]
     struct Attr {
         handled_access_fs: u64,
@@ -199,4 +193,16 @@ pub(super) fn scope_landlock() -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::landlock_scope_ok;
+
+    #[test]
+    fn landlock_below_abi_six_fails_closed() {
+        let err = landlock_scope_ok(5).unwrap_err();
+        assert!(err.to_string().contains("unavailable: landlock scope"));
+        assert!(landlock_scope_ok(6).is_ok());
+    }
 }

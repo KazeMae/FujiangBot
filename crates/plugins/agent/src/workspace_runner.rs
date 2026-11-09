@@ -24,12 +24,6 @@ use serde::Deserialize;
 const WALL: Duration = Duration::from_secs(300);
 const CPU_SECONDS: libc::rlim_t = 120;
 const REAP_BOUND: Duration = Duration::from_secs(1);
-// Every namespace process is already SIGKILLed, so no guest code runs.
-// The wait is kernel teardown of the mount namespace: overlay umount
-// syncs the host upper filesystem and scales with host-wide dirty data
-// (measured 0.44s at 1.1 GB dirty locally; slower CI disks exceed 1s).
-// Finite so a wedged kernel teardown still surfaces as an error.
-const INIT_EXIT_BOUND: Duration = Duration::from_secs(30);
 const OUT_CAP: usize = 64 * 1024;
 const INFO_CAP: usize = 8 * 1024;
 const CLOSE_RANGE_CLOEXEC: libc::c_long = 4;
@@ -41,14 +35,7 @@ const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 const RESOLVE_BENEATH: u64 = 0x08;
-const ROOT_DIRS: [&CStr; 6] = [
-    c"upper",
-    c"ovlwork",
-    c"work",
-    c"varlog",
-    c"aptcache",
-    c"aptlists-partial",
-];
+const ROOT_DIRS: [&CStr; 1] = [c"work"];
 
 #[repr(C)]
 struct OpenHow {
@@ -129,7 +116,7 @@ impl Guard {
             .pidfd
             .as_ref()
             .ok_or_else(|| io::Error::other("namespace init pidfd missing"))?;
-        let deadline = Instant::now() + INIT_EXIT_BOUND;
+        let deadline = Instant::now() + REAP_BOUND;
         loop {
             let now = Instant::now();
             if now >= deadline {
@@ -221,12 +208,10 @@ pub fn run(root: BorrowedFd<'_>, work: BorrowedFd<'_>, payload: Payload) -> Resu
     ensure_host()?;
     ensure_bwrap()?;
     ensure_root_layout(root)?;
-    let root_fd = dup_high(root.as_raw_fd()).context("dup root fd")?;
     let work_fd = dup_high(work.as_raw_fd()).context("dup work fd")?;
     let seccomp = seccomp_memfd().context("seccomp memfd")?;
     let (info_r, info_w) = cloexec_pipe().context("info pipe")?;
     let (block_r, block_w) = cloexec_pipe().context("block pipe")?;
-    require_high(root_fd.as_raw_fd())?;
     require_high(work_fd.as_raw_fd())?;
     require_high(info_w.as_raw_fd())?;
     require_high(block_r.as_raw_fd())?;
@@ -239,7 +224,6 @@ pub fn run(root: BorrowedFd<'_>, work: BorrowedFd<'_>, payload: Payload) -> Resu
         .env_clear();
     push_fixed_args(
         &mut cmd,
-        root_fd.as_raw_fd(),
         work_fd.as_raw_fd(),
         info_w.as_raw_fd(),
         block_r.as_raw_fd(),
@@ -262,7 +246,6 @@ pub fn run(root: BorrowedFd<'_>, work: BorrowedFd<'_>, payload: Payload) -> Resu
     }
     install_pre_exec(
         &mut cmd,
-        root_fd.as_raw_fd(),
         work_fd.as_raw_fd(),
         info_w.as_raw_fd(),
         block_r.as_raw_fd(),
@@ -294,7 +277,6 @@ pub fn run(root: BorrowedFd<'_>, work: BorrowedFd<'_>, payload: Payload) -> Resu
     drop(info_w);
     drop(block_r);
     drop(seccomp);
-    drop(root_fd);
     drop(work_fd);
 
     let mut stdout_rx = spawn_drain(stdout).context("stdout reader")?;
@@ -343,15 +325,8 @@ fn wait_wall(guard: &mut Guard, deadline: Instant) -> Result<(ExitStatus, bool)>
     }
 }
 
-fn install_pre_exec(
-    cmd: &mut Command,
-    root: RawFd,
-    work: RawFd,
-    info: RawFd,
-    block: RawFd,
-    seccomp: RawFd,
-) {
-    let keep = [root, work, info, block, seccomp];
+fn install_pre_exec(cmd: &mut Command, work: RawFd, info: RawFd, block: RawFd, seccomp: RawFd) {
+    let keep = [work, info, block, seccomp];
     unsafe {
         cmd.pre_exec(move || {
             deny_new_privs()?;
@@ -461,8 +436,8 @@ fn ensure_bwrap() -> Result<()> {
         .output()
         .context("bwrap --help")?;
     let text = String::from_utf8_lossy(&help.stdout);
-    if !text.contains("--bind-fd") || !text.contains("--overlay") {
-        bail!("bwrap has no --bind-fd or --overlay");
+    if !text.contains("--bind-fd") {
+        bail!("bwrap has no --bind-fd");
     }
     Ok(())
 }

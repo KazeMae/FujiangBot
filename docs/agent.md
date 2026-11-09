@@ -77,7 +77,7 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 
 `workspace.bash` 与 `workspace.code` 的规格已经存在：只接受字符串 `script`，以及 bash 的可选 `lang`（`bash` 或 `sh`，省略为 bash）或 code 必填的 `python`。其它字段拒绝。脚本按字节计，空串、含 NUL、或长于 64KiB 拒绝。解释器是 bash（`--noprofile --norc`）、`/bin/sh -c`，或 `/usr/bin/python3 -I -c`。成功结果给出 `exit_code` 和 stdout、stderr 字符串。这些规格只有 `production_available` 为真才放进当轮工具清单。它等于这一次生产 `acquire` 成功。供给接线已经实现。`FUJIANG_WORKSPACE_MVP` 未设置时不广告、调用不可用、不启动进程。没有批准文件环境变量。模型不能提交 rootfs 或 owner 路径。没有身份覆盖字段，也没有宿主 exec 降级。这不是生产已接受。
 
-QQ 选择是真实 SQLite metadata，测试不打 NapCat。在线 QQ 未验收。ToolLoop 里不经过真实 bwrap 的成功回调仍是模拟。原生 bwrap 的 bash、python3、`/work` 持久和离线本地 `.deb` 已通过，范围见 [workspace-rootfs](workspace-rootfs.md)。远程 apt 未验收。
+QQ 选择是真实 SQLite metadata，测试不打 NapCat。在线 QQ 未验收。ToolLoop 里不经过真实 bwrap 的成功回调仍是模拟。原生 bwrap 的 bash、python3 和 `/work` 持久已通过，系统目录只读。沙箱内 apt/dpkg 安装已取消。范围见 [workspace-rootfs](workspace-rootfs.md)。
 
 ## 分层记忆
 

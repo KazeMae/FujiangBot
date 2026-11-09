@@ -15,7 +15,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bubblewrap python3
           bwrap --help | grep -F -- '--bind-fd'
-          bwrap --help | grep -F -- '--overlay'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
