@@ -14,13 +14,15 @@ owner 绑定、owner FD 锁、打开/重开、进程回收、`close_range`、清
 
 原生 bwrap：bash/python 输出；`/work` 跨执行仍在；离线本地 `.deb` newly installed，重开仍在；探针中的 apt remove/reinstall。宿主 `/usr` 与宿主 dpkg 不变，其他 owner 看不见。非 CLOEXEC 的宿主哨兵读写 FD 经 `/proc/self/fd` 与 `/proc/1/fd` 的真实读写不可用。`/proc/*/environ` 无宿主环境标记。指向宿主哨兵或其他 owner 的符号链接失败。宿主抽象 unix 套接字连接为 `EPERM`。upper 里客人种下的外指符号链接不会让宿主侧 `prepare` 写出 owner。
 
+CI：43e2b9b 的运行 42559792547 中 Landlock、FD、apt 测试已通过，但 `init reap exceeded bound` 失败。实测原因：bwrap 先于 namespace init 退出，init 退出时卸载 overlay 会 sync 宿主上层文件系统，耗时随宿主脏页增长（本地 1.1 GB 脏页 0.44s，ro-bind 对照 0.001s）。d6c1d6c 把 init 退出上限拆为 30s（bwrap 回收仍 1s），并只在宿主变化时重走骨架。CI 运行 42561746655 通过：https://github.com/KazeMae/FujiangBot/actions/runs/42561746655
+
 ## 模拟
 
 骨架谓词。Landlock ABI&lt;6 失败关闭。非普通 dpkg status 拒绝。
 
 ## 未验收
 
-远程 apt update/install：宿主 DNS 当前失败，不重试。在线 QQ。dpkg 硬链接备份的宿主包升级。多 UID/服务包。CI 上的 Landlock ABI。
+远程 apt update/install：宿主 DNS 当前失败，不重试。在线 QQ。dpkg 硬链接备份的宿主包升级。多 UID/服务包。
 
 ## 已删模块
 
