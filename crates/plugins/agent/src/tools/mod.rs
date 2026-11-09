@@ -6,7 +6,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use async_trait::async_trait;
-use fujiang_core::{BotContext, Messenger, Source};
+use fujiang_core::{BotContext, Media, MessageEvent, Messenger, Source};
 use serde_json::{Map, Value};
 use tracing::warn;
 
@@ -21,6 +21,11 @@ mod fun_pack;
 mod qq_read;
 mod schedule_pack;
 mod skills;
+mod workspace_pack;
+
+#[cfg(test)]
+#[path = "workspace_tests.rs"]
+mod workspace_tests;
 
 pub(crate) use schedule_pack::{command as schedule_command, tick as schedule_tick};
 pub(crate) use skills::resident_tools;
@@ -99,6 +104,7 @@ pub(crate) struct ToolTurn {
     pub calls: i64,
     pub in_tokens: i64,
     pub out_tokens: i64,
+    pub unknown_calls: i64,
 }
 
 #[async_trait]
@@ -107,6 +113,23 @@ pub(crate) trait ToolHub: Send + Sync {
 
     async fn onebot(&self, _action: &str, _params: Value) -> anyhow::Result<Value> {
         anyhow::bail!("onebot call is not available")
+    }
+
+    async fn session_message_segments(
+        &self,
+        _group_id: Option<i64>,
+        _peer: Option<i64>,
+        _message_id: i64,
+    ) -> anyhow::Result<Option<String>> {
+        anyhow::bail!("unavailable")
+    }
+
+    async fn get_message(&self, _id: i64) -> anyhow::Result<MessageEvent> {
+        anyhow::bail!("unavailable")
+    }
+
+    async fn fetch_media_bytes(&self, _media: &Media) -> anyhow::Result<Vec<u8>> {
+        anyhow::bail!("unavailable")
     }
 }
 
@@ -120,6 +143,25 @@ impl ToolHub for BotContext {
         let messenger = self.messenger().await;
         Messenger::onebot(messenger.as_ref(), action, params).await
     }
+
+    async fn session_message_segments(
+        &self,
+        group_id: Option<i64>,
+        peer: Option<i64>,
+        message_id: i64,
+    ) -> anyhow::Result<Option<String>> {
+        self.store
+            .session_message_segments(group_id, peer, message_id)
+            .await
+    }
+
+    async fn get_message(&self, id: i64) -> anyhow::Result<MessageEvent> {
+        self.messenger().await.get_message(id).await
+    }
+
+    async fn fetch_media_bytes(&self, media: &Media) -> anyhow::Result<Vec<u8>> {
+        BotContext::fetch_media_bytes(self, media).await
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +174,7 @@ pub(crate) struct BuiltinTools {
     pub fun: bool,
     pub memory: bool,
     pub memory_write: bool,
+    pub view_image: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +188,22 @@ pub(crate) struct MemoCallScope {
 impl MemoCallScope {
     pub(crate) fn speaker(&self) -> i64 {
         self.user_id
+    }
+
+    pub(crate) fn chat_source(&self) -> Source {
+        self.workspace_turn().source
+    }
+
+    pub(crate) fn workspace_turn(&self) -> crate::workspace::HostTurn {
+        let source = if self.source_kind == "group" {
+            Source::Group { id: self.source_id }
+        } else {
+            Source::Friend { id: self.source_id }
+        };
+        crate::workspace::HostTurn {
+            source,
+            actor: self.user_id,
+        }
     }
 
     pub(crate) fn from_source(source: Source, user_id: i64) -> Self {
@@ -195,8 +254,9 @@ impl BuiltinTools {
         fun: true,
         memory: true,
         memory_write: true,
+        view_image: false,
     };
-    const OFF: Self = Self {
+    pub(crate) const OFF: Self = Self {
         rank: false,
         contest: false,
         problem: false,
@@ -205,6 +265,7 @@ impl BuiltinTools {
         fun: false,
         memory: false,
         memory_write: false,
+        view_image: false,
     };
 }
 
@@ -355,6 +416,13 @@ fn builtin_specs(builtins: BuiltinTools) -> Vec<ToolSpec> {
             }),
         ));
     }
+    if builtins.view_image {
+        specs.push(builtin_spec(
+            crate::history_image::NAME,
+            crate::history_image::DESC,
+            crate::history_image::parameters(),
+        ));
+    }
     specs
 }
 
@@ -370,43 +438,96 @@ pub(crate) async fn run_tool_loop<H: ToolHub + ?Sized>(
     pass: &ToolPass<'_>,
     hub: &H,
 ) -> ToolTurn {
-    tool_loop(client, messages, builtins, pass, hub, |opened| {
-        skills::round_tools(configured, builtins, opened)
-    })
+    tool_loop_with(
+        client,
+        messages,
+        builtins,
+        pass,
+        hub,
+        workspace_pack::production_execute,
+        |opened| skills::round_tools(configured, builtins, opened),
+    )
     .await
 }
 
+#[cfg(test)]
 async fn tool_loop<H, F>(
     client: &LlmClient,
     messages: &[ChatMessage],
     builtins: BuiltinTools,
     pass: &ToolPass<'_>,
     hub: &H,
+    visible: F,
+) -> ToolTurn
+where
+    H: ToolHub + ?Sized,
+    F: FnMut(&BTreeSet<String>) -> Vec<ToolSpec>,
+{
+    tool_loop_with(
+        client,
+        messages,
+        builtins,
+        pass,
+        hub,
+        workspace_pack::production_execute,
+        visible,
+    )
+    .await
+}
+
+async fn tool_loop_with<H, E, F>(
+    client: &LlmClient,
+    messages: &[ChatMessage],
+    builtins: BuiltinTools,
+    pass: &ToolPass<'_>,
+    hub: &H,
+    mut execute: E,
     mut visible: F,
 ) -> ToolTurn
 where
     H: ToolHub + ?Sized,
+    E: FnMut(
+        crate::workspace::WorkspaceOwner,
+        crate::workspace_runner::Payload,
+    ) -> anyhow::Result<crate::workspace_runner::RunResult>,
     F: FnMut(&BTreeSet<String>) -> Vec<ToolSpec>,
 {
     let max_rounds = pass.max_rounds;
     let mut opened = BTreeSet::new();
     let mut members = HashMap::new();
     let mut prior = Vec::new();
+    let mut seen_images = 0usize;
     let mut used = 0u32;
     let mut calls = 0i64;
     let mut in_tokens = 0i64;
     let mut out_tokens = 0i64;
+    let mut unknown_calls = 0i64;
     loop {
         let tools = visible(&opened);
         if tools.is_empty() && prior.is_empty() {
             return match client.complete(messages).await {
-                Ok(done) => tool_turn(
-                    Ok(ToolReply::Text(done.text)),
-                    1,
-                    done.usage.input_tokens,
-                    done.usage.output_tokens,
-                ),
-                Err(err) => tool_turn(Err(err), 1, 0, 0),
+                Ok(done) => {
+                    let mut in_tokens = 0;
+                    let mut out_tokens = 0;
+                    let mut unknown_calls = 0;
+                    add_usage(
+                        &done.usage,
+                        &mut in_tokens,
+                        &mut out_tokens,
+                        &mut unknown_calls,
+                    );
+                    tool_turn(
+                        Ok(ToolReply::Text(done.text)),
+                        1,
+                        in_tokens,
+                        out_tokens,
+                        unknown_calls,
+                    )
+                }
+                Err(err) => {
+                    let attempts = provider_attempt(&err);
+                    tool_turn(Err(err), attempts, 0, 0, attempts)
+                }
             };
         }
         let defs: Vec<FunctionTool<'_>> = tools
@@ -419,14 +540,29 @@ where
             .collect();
         let (output, usage) = match client.complete_with_tools(messages, &prior, &defs).await {
             Ok(round) => round,
-            Err(err) => return tool_turn(Err(err), calls + 1, in_tokens, out_tokens),
+            Err(err) => {
+                let attempts = provider_attempt(&err);
+                unknown_calls += attempts;
+                return tool_turn(
+                    Err(err),
+                    calls + attempts,
+                    in_tokens,
+                    out_tokens,
+                    unknown_calls,
+                );
+            }
         };
         calls += 1;
-        in_tokens += usage.input_tokens;
-        out_tokens += usage.output_tokens;
+        add_usage(&usage, &mut in_tokens, &mut out_tokens, &mut unknown_calls);
         match output {
             ModelOutput::Text(text) => {
-                return tool_turn(Ok(ToolReply::Text(text)), calls, in_tokens, out_tokens);
+                return tool_turn(
+                    Ok(ToolReply::Text(text)),
+                    calls,
+                    in_tokens,
+                    out_tokens,
+                    unknown_calls,
+                );
             }
             ModelOutput::Calls(found) => {
                 if used >= max_rounds {
@@ -436,6 +572,7 @@ where
                         calls,
                         in_tokens,
                         out_tokens,
+                        unknown_calls,
                     );
                 }
                 let opened_now = opened.clone();
@@ -449,9 +586,54 @@ where
                                 calls,
                                 in_tokens,
                                 out_tokens,
+                                unknown_calls,
                             );
                         }
                     };
+                    if call.name == crate::history_image::WIRE
+                        && tools.iter().any(|spec| spec.wire_name() == call.name)
+                    {
+                        let next = crate::history_image::perform(
+                            crate::history_image::ViewCtx {
+                                hub,
+                                scope: pass.scope,
+                                client,
+                                messages,
+                                prior: &prior,
+                                defs: &defs,
+                                seen: &mut seen_images,
+                            },
+                            &call,
+                            &args,
+                        )
+                        .await;
+                        prior.push(next);
+                        continue;
+                    }
+                    if crate::workspace::is_exec_wire(&call.name) {
+                        match workspace_pack::dispatch(
+                            pass.memory,
+                            pass.scope.map(MemoCallScope::workspace_turn),
+                            &call.name,
+                            &args,
+                            &mut execute,
+                        )
+                        .await
+                        {
+                            Ok(value) => prior.push(prior_call(call, value)),
+                            Err(()) => {
+                                warn!(tool = %call.name, "agent workspace rejected");
+                                return tool_turn(
+                                    Ok(ToolReply::Degraded(TOOL_FAIL_REPLY)),
+                                    calls,
+                                    in_tokens,
+                                    out_tokens,
+                                    unknown_calls,
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     if let Some(step) =
                         skills::exec(&call.name, &args, builtins, &opened_now, &mut opened)
                     {
@@ -466,6 +648,7 @@ where
                                     calls,
                                     in_tokens,
                                     out_tokens,
+                                    unknown_calls,
                                 );
                             }
                             skills::SkillOut::Schedule => {
@@ -478,6 +661,7 @@ where
                                             calls,
                                             in_tokens,
                                             out_tokens,
+                                            unknown_calls,
                                         );
                                     }
                                     Err(crate::schedule::Fail::Bad) => {
@@ -487,6 +671,7 @@ where
                                             calls,
                                             in_tokens,
                                             out_tokens,
+                                            unknown_calls,
                                         );
                                     }
                                     Err(crate::schedule::Fail::Down(err)) => {
@@ -496,6 +681,7 @@ where
                                             calls,
                                             in_tokens,
                                             out_tokens,
+                                            unknown_calls,
                                         );
                                     }
                                 }
@@ -518,6 +704,7 @@ where
                                             calls,
                                             in_tokens,
                                             out_tokens,
+                                            unknown_calls,
                                         );
                                     }
                                     Err(qq_read::QqFail::Down(err)) => {
@@ -527,6 +714,7 @@ where
                                             calls,
                                             in_tokens,
                                             out_tokens,
+                                            unknown_calls,
                                         );
                                     }
                                 }
@@ -541,6 +729,7 @@ where
                             calls,
                             in_tokens,
                             out_tokens,
+                            unknown_calls,
                         );
                     };
                     let args = bind_memo_scope(spec.service(), pass.scope, args);
@@ -556,6 +745,7 @@ where
                                     calls,
                                     in_tokens,
                                     out_tokens,
+                                    unknown_calls,
                                 );
                             }
                         }
@@ -575,6 +765,7 @@ where
                                     calls,
                                     in_tokens,
                                     out_tokens,
+                                    unknown_calls,
                                 );
                             }
                         }
@@ -588,12 +779,10 @@ where
 }
 
 fn prior_call(call: FunctionCall, value: serde_json::Value) -> PriorCall {
-    PriorCall {
-        call_id: call.call_id,
-        name: call.name,
-        arguments: call.arguments,
-        output: serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
-    }
+    PriorCall::from_call(
+        &call,
+        serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
+    )
 }
 
 async fn memory_value(pass: &ToolPass<'_>, method: &str, args: &Value) -> anyhow::Result<Value> {
@@ -614,17 +803,46 @@ async fn memory_value(pass: &ToolPass<'_>, method: &str, args: &Value) -> anyhow
     .await
 }
 
+fn provider_attempt(err: &LlmError) -> i64 {
+    match err {
+        LlmError::ContextClosed
+        | LlmError::OverBudget
+        | LlmError::ImageUnmetered
+        | LlmError::PayloadLimited => 0,
+        _ => 1,
+    }
+}
+
 fn tool_turn(
     reply: Result<ToolReply, LlmError>,
     calls: i64,
     in_tokens: i64,
     out_tokens: i64,
+    unknown_calls: i64,
 ) -> ToolTurn {
     ToolTurn {
         reply,
         calls,
         in_tokens,
         out_tokens,
+        unknown_calls,
+    }
+}
+
+fn add_usage(
+    usage: &crate::client::TokenUse,
+    input: &mut i64,
+    output: &mut i64,
+    unknown: &mut i64,
+) {
+    if usage.input_known {
+        *input = input.saturating_add(usage.input_tokens);
+    }
+    if usage.output_known {
+        *output = output.saturating_add(usage.output_tokens);
+    }
+    if !usage.known() {
+        *unknown = unknown.saturating_add(1);
     }
 }
 

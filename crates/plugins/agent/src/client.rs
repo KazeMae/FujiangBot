@@ -41,6 +41,14 @@ pub struct ChatMessage {
 pub struct TokenUse {
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub input_known: bool,
+    pub output_known: bool,
+}
+
+impl TokenUse {
+    pub fn known(self) -> bool {
+        self.input_known && self.output_known
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +71,14 @@ pub enum LlmError {
     Decode(String),
     #[error("truncated or incomplete LLM response: {0}")]
     Truncated(String),
+    #[error("model context limit is not verified")]
+    ContextClosed,
+    #[error("request exceeds the context budget")]
+    OverBudget,
+    #[error("image tokens are not metered")]
+    ImageUnmetered,
+    #[error("image request exceeds transport limits")]
+    PayloadLimited,
 }
 
 pub struct LlmClient {
@@ -72,6 +88,9 @@ pub struct LlmClient {
     api_key: String,
     temperature: f64,
     timeout: Duration,
+    limit: Option<u64>,
+    image_cap: Option<u64>,
+    max_image_bytes: u64,
 }
 
 impl LlmClient {
@@ -83,12 +102,45 @@ impl LlmClient {
     }
 
     pub async fn complete(&self, messages: &[ChatMessage]) -> Result<Completion, LlmError> {
-        let request = responses_request(&self.model, self.temperature, messages, &[], &[]);
-        let body = self.post_ok(&request).await?;
-        Ok(Completion {
-            text: parse_responses(&body)?,
-            usage: token_use(&body),
-        })
+        self.complete_sent(messages).await.0
+    }
+
+    pub(crate) async fn complete_sent(
+        &self,
+        messages: &[ChatMessage],
+    ) -> (Result<Completion, LlmError>, SentCall) {
+        if let Err(err) = self.request_bound(messages, &[], &[]) {
+            return (Err(err), SentCall::none());
+        }
+        let request = responses_request(
+            &self.model,
+            self.temperature,
+            messages,
+            &[],
+            &[],
+            crate::context_budget::OUTPUT_RESERVE,
+            false,
+        );
+        match self.send_json("responses", &request).await {
+            Err(err) => (Err(err), SentCall::unknown()),
+            Ok((status, body)) => {
+                let usage = token_use(&body);
+                let sent = SentCall::once(usage);
+                if !status.is_success() {
+                    return (
+                        Err(LlmError::Api {
+                            status: status.as_u16(),
+                            body: error_message_or_snippet(&body),
+                        }),
+                        sent,
+                    );
+                }
+                match parse_responses(&body) {
+                    Ok(text) => (Ok(Completion { text, usage }), sent),
+                    Err(err) => (Err(err), sent),
+                }
+            }
+        }
     }
 
     pub(crate) async fn complete_with_tools(
@@ -97,7 +149,16 @@ impl LlmClient {
         prior: &[PriorCall],
         tools: &[FunctionTool<'_>],
     ) -> Result<(ModelOutput, TokenUse), LlmError> {
-        let request = responses_request(&self.model, self.temperature, messages, prior, tools);
+        self.request_bound(messages, prior, tools)?;
+        let request = responses_request(
+            &self.model,
+            self.temperature,
+            messages,
+            prior,
+            tools,
+            crate::context_budget::OUTPUT_RESERVE,
+            false,
+        );
         let body = self.post_ok(&request).await?;
         Ok((parse_model_output(&body)?, token_use(&body)))
     }
@@ -110,6 +171,89 @@ impl LlmClient {
             api_key,
             temperature: cfg.temperature,
             timeout: Duration::from_secs(cfg.timeout_secs),
+            limit: crate::context_budget::resolve(
+                &cfg.base_url,
+                &cfg.model,
+                cfg.context_budget,
+                cfg.model_context_limit,
+            ),
+            image_cap: crate::context_budget::image_token_cap(
+                &cfg.base_url,
+                &cfg.model,
+                cfg.image_token_upper_bound,
+            ),
+            max_image_bytes: cfg.max_image_bytes,
+        }
+    }
+
+    pub(crate) fn max_image_bytes(&self) -> u64 {
+        self.max_image_bytes
+    }
+
+    pub(crate) fn request_bytes(
+        &self,
+        messages: &[ChatMessage],
+        prior: &[PriorCall],
+        tools: &[FunctionTool<'_>],
+    ) -> Result<u64, LlmError> {
+        if self.limit.is_none() {
+            return Err(LlmError::ContextClosed);
+        }
+        let urls = image_urls(messages, prior);
+        let each = if urls.is_empty() {
+            0
+        } else {
+            self.image_cap.ok_or(LlmError::ImageUnmetered)?
+        };
+        let mut url_bytes = 0u64;
+        let mut decoded = 0u64;
+        for url in &urls {
+            let len = u64::try_from(url.len()).unwrap_or(u64::MAX);
+            url_bytes = url_bytes.saturating_add(len);
+            let one = decoded_image_bytes(url);
+            if one > crate::context_budget::MAX_ONE_IMAGE_BYTES {
+                return Err(LlmError::PayloadLimited);
+            }
+            decoded = decoded.saturating_add(one);
+        }
+        if crate::context_budget::image_transport_blocked(urls.len(), url_bytes, decoded) {
+            return Err(LlmError::PayloadLimited);
+        }
+        let reserve = crate::context_budget::OUTPUT_RESERVE;
+        let request = responses_request(
+            &self.model,
+            self.temperature,
+            messages,
+            prior,
+            tools,
+            reserve,
+            true,
+        );
+        let bytes = serde_json::to_vec(&request).map_err(|_| LlmError::OverBudget)?;
+        let projected = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let wire = physical_wire_len(projected, &urls)?;
+        if wire > crate::context_budget::MAX_REQUEST_BODY_BYTES {
+            return Err(LlmError::PayloadLimited);
+        }
+        let visual = u64::try_from(urls.len())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(each);
+        Ok(projected.saturating_add(visual).saturating_add(reserve))
+    }
+
+    pub(crate) fn request_bound(
+        &self,
+        messages: &[ChatMessage],
+        prior: &[PriorCall],
+        tools: &[FunctionTool<'_>],
+    ) -> Result<u64, LlmError> {
+        let total = self.request_bytes(messages, prior, tools)?;
+        let limit = self.limit.ok_or(LlmError::ContextClosed)?;
+        let reserve = crate::context_budget::OUTPUT_RESERVE;
+        if reserve > limit || total > limit {
+            Err(LlmError::OverBudget)
+        } else {
+            Ok(total)
         }
     }
 
@@ -164,6 +308,43 @@ pub(crate) struct PriorCall {
     pub name: String,
     pub arguments: String,
     pub output: String,
+    pub images: Vec<ImagePart>,
+    pub image_note: String,
+}
+
+impl PriorCall {
+    pub(crate) fn bare(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+        output: impl Into<String>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            name: name.into(),
+            arguments: arguments.into(),
+            output: output.into(),
+            images: Vec::new(),
+            image_note: String::new(),
+        }
+    }
+
+    pub(crate) fn from_call(call: &FunctionCall, output: impl Into<String>) -> Self {
+        Self::bare(&call.call_id, &call.name, &call.arguments, output)
+    }
+
+    pub(crate) fn with_images(
+        call: &FunctionCall,
+        output: impl Into<String>,
+        images: Vec<ImagePart>,
+        image_note: String,
+    ) -> Self {
+        Self {
+            images,
+            image_note,
+            ..Self::from_call(call, output)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +374,7 @@ struct ResponsesRequest<'a> {
     instructions: Option<String>,
     input: Vec<InputItem<'a>>,
     temperature: f64,
+    max_output_tokens: u64,
     stream: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<WireFunction<'a>>,
@@ -254,6 +436,8 @@ fn responses_request<'a>(
     messages: &'a [ChatMessage],
     prior: &'a [PriorCall],
     tools: &'a [FunctionTool<'a>],
+    max_output_tokens: u64,
+    project_images: bool,
 ) -> ResponsesRequest<'a> {
     let mut instructions = String::new();
     let mut input = Vec::new();
@@ -270,7 +454,7 @@ fn responses_request<'a>(
             }
             Role::User if !message.images.is_empty() => input.push(InputItem::UserParts {
                 role: "user",
-                content: user_parts(message),
+                content: user_parts(message, project_images),
             }),
             Role::User => input.push(InputItem::Message {
                 role: "user",
@@ -294,6 +478,12 @@ fn responses_request<'a>(
             call_id: &call.call_id,
             output: &call.output,
         });
+        if !call.images.is_empty() {
+            input.push(InputItem::UserParts {
+                role: "user",
+                content: held_parts(&call.image_note, &call.images, project_images),
+            });
+        }
     }
     let tools = tools
         .iter()
@@ -313,12 +503,32 @@ fn responses_request<'a>(
         },
         input,
         temperature,
+        max_output_tokens,
         stream: false,
         tools,
     }
 }
 
-fn user_parts(message: &ChatMessage) -> Vec<ContentPart<'_>> {
+fn held_parts<'a>(
+    note: &'a str,
+    images: &'a [ImagePart],
+    project_images: bool,
+) -> Vec<ContentPart<'a>> {
+    let mut parts = Vec::with_capacity(images.len() + 1);
+    parts.push(ContentPart::Text {
+        kind: "input_text",
+        text: note,
+    });
+    for image in images {
+        parts.push(ContentPart::Image {
+            kind: "input_image",
+            image_url: if project_images { "" } else { image.data_url() },
+        });
+    }
+    parts
+}
+
+fn user_parts(message: &ChatMessage, project_images: bool) -> Vec<ContentPart<'_>> {
     let mut parts = Vec::with_capacity(message.images.len() + 1);
     parts.push(ContentPart::Text {
         kind: "input_text",
@@ -327,10 +537,70 @@ fn user_parts(message: &ChatMessage) -> Vec<ContentPart<'_>> {
     for image in &message.images {
         parts.push(ContentPart::Image {
             kind: "input_image",
-            image_url: image.data_url(),
+            image_url: if project_images { "" } else { image.data_url() },
         });
     }
     parts
+}
+
+pub(crate) fn physical_wire_len(projected_len: u64, urls: &[&str]) -> Result<u64, LlmError> {
+    let mut extra = 0u64;
+    for url in urls {
+        extra = extra.saturating_add(json_string_extra(url)?);
+    }
+    Ok(projected_len.saturating_add(extra))
+}
+
+fn json_string_extra(url: &str) -> Result<u64, LlmError> {
+    let encoded = serde_json::to_string(url).map_err(|_| LlmError::OverBudget)?;
+    Ok(u64::try_from(encoded.len())
+        .unwrap_or(u64::MAX)
+        .saturating_sub(2))
+}
+
+fn image_urls<'a>(messages: &'a [ChatMessage], prior: &'a [PriorCall]) -> Vec<&'a str> {
+    let mut urls: Vec<&str> = messages
+        .iter()
+        .flat_map(|message| message.images.iter().map(|image| image.data_url()))
+        .collect();
+    urls.extend(
+        prior
+            .iter()
+            .flat_map(|call| call.images.iter().map(|image| image.data_url())),
+    );
+    urls
+}
+
+fn decoded_image_bytes(url: &str) -> u64 {
+    let raw = url.rsplit_once(',').map(|(_, data)| data).unwrap_or(url);
+    let len = raw.chars().filter(|ch| !ch.is_whitespace()).count();
+    u64::try_from(len.saturating_mul(3) / 4).unwrap_or(u64::MAX)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SentCall {
+    pub calls: i64,
+    pub usage: TokenUse,
+}
+
+impl SentCall {
+    fn none() -> Self {
+        Self {
+            calls: 0,
+            usage: TokenUse::default(),
+        }
+    }
+
+    fn unknown() -> Self {
+        Self {
+            calls: 1,
+            usage: TokenUse::default(),
+        }
+    }
+
+    fn once(usage: TokenUse) -> Self {
+        Self { calls: 1, usage }
+    }
 }
 
 fn map_reqwest(err: reqwest::Error) -> LlmError {
@@ -374,14 +644,23 @@ fn token_use(body: &str) -> TokenUse {
     let Some(usage) = value.get("usage").filter(|item| item.is_object()) else {
         return TokenUse::default();
     };
+    let input = measured_token(usage.get("input_tokens"));
+    let output = measured_token(usage.get("output_tokens"));
     TokenUse {
-        input_tokens: nonneg_token(usage.get("input_tokens")),
-        output_tokens: nonneg_token(usage.get("output_tokens")),
+        input_tokens: input.unwrap_or(0),
+        output_tokens: output.unwrap_or(0),
+        input_known: input.is_some(),
+        output_known: output.is_some(),
     }
 }
 
-fn nonneg_token(value: Option<&Value>) -> i64 {
-    value.and_then(Value::as_i64).unwrap_or(0).max(0)
+fn measured_token(value: Option<&Value>) -> Option<i64> {
+    let number = value?.as_i64()?;
+    if number < 0 {
+        None
+    } else {
+        Some(number)
+    }
 }
 
 fn parse_responses(body: &str) -> Result<String, LlmError> {
@@ -501,447 +780,24 @@ fn output_text_part(part: &Value) -> Option<&str> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex, MutexGuard};
-    use std::time::Duration;
-
-    use axum::extract::State;
-    use axum::http::{HeaderMap, StatusCode};
-    use axum::routing::post;
-    use axum::{Json, Router};
-    use serde_json::{json, Value};
-    use tokio::net::{TcpListener, TcpStream};
-
-    use super::*;
-
-    #[test]
-    fn blank_or_missing_key_is_err() {
-        let missing = require_key("FUJIANG_LLM_KEY", None).unwrap_err();
-        assert!(matches!(missing, LlmError::MissingApiKey { env } if env == "FUJIANG_LLM_KEY"));
-        let blank = require_key("FUJIANG_LLM_KEY", Some(" \n")).unwrap_err();
-        assert!(matches!(blank, LlmError::MissingApiKey { .. }));
-        assert_eq!(
-            require_key("FUJIANG_LLM_KEY", Some("  sk-test  ")).unwrap(),
-            "sk-test"
-        );
-    }
-
-    #[tokio::test]
-    async fn from_config_missing_env_does_not_panic() {
-        let _gate = env_gate();
-        let mut cfg = AgentConfig::from_value(&json!({}));
-        cfg.api_key_env = "FUJIANG_LLM_KEY_DEFINITELY_UNSET_6".into();
-        let http = reqwest::Client::builder().build().unwrap();
-        let Err(err) = LlmClient::from_config(&cfg, http) else {
-            panic!("expected missing key");
-        };
-        match err {
-            LlmError::MissingApiKey { env } => {
-                assert_eq!(env, "FUJIANG_LLM_KEY_DEFINITELY_UNSET_6");
-            }
-            other => panic!("{other}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn success_posts_responses_and_returns_output_text() {
-        let rec = Rec::default();
-        let app = Router::new()
-            .route("/responses", post(record_responses))
-            .with_state(rec.clone());
-        let base = spawn_app(app).await;
-        let client = {
-            let _gate = env_gate();
-            let name = "FUJIANG_LLM_KEY_FROM_CONFIG_TEST";
-            // SAFETY: env_gate is held, and this block does not await.
-            unsafe { std::env::set_var(name, "env-key-from-config") };
-            let _clear = ClearEnv(name);
-            let mut cfg = AgentConfig::from_value(&json!({}));
-            cfg.base_url = format!("{base}/");
-            cfg.api_key_env = name.into();
-            let http = reqwest::Client::builder().build().unwrap();
-            match LlmClient::from_config(&cfg, http) {
-                Ok(client) => client,
-                Err(err) => panic!("{err}"),
-            }
-        };
-        let done = client
-            .complete(&[
-                ChatMessage {
-                    role: Role::System,
-                    content: "be brief".into(),
-                    images: Vec::new(),
-                },
-                ChatMessage {
-                    role: Role::System,
-                    content: String::new(),
-                    images: Vec::new(),
-                },
-                ChatMessage {
-                    role: Role::System,
-                    content: "stay kind".into(),
-                    images: Vec::new(),
-                },
-                ChatMessage {
-                    role: Role::User,
-                    content: "hi".into(),
-                    images: Vec::new(),
-                },
-                ChatMessage {
-                    role: Role::Assistant,
-                    content: "hello".into(),
-                    images: Vec::new(),
-                },
-            ])
-            .await
-            .unwrap();
-        assert_eq!(done.text, "福酱在");
-        assert_eq!(
-            done.usage,
-            TokenUse {
-                input_tokens: 3,
-                output_tokens: 2,
-            }
-        );
-        let seen = rec.0.lock().unwrap().take().expect("request recorded");
-        assert!(seen.path.ends_with("/responses"), "{}", seen.path);
-        assert_eq!(seen.auth, "Bearer env-key-from-config");
-        assert!(
-            seen.content_type.starts_with("application/json"),
-            "{}",
-            seen.content_type
-        );
-        assert_eq!(seen.body["model"], "deepseek-flash");
-        assert_eq!(seen.body["stream"], false);
-        assert_eq!(seen.body["instructions"], "be brief\nstay kind");
-        assert_eq!(seen.body["input"].as_array().unwrap().len(), 2);
-        assert_eq!(seen.body["input"][0]["role"], "user");
-        assert_eq!(seen.body["input"][0]["content"], "hi");
-        assert_eq!(seen.body["input"][1]["role"], "assistant");
-        assert_eq!(seen.body["input"][1]["content"], "hello");
-        assert!(seen.body.get("previous_response_id").is_none());
-        assert!(seen.body.get("store").is_none());
-        assert!(seen.body.get("tools").is_none());
-        let temp = seen.body["temperature"].as_f64().unwrap();
-        assert!((temp - 0.7).abs() < 1e-9, "{temp}");
-    }
-
-    #[tokio::test]
-    async fn image_turn_posts_input_image_and_returns_the_description() {
-        let bytes = b"\xff\xd8\xff\x00";
-        let part = crate::vision::image_part(bytes, 1024).expect("jpeg");
-        let rec = Rec::default();
-        let app = Router::new()
-            .route("/responses", post(describe_when_image))
-            .with_state(rec.clone());
-        let base = spawn_app(app).await;
-        let client = test_client(&base, 60);
-        let mut messages = vec![
-            ChatMessage {
-                role: Role::System,
-                content: "be brief".into(),
-                images: Vec::new(),
-            },
-            ChatMessage {
-                role: Role::User,
-                content: "之前".into(),
-                images: Vec::new(),
-            },
-            ChatMessage {
-                role: Role::Assistant,
-                content: "嗯".into(),
-                images: Vec::new(),
-            },
-            ChatMessage {
-                role: Role::User,
-                content: "看这张".into(),
-                images: Vec::new(),
-            },
-        ];
-        crate::vision::give_images(&mut messages, vec![part.clone()]);
-        let done = client.complete(&messages).await.unwrap();
-        assert_eq!(done.text, "图里是一只猫");
-        assert_eq!(done.usage, TokenUse::default());
-        let seen = rec.0.lock().unwrap().take().expect("request recorded");
-        assert_eq!(seen.body["instructions"], "be brief");
-        assert_eq!(seen.body["input"][0]["content"], "之前");
-        assert_eq!(seen.body["input"][1]["content"], "嗯");
-        let parts = seen.body["input"][2]["content"].as_array().unwrap();
-        assert_eq!(parts[0]["type"], "input_text");
-        assert_eq!(parts[0]["text"], "看这张");
-        assert_eq!(parts[1]["type"], "input_image");
-        assert_eq!(parts[1]["image_url"], part.data_url());
-        assert!(parts[1]["image_url"]
-            .as_str()
-            .unwrap()
-            .starts_with("data:image/jpeg;base64,"));
-        assert!(parts[1].get("detail").is_none());
-        assert!(parts[1].get("file_id").is_none());
-        assert_eq!(parts.len(), 2);
-        assert!(messages[1].images.is_empty());
-    }
-
-    #[tokio::test]
-    async fn timeout_when_handler_sleeps() {
-        let app = Router::new().route("/responses", post(slow));
-        let base = spawn_app(app).await;
-        let client = test_client(&base, 1);
-        let result = tokio::time::timeout(
-            Duration::from_secs(4),
-            client.complete(&[ChatMessage {
-                role: Role::User,
-                content: "hi".into(),
-                images: Vec::new(),
-            }]),
-        )
-        .await
-        .expect("client hung past its timeout");
-        let err = result.unwrap_err();
-        assert!(matches!(err, LlmError::Timeout), "{err}");
-    }
-
-    #[tokio::test]
-    async fn error_status_uses_error_message() {
-        let app = Router::new().route(
-            "/responses",
-            post(|| async {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": {"message": "bad model", "type": "invalid_request_error"}
-                    })),
-                )
-            }),
-        );
-        let err = complete_err(app).await;
-        match err {
-            LlmError::Api { status, body } => {
-                assert_eq!(status, 400);
-                assert!(body.contains("bad model"), "{body}");
-            }
-            other => panic!("expected api 400, got {other}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn truncated_json_is_decode_error() {
-        let app = Router::new().route(
-            "/responses",
-            post(|| async { (StatusCode::OK, r#"{"output_text":"hel""#) }),
-        );
-        let err = complete_err(app).await;
-        assert!(matches!(err, LlmError::Decode(_)), "{err}");
-    }
-
-    #[tokio::test]
-    async fn empty_output_is_truncated() {
-        let app = Router::new().route(
-            "/responses",
-            post(|| async { Json(json!({"output": [], "output_text": ""})) }),
-        );
-        let err = complete_err(app).await;
-        assert!(matches!(err, LlmError::Truncated(_)), "{err}");
-    }
-
-    #[tokio::test]
-    async fn multi_segment_output_concatenates_message_text() {
-        let app = Router::new().route(
-            "/responses",
-            post(|| async {
-                Json(json!({
-                    "output": [
-                        {
-                            "type": "reasoning",
-                            "summary": [{"type": "summary_text", "text": "think"}]
-                        },
-                        {
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [
-                                {"type": "output_text", "text": "A"},
-                                {"type": "output_text", "text": "B"}
-                            ]
-                        }
-                    ],
-                    "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6}
-                }))
-            }),
-        );
-        let base = spawn_app(app).await;
-        let client = test_client(&base, 60);
-        let done = client
-            .complete(&[ChatMessage {
-                role: Role::User,
-                content: "hi".into(),
-                images: Vec::new(),
-            }])
-            .await
-            .unwrap();
-        assert_eq!(done.text, "AB");
-        assert_eq!(
-            done.usage,
-            TokenUse {
-                input_tokens: 4,
-                output_tokens: 2,
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn bad_usage_fields_count_as_zero_tokens() {
-        let app = Router::new().route(
-            "/responses",
-            post(|| async {
-                Json(json!({
-                    "output_text": "好",
-                    "usage": {"input_tokens": -5, "output_tokens": "2", "total_tokens": 9}
-                }))
-            }),
-        );
-        let base = spawn_app(app).await;
-        let client = test_client(&base, 60);
-        let done = client
-            .complete(&[ChatMessage {
-                role: Role::User,
-                content: "hi".into(),
-                images: Vec::new(),
-            }])
-            .await
-            .unwrap();
-        assert_eq!(done.text, "好");
-        assert_eq!(done.usage, TokenUse::default());
-    }
-
-    async fn complete_err(app: Router) -> LlmError {
-        let base = spawn_app(app).await;
-        let client = test_client(&base, 60);
-        client
-            .complete(&[ChatMessage {
-                role: Role::User,
-                content: "hi".into(),
-                images: Vec::new(),
-            }])
-            .await
-            .unwrap_err()
-    }
-
-    fn env_gate() -> MutexGuard<'static, ()> {
-        static LOCK: Mutex<()> = Mutex::new(());
-        LOCK.lock().unwrap_or_else(|err| err.into_inner())
-    }
-
-    struct ClearEnv(&'static str);
-
-    impl Drop for ClearEnv {
-        fn drop(&mut self) {
-            // SAFETY: paired with set_var while env_gate is still held.
-            unsafe { std::env::remove_var(self.0) }
-        }
-    }
-
-    fn test_client(base: &str, timeout_secs: u64) -> LlmClient {
-        let mut cfg = AgentConfig::from_value(&json!({}));
-        cfg.base_url = base.to_string();
-        cfg.timeout_secs = timeout_secs;
-        let http = reqwest::Client::builder().build().unwrap();
-        LlmClient::new(&cfg, http, "test-key".into())
-    }
-
-    async fn spawn_app(app: Router) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        for _ in 0..50 {
-            if TcpStream::connect(addr).await.is_ok() {
-                return format!("http://{addr}");
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("mock llm server did not accept on {addr}");
-    }
-
-    #[derive(Clone, Default)]
-    struct Rec(Arc<Mutex<Option<Seen>>>);
-
-    #[derive(Debug)]
-    struct Seen {
-        path: String,
-        auth: String,
-        content_type: String,
-        body: Value,
-    }
-
-    fn remember(rec: &Rec, uri: &axum::http::Uri, headers: &HeaderMap, body: Value) {
-        let seen = Seen {
-            path: uri.path().to_string(),
-            auth: header(headers, axum::http::header::AUTHORIZATION),
-            content_type: header(headers, axum::http::header::CONTENT_TYPE),
-            body,
-        };
-        *rec.0.lock().unwrap() = Some(seen);
-    }
-
-    async fn describe_when_image(
-        State(rec): State<Rec>,
-        uri: axum::http::Uri,
-        headers: HeaderMap,
-        Json(body): Json<Value>,
-    ) -> Json<Value> {
-        let seen = body["input"].as_array().is_some_and(|items| {
-            items.iter().any(|item| {
-                item["content"].as_array().is_some_and(|parts| {
-                    parts.iter().any(|part| {
-                        part["type"] == "input_image"
-                            && part["image_url"]
-                                .as_str()
-                                .is_some_and(|url| url.starts_with("data:image/"))
-                    })
-                })
-            })
-        });
-        remember(&rec, &uri, &headers, body);
-        let text = if seen {
-            "图里是一只猫"
-        } else {
-            "没有图"
-        };
-        Json(json!({
-            "output_text": text,
-            "output": [{
-                "type": "message",
-                "content": [{"type": "output_text", "text": text}]
-            }]
-        }))
-    }
-
-    async fn record_responses(
-        State(rec): State<Rec>,
-        uri: axum::http::Uri,
-        headers: HeaderMap,
-        Json(body): Json<Value>,
-    ) -> Json<Value> {
-        remember(&rec, &uri, &headers, body);
-        Json(json!({
-            "output_text": "福酱在",
-            "output": [{
-                "type": "message",
-                "content": [{"type": "output_text", "text": "NO"}]
-            }],
-            "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
-        }))
-    }
-
-    fn header(headers: &HeaderMap, name: axum::http::HeaderName) -> String {
-        headers
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("")
-            .to_string()
-    }
-
-    async fn slow() {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
+pub(crate) fn rendered_request(
+    client: &LlmClient,
+    messages: &[ChatMessage],
+    prior: &[PriorCall],
+    tools: &[FunctionTool<'_>],
+) -> Value {
+    serde_json::to_value(responses_request(
+        &client.model,
+        client.temperature,
+        messages,
+        prior,
+        tools,
+        crate::context_budget::OUTPUT_RESERVE,
+        false,
+    ))
+    .expect("request json")
 }
+
+#[cfg(test)]
+#[path = "client_tests.rs"]
+mod tests;

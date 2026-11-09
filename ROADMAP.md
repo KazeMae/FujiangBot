@@ -3,7 +3,8 @@
 > 仓库：https://github.com/KazeMae/FujiangBot  
 > 看板：https://github.com/users/KazeMae/projects/2  
 > 总追踪：#19  
-> 更新：2026-11-07（#60 T3：fun / contest 技能包）
+> 历史（不是当前前提）：2026-11-08 04:15 `v3-gc-20261108-gate` 三遍各 319 通过、0 失败、1 忽略（agent 237、1 忽略）。`1daeef8` 的 313×3、agent 231 更早。当时的 bundle、gpgv、rootfs stub 和六模型 TLC 只属于那棵旧树。
+> 工作区只读挂载宿主 `/usr` `/etc` `/var`，只有 `/work` 可写。生产默认关闭。沙箱内 apt/dpkg 安装已取消。细节见 `docs/workspace-rootfs.md`。
 
 本文档是规划源。Issue / Milestone / Project 与此对齐。冲突时以已合并 Issue 的验收为准，并回写本文档。
 
@@ -90,7 +91,7 @@
 
 | Issue | 内容 | 状态 | 说明 |
 |---|---|---|---|
-| #16 | 会话摘要 fold | Done | `.agent memory` / `forget`；无 LLM 摘要 |
+| #16 | 会话摘要 fold | Done | `.agent memory` / `forget`。生产路径已不再做摘录折叠 |
 | #17 | 管理页用量 / 人格 | Done | `GET /api/agent/usage`、personas UI |
 | #46 | Codex 风格分层记忆 | In Progress | 账号 / 群 / 个人（**群内发言也写个人记忆**）；见 `docs/layered-memory.md` |
 | #15 | 托管 RAG | 取消 | 不做 |
@@ -100,6 +101,11 @@
 | #55 T1 | `qq.read`，按当前发言人只读 | Done | #58。只读他所属的群和他自己的私聊 |
 | #56 T2 | 技能包 `schedule` 与 `.agent schedule` | Done | 到点带创建者 QQ，按 `qq.read` 同一成员边界重验。私聊只发给创建者 |
 | #60 T3 | 技能包 `fun` 与 `contest` | Done | 不进常驻。打开后仍走 ServiceHub。`fun.learn` / `fun.search` 仍由宿主写入当前群 |
+| 群发言人展示 | 群提示里的当前与历史 QQ、昵称、名片、引用 ID | Done | 当前与历史昵称、名片来自真实 `MessageEvent.sender` 快照，值仍按 untrusted 清理控制字符和双向控制符。`host_reply.message_id` 只是事件所带引用 ID，不取正文、不推断作者。旧行 NULL 不回填。真实 ID 不改变权限。私聊不包装。不改 Session / ToolLoop 状态机 |
+| 上下文预算与 LLM 交接摘要 | 500000、90% 摘要、模型上限、CAS、官方看图、摘要用量 | 已实现，待 PR 验收 | 有效预算是配置与已核实上限的较小值。官方 `https://api.deepseek.com` 的 `deepseek-flash` 按 2026-11-07 定价页为 100 万，看图页每图 1024 且多图相加。只适用于该主机名和该模型名，不是 OpenAI、Anthropic 或其它模型的 tile/detail 上界。预算含投影 JSON、工具 schema、已核实图像上界和发出的 `max_output_tokens` 4096。usage 按字段保留有效非负整数；缺字段记 `unknown_calls`，不把缺的 0 当成测得值。旧行迁移后标未确认。记账失败仍走 CompactFail |
+| 工作区绑定与独立 owner | 每次调用真实 resolve；个人与群目录按发言人分开；bash/code 默认不广告 | 生产关闭。未设 `FUJIANG_WORKSPACE_MVP` 则不启动 | 在线 QQ 未验收。同一宿主用户之外没有第二套 UID。owner 锁和重开仍在。详见 `docs/workspace-rootfs.md`。 |
+| 工作区运行时 | 宿主 `/usr` `/etc` `/var` 只读绑定，bwrap 单 UID，网络与宿主共享 | 默认关闭。`FUJIANG_WORKSPACE_MVP` 指向宿主目录才打开 | 只有 `/work` 可写。沙箱内 apt/dpkg 安装已取消。详见 `docs/workspace-rootfs.md`。 |
+| 历史图片查看工具 | `view_image` 按占位符回看本会话或引用消息里的图片 | 已实现，待 PR 验收 | 只在 `vision_enabled` 且图像 token 上界已核定时出现。每次最多 3 张，每轮最多 6 张。会话外或已归档拒绝。QQ/NapCat 链接过期后的 `get_message` 刷新未验收。 |
 
 前置：agent 热路径改动优先落在 `command.rs` / `plan.rs` / 新模块；单文件勿超 1000 行。
 
@@ -125,8 +131,10 @@
 |---|---|---|
 | `spec/tla/ToolLoop.tla` | 轮数硬顶；工具错误不离开降级态；无 tools 时单次 complete | P0 |
 | `spec/tla/Session.tla` | reset 清空消息和摘要并保留人设；forget 只清空摘要；fold 不改人设 | P1 |
+| `spec/tla/Runner.tla` | 抽象顺序：阻塞、pin init pidfd、释放 payload、确认 init 死亡并回收 wrapper、join、成功。拒绝时零 spawn。正常finish解除看护前确认init和wrapper清理；Drop仅尽力清理，不证明未知错误下最终无残留。成功前进程清理和 reader 回收都完成。未知清理不能标成功。不证明 OS 隔离或真实 apt | P1 |
+| `spec/tla/OwnerLayer.tla` | 生产 `prod` 恒假、base 不变。两 owner 的 inode 彼此不同且不同于 base。policy 为假时零字节、无 metadata、无 partial、锁空闲。staging 持锁且 partial；running 要求 metadata 正常且无 partial。不证明 OS 隔离、配额或官方 rootfs | P1 |
 
-实现须对照模型；改 loop/session 行为时先改 TLA+ 或同步改。
+实现须对照模型；改 loop、session、runner 或 owner 层时先改 TLA+ 或同步改。归档批准模型 `Bundle.tla` 已删除，不再代表当前运行时。
 
 ## 覆盖率范围
 

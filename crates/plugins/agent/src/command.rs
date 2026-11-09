@@ -19,6 +19,9 @@ pub(crate) const HELP: &str =
 .agent status       当前人设、这一小时还剩几次，以及今日调用和 token\n\
 .agent tools        列出当前启用的工具\n\
 .agent schedule     列出、创建或取消自己的定时发文字。不调用模型\n\
+.agent workspace    查看当前真实会话绑定的工作区。执行器默认不可用\n\
+.agent workspace personal   仅群里的当前发言人把自己的选择改成本人\n\
+.agent workspace group      群里恢复当前群\n\
 在配置里把 priority 设为 10，高于 fun。本插件接过的消息返回 Stop，fun 不会再处理同一条。\n\
 require_at 为 true 时，只认 @我或回复我，单独的唤醒词不算。";
 
@@ -32,6 +35,7 @@ pub(crate) enum AgentCmd {
     ShowPersona,
     SetPersona(String),
     Schedule(crate::schedule::HumanCmd),
+    Workspace(crate::workspace::WorkspaceCmd),
     Unknown,
 }
 
@@ -76,6 +80,7 @@ pub(crate) fn parse_agent_cmd(rest: &str) -> AgentCmd {
             }
         }
         "schedule" => AgentCmd::Schedule(crate::schedule::parse_human(parts)),
+        "workspace" => AgentCmd::Workspace(crate::workspace::parse_cmd(parts)),
         "persona" => match parts.next() {
             None => AgentCmd::ShowPersona,
             Some(name) if parts.next().is_none() => AgentCmd::SetPersona(name.to_string()),
@@ -164,6 +169,9 @@ pub(crate) async fn apply_command(
             Ok(fit_reply(&tools::tools_command_text(&tools)))
         }
         AgentCmd::Schedule(_) => Ok(crate::schedule::USAGE.to_string()),
+        AgentCmd::Workspace(_) => {
+            Ok("工作区要由这条消息的真实会话处理。昵称、引用和模型参数不能指定人。".to_string())
+        }
     }
 }
 
@@ -177,6 +185,7 @@ pub(crate) fn enabled_builtins(cfg: &AgentConfig) -> tools::BuiltinTools {
         fun: cfg.enable_fun_tools,
         memory: cfg.enable_memory_tools,
         memory_write: cfg.enable_memory_write_tools,
+        view_image: crate::history_image::offered(cfg),
     }
 }
 
@@ -207,7 +216,7 @@ fn seats_left(limit: u32, used: i64) -> Option<u32> {
 }
 
 fn today_sentence(user: session::DayUsage, session: session::DayUsage) -> String {
-    format!(
+    let mut text = format!(
         "今日你 {uc} 次，输入 {ui}，输出 {uo}。今日会话 {sc} 次，输入 {si}，输出 {so}。",
         uc = user.calls,
         ui = user.in_tokens,
@@ -215,7 +224,31 @@ fn today_sentence(user: session::DayUsage, session: session::DayUsage) -> String
         sc = session.calls,
         si = session.in_tokens,
         so = session.out_tokens,
-    )
+    );
+    let note = usage_note("你", user) + &usage_note("会话", session);
+    if note.is_empty() {
+        return text;
+    }
+    text.push_str(&note);
+    text.push_str("缺字段留下的 0 不是测得 token。");
+    text
+}
+
+fn usage_note(side: &str, usage: session::DayUsage) -> String {
+    let mut note = String::new();
+    if usage.unknown_calls > 0 {
+        note.push_str(&format!(
+            "{side}有 {} 次完整 usage 未确认。",
+            usage.unknown_calls
+        ));
+    }
+    if usage.legacy_rows > 0 {
+        note.push_str(&format!(
+            "{side}有 {} 条旧记录，完整 usage 未确认。",
+            usage.legacy_rows
+        ));
+    }
+    note
 }
 
 fn quota_sentence(

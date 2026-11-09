@@ -2,16 +2,24 @@
 
 mod client;
 mod command;
+mod compact;
 mod config;
+mod context_budget;
+mod history_image;
 mod layered_memory;
 mod memory_consolidate;
 mod plan;
 mod schedule;
 mod schedule_cron;
 mod session;
+mod speaker;
 mod tools;
 mod trigger;
 mod vision;
+mod workspace;
+mod workspace_backend;
+mod workspace_runner;
+mod workspace_store;
 
 #[cfg(test)]
 #[path = "guard_tests.rs"]
@@ -33,8 +41,8 @@ use tracing::warn;
 use crate::command::{
     apply_command, enabled_builtins, log_enabled_tools, parse_agent_cmd, AgentCmd, HELP,
 };
-use crate::plan::{plan_chat, ChatPlan};
-use crate::session::{save_exchange, session_key};
+use crate::plan::{plan_faced, ChatPlan};
+use crate::session::{save_faced, session_key, snap_of};
 use crate::trigger::{claim, fit_reply, llm_reply, Claim, BUSY_REPLY};
 
 #[cfg(test)]
@@ -181,6 +189,25 @@ impl AgentPlugin {
             }
             return;
         }
+        if let AgentCmd::Workspace(human) = &cmd {
+            match crate::workspace::command(
+                &pool,
+                crate::workspace::HostTurn {
+                    source: msg.source,
+                    actor: msg.user_id(),
+                },
+                human,
+            )
+            .await
+            {
+                Ok(text) => say(ctx, msg, fit_reply(&text)).await,
+                Err(err) => {
+                    warn!(error = %err, "agent workspace");
+                    say(ctx, msg, BUSY_REPLY).await;
+                }
+            }
+            return;
+        }
         match apply_command(
             &pool,
             cfg,
@@ -207,23 +234,16 @@ impl AgentPlugin {
         cfg: &AgentConfig,
         user_text: String,
     ) {
+        let user_text = history_image::stamp(ctx, msg, user_text).await;
         let Some(pool) = self.pool.lock().await.clone() else {
             say(ctx, msg, BUSY_REPLY).await;
             return;
         };
         let key = session_key(msg.source);
         let now = session::unix_now();
+        let snap = snap_of(msg);
         let prepared = LlmClient::from_config(cfg, ctx.http.clone());
-        let plan = plan_chat(
-            &pool,
-            cfg,
-            &key,
-            msg.user_id(),
-            &user_text,
-            now,
-            prepared.is_ok(),
-        )
-        .await;
+        let plan = plan_faced(&pool, cfg, &key, &snap, &user_text, now, prepared.is_ok()).await;
         let (client, messages, skipped) = match (prepared, plan) {
             (_, Ok(ChatPlan::Tip(tip))) => {
                 say(ctx, msg, tip).await;
@@ -271,6 +291,27 @@ impl AgentPlugin {
                 return;
             }
         };
+        let resident = tools::resident_tools(&cfg.tools, enabled_builtins(cfg));
+        let messages = match compact::before_turn(
+            &pool,
+            cfg,
+            &client,
+            &key,
+            messages,
+            &resident,
+            compact::HostUsage {
+                user_id: msg.user_id(),
+                now,
+            },
+        )
+        .await
+        {
+            Ok(messages) => messages,
+            Err(gate) => {
+                say(ctx, msg, compact::user_tip(&gate)).await;
+                return;
+            }
+        };
         let scope = tools::MemoCallScope::from_source(msg.source, msg.user_id());
         let pass = tools::ToolPass {
             max_rounds: cfg.max_tool_rounds,
@@ -288,14 +329,17 @@ impl AgentPlugin {
             ctx,
         )
         .await;
-        if let Err(err) = session::record_daily(
+        if let Err(err) = session::record_usage_delta(
             &pool,
             &key,
             msg.user_id(),
             now,
-            turn.calls,
-            turn.in_tokens,
-            turn.out_tokens,
+            session::UsageDelta {
+                calls: turn.calls,
+                in_tokens: turn.in_tokens,
+                out_tokens: turn.out_tokens,
+                unknown_calls: turn.unknown_calls,
+            },
         )
         .await
         {
@@ -335,7 +379,7 @@ impl AgentPlugin {
         if saved.is_empty() {
             return;
         }
-        if let Err(err) = save_exchange(&pool, &key, msg.user_id(), &user_text, &saved).await {
+        if let Err(err) = save_faced(&pool, &key, &snap, &user_text, &saved).await {
             warn!(error = %err, "agent save");
         }
     }
@@ -362,6 +406,8 @@ async fn say(ctx: &BotContext, msg: &MessageEvent, text: impl Into<String>) {
 mod tests {
     use super::session;
     use super::*;
+    use crate::plan::plan_chat;
+    use crate::session::save_exchange;
     use fujiang_core::Source;
     use serde_json::json;
 
@@ -419,6 +465,7 @@ mod tests {
         assert!(plugin.help().contains(".agent status"));
         assert!(plugin.help().contains(".agent tools"));
         assert!(plugin.help().contains(".agent schedule"));
+        assert!(plugin.help().contains(".agent workspace"));
     }
 
     #[tokio::test]
@@ -467,7 +514,10 @@ mod tests {
         let ChatPlan::Speak { messages } = quiet else {
             panic!("expected a chat");
         };
-        assert_eq!(messages[0].content, "默认人设");
+        assert_eq!(
+            messages[0].content,
+            format!("默认人设\n\n{}", crate::speaker::GROUP_NOTE)
+        );
 
         let loud = AgentConfig::from_value(&json!({
             "system_prompt": "默认人设",
@@ -491,9 +541,11 @@ mod tests {
         let ChatPlan::Speak { messages } = plan else {
             panic!("expected a chat");
         };
+        assert!(messages[0].content.starts_with("默认人设\n\n"));
+        assert!(messages[0].content.contains(crate::speaker::GROUP_NOTE));
         assert!(messages[0]
             .content
-            .starts_with("默认人设\n\n可用工具：\nmemo.list：列出备忘\n"));
+            .contains("\n\n可用工具：\nmemo.list：列出备忘\n"));
         assert!(messages[0].content.contains("skills.list："));
         assert!(messages[0].content.contains("skills.open："));
         assert!(!messages[0].content.contains("ping.pong"));
@@ -551,9 +603,18 @@ mod tests {
             panic!("expected a chat");
         };
         assert_eq!(messages[0].role, Role::System);
-        assert_eq!(messages[0].content, "严格人设");
-        assert_eq!(messages[1].content, "u1");
-        assert_eq!(messages.last().unwrap().content, "u3");
+        assert_eq!(
+            messages[0].content,
+            format!("严格人设\n\n{}", crate::speaker::GROUP_NOTE)
+        );
+        assert_eq!(
+            messages[1].content,
+            r#"{"host_sender":{"user_id":5},"untrusted":{"body":"u1"}}"#
+        );
+        assert_eq!(
+            messages.last().unwrap().content,
+            r#"{"host_sender":{"user_id":5},"untrusted":{"body":"u3"}}"#
+        );
         assert_eq!(usage_rows(&pool).await, 1);
 
         let status = run(&pool, &cfg, key, 5, &AgentCmd::Status, 1_000).await;
@@ -663,31 +724,27 @@ mod tests {
         let ChatPlan::Speak { messages } = plan else {
             panic!("expected a chat");
         };
-        let system = &messages[0].content;
-        let prior = system.find("先前上下文").expect("summary");
-        assert!(system.find("默认人设").unwrap() < prior);
-        assert!(system.contains("用户：u1"));
-        assert!(system.contains("助手：a1"));
-        assert_eq!(system.matches("用户：u1").count(), 1);
+        assert_eq!(messages[0].content, "默认人设");
+        assert!(!messages[0].content.contains("先前上下文"));
         assert_eq!(
             messages
                 .iter()
                 .skip(1)
                 .map(|m| m.content.as_str())
                 .collect::<Vec<_>>(),
-            vec!["u2", "a2", "u3"]
+            vec!["u1", "a1", "u2", "a2", "u3"]
         );
         assert!(session::recent_turns(&pool, key, 20)
             .await
             .unwrap()
             .iter()
-            .all(|m| m.content != "u1"));
+            .any(|m| m.content == "u1"));
 
         let again = plan_chat(&pool, &cfg, key, 3, "u3", 6, true).await.unwrap();
         let ChatPlan::Speak { messages: second } = again else {
             panic!("expected a chat");
         };
-        assert_eq!(second[0].content, *system);
+        assert_eq!(second[0].content, messages[0].content);
     }
 
     #[tokio::test]
@@ -716,7 +773,7 @@ mod tests {
                 .skip(1)
                 .map(|m| m.content.as_str())
                 .collect::<Vec<_>>(),
-            vec!["u2", "a2", "u3"]
+            vec!["u1", "a1", "u2", "a2", "u3"]
         );
         assert_eq!(
             session::recent_turns(&pool, key, 20).await.unwrap().len(),
@@ -731,11 +788,11 @@ mod tests {
             4
         );
 
-        session::fold_overflow(&pool, key, 1).await.unwrap();
-        assert!(session::summary_of(&pool, key)
+        sqlx::query("UPDATE sessions SET summary = '用户：u1' WHERE session_key = ?1")
+            .bind(key)
+            .execute(&pool)
             .await
-            .unwrap()
-            .contains("用户：u1"));
+            .unwrap();
         let hidden = plan_chat(&pool, &cfg, key, 4, "u4", 8, true).await.unwrap();
         let ChatPlan::Speak { messages } = hidden else {
             panic!("expected a chat");
@@ -744,7 +801,7 @@ mod tests {
         assert!(!messages[0].content.contains("用户：u1"));
         assert_eq!(
             session::recent_turns(&pool, key, 20).await.unwrap().len(),
-            2
+            4
         );
     }
 
@@ -762,6 +819,11 @@ mod tests {
         session::set_persona(&pool, key, "strict", 1).await.unwrap();
         save_exchange(&pool, key, 1, "u1", "a1").await.unwrap();
         save_exchange(&pool, key, 1, "u2", "a2").await.unwrap();
+        sqlx::query("UPDATE sessions SET summary = '用户：u1' WHERE session_key = ?1")
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
         let plan = plan_chat(&pool, &cfg, key, 1, "u3", 5, true).await.unwrap();
         let ChatPlan::Speak { messages } = plan else {
             panic!("expected a chat");
@@ -783,7 +845,7 @@ mod tests {
         assert_eq!(session::summary_of(&pool, key).await.unwrap(), "");
         assert_eq!(
             session::recent_turns(&pool, key, 20).await.unwrap().len(),
-            2
+            4
         );
         assert_eq!(
             session::persona_of(&pool, key).await.unwrap().as_deref(),

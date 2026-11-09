@@ -104,7 +104,11 @@ async fn reset_clears_only_this_session_and_keeps_the_persona() {
         .await
         .unwrap();
     save_exchange(&pool, &group, 1, "g2", "ga2").await.unwrap();
-    session::fold_overflow(&pool, &group, 1).await.unwrap();
+    sqlx::query("UPDATE sessions SET summary = '旧摘要' WHERE session_key = ?1")
+        .bind(&group)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let text = run(&pool, &cfg, &group, 1, &AgentCmd::Reset, 2).await;
     assert_eq!(text, "已清空当前会话的对话记录。");
@@ -129,7 +133,16 @@ async fn reset_clears_only_this_session_and_keeps_the_persona() {
     save_exchange(&pool, &group, 1, "only", "sum")
         .await
         .unwrap();
-    session::fold_overflow(&pool, &group, 0).await.unwrap();
+    sqlx::query("DELETE FROM messages WHERE session_key = ?1")
+        .bind(&group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sessions SET summary = '只剩摘要' WHERE session_key = ?1")
+        .bind(&group)
+        .execute(&pool)
+        .await
+        .unwrap();
     assert!(session::recent_turns(&pool, &group, 20)
         .await
         .unwrap()

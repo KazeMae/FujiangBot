@@ -1,11 +1,11 @@
 use sqlx::SqlitePool;
 
-use crate::client::ChatMessage;
+use crate::client::{ChatMessage, Role};
 use crate::command::enabled_builtins;
 use crate::config::AgentConfig;
-use crate::session;
+use crate::session::{self, StoredTurn, UserSnap};
+use crate::speaker::{self, Untrusted};
 use crate::tools;
-use crate::trigger::build_messages;
 
 pub(crate) const USER_LIMIT_TIP: &str = "你这一小时里找福酱的次数到了，歇一会儿再来。";
 pub(crate) const SESSION_LIMIT_TIP: &str = "这个会话这一小时的次数到了，歇一会儿再来。";
@@ -19,11 +19,33 @@ pub(crate) enum ChatPlan {
 }
 
 /// History is loaded before the slot so a failed read does not burn quota.
+#[cfg(test)]
 pub(crate) async fn plan_chat(
     pool: &SqlitePool,
     cfg: &AgentConfig,
     session_key: &str,
     user_id: i64,
+    user_text: &str,
+    now: i64,
+    key_ready: bool,
+) -> anyhow::Result<ChatPlan> {
+    plan_faced(
+        pool,
+        cfg,
+        session_key,
+        &UserSnap::bare(user_id),
+        user_text,
+        now,
+        key_ready,
+    )
+    .await
+}
+
+pub(crate) async fn plan_faced(
+    pool: &SqlitePool,
+    cfg: &AgentConfig,
+    session_key: &str,
+    snap: &UserSnap,
     user_text: &str,
     now: i64,
     key_ready: bool,
@@ -34,15 +56,15 @@ pub(crate) async fn plan_chat(
     if !key_ready {
         return Ok(ChatPlan::MissingKey);
     }
-    if cfg.is_admin(user_id) {
-        let messages = turn_messages(pool, cfg, session_key, user_text).await?;
+    if cfg.is_admin(snap.user_id) {
+        let messages = turn_messages(pool, cfg, session_key, snap, user_text).await?;
         return Ok(ChatPlan::Speak { messages });
     }
-    let messages = turn_messages(pool, cfg, session_key, user_text).await?;
+    let messages = turn_messages(pool, cfg, session_key, snap, user_text).await?;
     let slot = session::take_slot(
         pool,
         session_key,
-        user_id,
+        snap.user_id,
         cfg.rate_limit.per_user_per_hour,
         cfg.rate_limit.per_group_per_hour,
         now,
@@ -59,23 +81,106 @@ async fn turn_messages(
     pool: &SqlitePool,
     cfg: &AgentConfig,
     session_key: &str,
+    snap: &UserSnap,
     user_text: &str,
 ) -> anyhow::Result<Vec<ChatMessage>> {
+    let mut messages = conversation(pool, cfg, session_key).await?;
+    messages.push(ChatMessage {
+        role: Role::User,
+        content: present_current(session_key, snap, user_text),
+        images: Vec::new(),
+    });
+    Ok(messages)
+}
+
+pub(crate) async fn conversation(
+    pool: &SqlitePool,
+    cfg: &AgentConfig,
+    session_key: &str,
+) -> anyhow::Result<Vec<ChatMessage>> {
     let stored = session::persona_of(pool, session_key).await?;
-    let (_, persona) = cfg.resolve_persona(stored.as_deref());
     let summary = if cfg.memory_enabled {
-        session::fold_overflow(pool, session_key, cfg.max_history_turns).await?
+        session::summary_of(pool, session_key).await?
     } else {
         String::new()
     };
+    let system = system_text(cfg, stored.as_deref(), &summary, session_key);
+    let mut messages = Vec::new();
+    if !system.trim().is_empty() {
+        messages.push(ChatMessage {
+            role: Role::System,
+            content: system,
+            images: Vec::new(),
+        });
+    }
+    messages.extend(presented_history(pool, session_key).await?);
+    Ok(messages)
+}
+
+pub(crate) fn system_text(
+    cfg: &AgentConfig,
+    stored_persona: Option<&str>,
+    summary: &str,
+    session_key: &str,
+) -> String {
+    let (_, persona) = cfg.resolve_persona(stored_persona);
     let enabled = tools::resident_tools(&cfg.tools, enabled_builtins(cfg));
-    let prompt = tools::instructions_with_catalog(
-        &prompt_with_memory(persona, &summary),
-        &enabled,
-        cfg.inject_tool_list,
-    );
-    let history = session::recent_turns(pool, session_key, cfg.max_history_turns).await?;
-    Ok(build_messages(&prompt, history, user_text.to_string()))
+    let summary = if cfg.memory_enabled { summary } else { "" };
+    let mut prompt = prompt_with_memory(persona, summary);
+    if session::is_group_key(session_key) {
+        prompt = speaker::append_group_note(&prompt);
+    }
+    tools::instructions_with_catalog(&prompt, &enabled, cfg.inject_tool_list)
+}
+
+async fn presented_history(
+    pool: &SqlitePool,
+    session_key: &str,
+) -> anyhow::Result<Vec<ChatMessage>> {
+    let rows = session::active_messages(pool, session_key).await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| present_stored(session_key, row))
+        .collect())
+}
+
+fn face_of(row: &StoredTurn) -> Untrusted<'_> {
+    Untrusted {
+        nickname: row.nickname.as_deref(),
+        card: row.card.as_deref(),
+        quote: None,
+        body: &row.content,
+    }
+}
+
+fn present_stored(session_key: &str, row: StoredTurn) -> ChatMessage {
+    let content = if session::is_group_key(session_key) && row.role == Role::User {
+        speaker::render_user(row.user_id, row.reply_id, face_of(&row))
+    } else {
+        row.content
+    };
+    ChatMessage {
+        role: row.role,
+        content,
+        images: Vec::new(),
+    }
+}
+
+fn present_current(session_key: &str, snap: &UserSnap, user_text: &str) -> String {
+    if session::is_group_key(session_key) {
+        speaker::render_user(
+            Some(snap.user_id),
+            snap.reply_id,
+            Untrusted {
+                nickname: snap.nickname.as_deref(),
+                card: snap.card.as_deref(),
+                quote: None,
+                body: user_text,
+            },
+        )
+    } else {
+        user_text.to_string()
+    }
 }
 
 fn prompt_with_memory(persona: &str, summary: &str) -> String {

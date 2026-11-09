@@ -15,6 +15,7 @@ const DEFAULT_MAX_TOOL_ROUNDS: u32 = 3;
 const DEFAULT_USER_RATE: u32 = 30;
 const DEFAULT_GROUP_RATE: u32 = 120;
 const DEFAULT_MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+const DEFAULT_CONTEXT_BUDGET: u64 = crate::context_budget::DEFAULT_CONTEXT_BUDGET;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RateLimit {
@@ -29,6 +30,9 @@ pub struct AgentConfig {
     pub api_key_env: String,
     pub temperature: f64,
     pub max_history_turns: u32,
+    pub context_budget: u64,
+    pub model_context_limit: Option<u64>,
+    pub image_token_upper_bound: Option<u64>,
     pub memory_enabled: bool,
     /// Body of the `default` persona.
     pub system_prompt: String,
@@ -70,6 +74,9 @@ impl AgentConfig {
             api_key_env: string_field(v, "api_key_env", DEFAULT_API_KEY_ENV),
             temperature: temperature_from(v),
             max_history_turns: u32_field(v, "max_history_turns", DEFAULT_MAX_HISTORY_TURNS),
+            context_budget: context_budget_from(v),
+            model_context_limit: model_context_limit_from(v),
+            image_token_upper_bound: positive_limit(v, "image_token_upper_bound"),
             memory_enabled: memory_enabled_from(v),
             system_prompt,
             personas,
@@ -167,6 +174,21 @@ fn temperature_from(v: &Value) -> f64 {
         .and_then(Value::as_f64)
         .filter(|n| n.is_finite())
         .unwrap_or(DEFAULT_TEMPERATURE)
+}
+
+fn context_budget_from(v: &Value) -> u64 {
+    match v.get("context_budget").and_then(Value::as_u64) {
+        Some(0) | None => DEFAULT_CONTEXT_BUDGET,
+        Some(n) => n,
+    }
+}
+
+fn model_context_limit_from(v: &Value) -> Option<u64> {
+    positive_limit(v, "model_context_limit")
+}
+
+fn positive_limit(v: &Value, key: &str) -> Option<u64> {
+    v.get(key).and_then(Value::as_u64).filter(|n| *n > 0)
 }
 
 fn u32_field(v: &Value, key: &str, default: u32) -> u32 {
@@ -302,6 +324,9 @@ mod tests {
         assert_eq!(cfg.api_key_env, "FUJIANG_LLM_KEY");
         assert_eq!(cfg.temperature, 0.7);
         assert_eq!(cfg.max_history_turns, 20);
+        assert_eq!(cfg.context_budget, 500_000);
+        assert_eq!(cfg.model_context_limit, None);
+        assert_eq!(cfg.image_token_upper_bound, None);
         assert!(cfg.memory_enabled);
         assert_eq!(cfg.system_prompt, "你是福酱，西南科技大学 ACM 群助手。");
         assert!(cfg.personas.is_empty());

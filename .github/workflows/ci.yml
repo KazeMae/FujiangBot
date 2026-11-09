@@ -10,6 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Sandbox packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap python3
+          bwrap --help | grep -F -- '--bind-fd'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -18,7 +23,45 @@ jobs:
       - name: Clippy
         run: cargo clippy -p fujiang-plugin-agent --all-targets --no-deps -- -D warnings
       - name: Test agent
-        run: cargo test -p fujiang-plugin-agent
+        run: |
+          set +e
+          log="${RUNNER_TEMP}/agent-test.log"
+          cargo test -p fujiang-plugin-agent >"$log" 2>&1
+          status=$?
+          cat "$log"
+          if [ "$status" -ne 0 ]; then
+            python3 - "$log" << 'PY' || true
+          import sys
+          text = open(sys.argv[1], errors="replace").read()
+          failed, blocks, buf, grab = [], [], [], False
+          for line in text.splitlines():
+              if line.startswith("test ") and line.endswith(" ... FAILED"):
+                  name = line[5:-11].strip()
+                  if name and name not in failed:
+                      failed.append(name)
+              hit = "panicked at" in line or ("assertion" in line and "failed" in line)
+              if hit:
+                  if grab and buf:
+                      blocks.append("\n".join(buf)[:700])
+                  grab, buf = True, [line]
+              elif grab:
+                  if line.startswith("failures:") or line.startswith("test result:"):
+                      blocks.append("\n".join(buf)[:700])
+                      grab, buf = False, []
+                  else:
+                      buf.append(line)
+          if grab and buf:
+              blocks.append("\n".join(buf)[:700])
+          body = "failed: " + ", ".join(failed[:40])
+          if blocks:
+              body += "\n" + "\n---\n".join(blocks[:8])
+          body = body[:4000]
+          def esc(s):
+              return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print("::error title=Agent regression::" + esc(body))
+          PY
+          fi
+          exit "$status"
       - name: Test fujiang
         run: cargo test -p fujiang
       - name: Agent file length

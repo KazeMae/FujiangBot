@@ -613,6 +613,7 @@ async fn spend_sums_token_rounds_and_still_counts_a_body_without_usage() {
     assert_eq!(turn.calls, 2);
     assert_eq!(turn.in_tokens, 4);
     assert_eq!(turn.out_tokens, 1);
+    assert_eq!(turn.unknown_calls, 1);
 
     let script = Script::new(Kind::MissingId);
     let base = spawn_app(script).await;
@@ -623,6 +624,17 @@ async fn spend_sums_token_rounds_and_still_counts_a_body_without_usage() {
     assert_eq!(turn.calls, 1);
     assert_eq!(turn.in_tokens, 0);
     assert_eq!(turn.out_tokens, 0);
+    assert_eq!(turn.unknown_calls, 1);
+
+    let script = Script::new(Kind::MixedMeter);
+    let base = spawn_app(script).await;
+    let client = test_client(&base);
+    let pass = ToolPass::rounds(3);
+    let turn = run_tool_loop(&client, &user("榜"), &tools, BuiltinTools::OFF, &pass, &hub).await;
+    assert_eq!(turn.calls, 3);
+    assert_eq!(turn.in_tokens, 13);
+    assert_eq!(turn.out_tokens, 1);
+    assert_eq!(turn.unknown_calls, 1);
 }
 
 fn user(text: &str) -> Vec<ChatMessage> {
@@ -634,7 +646,7 @@ fn user(text: &str) -> Vec<ChatMessage> {
 }
 
 fn test_client(base: &str) -> LlmClient {
-    let mut cfg = AgentConfig::from_value(&json!({}));
+    let mut cfg = AgentConfig::from_value(&json!({"model_context_limit": 500_000}));
     cfg.base_url = base.to_string();
     cfg.timeout_secs = 60;
     LlmClient::new(&cfg, reqwest::Client::new(), "test-key".into())
@@ -652,6 +664,7 @@ enum Kind {
     GetAndToday,
     ProblemCall,
     Metered,
+    MixedMeter,
     MemoList,
     MemoryUpsert,
     MemoryBad,
@@ -729,6 +742,28 @@ async fn handle(State(script): State<Script>, Json(body): Json<Value>) -> Json<V
                 "type": "message",
                 "content": [{"type": "output_text", "text": "好"}]
             }]
+        }),
+        Kind::MixedMeter if n == 0 => json!({
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_rank",
+                "name": "rank_list",
+                "arguments": "{}"
+            }],
+            "usage": {"input_tokens": 4, "output_tokens": 1}
+        }),
+        Kind::MixedMeter if n == 1 => json!({
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_rank_2",
+                "name": "rank_list",
+                "arguments": "{}"
+            }],
+            "usage": {"input_tokens": 9}
+        }),
+        Kind::MixedMeter => json!({
+            "output_text": "好",
+            "usage": {"input_tokens": 0, "output_tokens": 0}
         }),
         Kind::MemoList if n == 0 => one_call_with("call_memo", "memo_list", "{}"),
         Kind::MemoList => saying("这个对话有一条备忘。"),
