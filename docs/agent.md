@@ -124,7 +124,7 @@ QQ 选择是真实 SQLite metadata，测试不打 NapCat。在线 QQ 未验收�
 | `memory_consolidate_on_start` | `false` | 为 true 时，启动时把库里每一层整理一次。缺省或类型不对时是 false |
 | `inject_tool_list` | `false` | 为 true 时，把当前启用工具的短清单追加到系统提示。缺省或类型不对时是 false |
 | `tools` | `[]` | 额外工具。每项有 `name`、`description`、`parameters`。和已启用内置工具的函数名相同时，这一项不发出去 |
-| `system_prompt` | `你是福酱，西南科技大学 ACM 群助手。` | `default` 人设的系统提示 |
+| `system_prompt` | 以「你是福酱，西南科技大学 ACM 群助手。」开头，并约定在 QQ 里用简洁自然的纯文本接话。完整默认文案见下方示例 | `default` 人设的系统提示。配置里的非空值盖过代码默认；`personas.default.system_prompt` 再盖过这一项 |
 | `wake_words` | `["福酱"]` | 唤醒词。空数组表示没有唤醒词 |
 | `require_at` | `false` | 为 true 时，唤醒词不算叫到 |
 | `vision_enabled` | `false` | 为 true 时取当前消息里的图片。官方 `deepseek-flash` 可以发。其他模型要已核实的 `image_token_upper_bound`，否则只拒绝这一张图的请求。缺省或类型不对时是 false |
@@ -144,7 +144,7 @@ priority = 10
 base_url = "https://api.deepseek.com"
 model = "deepseek-flash"
 api_key_env = "FUJIANG_LLM_KEY"
-system_prompt = "你是福酱，西南科技大学 ACM 群助手。"
+system_prompt = "你是福酱，西南科技大学 ACM 群助手。在 QQ 里用简洁自然的中文完整句接话，不要客服套话，也不要用「给你几版，按风格挑」这类开场。只让你写一条文案或一句回复时，直接给出可以复制转发的正文，不要先铺垫，也不要默认列出多种风格或多个候选。默认用纯文本，不要用标题、Markdown 粗体或引用块这类在 QQ 里不会渲染的装饰。对方明确要列表、多版、详细解释或代码时，再按要求写；代码和技术内容可以正常使用 Markdown。不要为了短而把该说完的话截断，也不要把所有较长的回答都挤成一句。"
 # blacklist = ["代写"]
 # admins = [10001]
 
