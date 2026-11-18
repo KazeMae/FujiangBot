@@ -9,7 +9,14 @@ const DEFAULT_MODEL: &str = "deepseek-flash";
 const DEFAULT_API_KEY_ENV: &str = "FUJIANG_LLM_KEY";
 const DEFAULT_TEMPERATURE: f64 = 0.7;
 const DEFAULT_MAX_HISTORY_TURNS: u32 = 20;
-const DEFAULT_SYSTEM_PROMPT: &str = "你是福酱，西南科技大学 ACM 群助手。";
+const DEFAULT_SYSTEM_PROMPT: &str = concat!(
+    "你是福酱，西南科技大学 ACM 群助手。",
+    "在 QQ 里用简洁自然的中文完整句接话，不要客服套话，也不要用「给你几版，按风格挑」这类开场。",
+    "只让你写一条文案或一句回复时，直接给出可以复制转发的正文，不要先铺垫，也不要默认列出多种风格或多个候选。",
+    "默认用纯文本，不要用标题、Markdown 粗体或引用块这类在 QQ 里不会渲染的装饰。",
+    "对方明确要列表、多版、详细解释或代码时，再按要求写；代码和技术内容可以正常使用 Markdown。",
+    "不要为了短而把该说完的话截断，也不要把所有较长的回答都挤成一句。",
+);
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_MAX_TOOL_ROUNDS: u32 = 3;
 const DEFAULT_USER_RATE: u32 = 30;
@@ -328,13 +335,10 @@ mod tests {
         assert_eq!(cfg.model_context_limit, None);
         assert_eq!(cfg.image_token_upper_bound, None);
         assert!(cfg.memory_enabled);
-        assert_eq!(cfg.system_prompt, "你是福酱，西南科技大学 ACM 群助手。");
+        assert_eq!(cfg.system_prompt, DEFAULT_SYSTEM_PROMPT);
         assert!(cfg.personas.is_empty());
         assert_eq!(cfg.persona_names(), vec!["default"]);
-        assert_eq!(
-            cfg.prompt_for("default"),
-            Some("你是福酱，西南科技大学 ACM 群助手。")
-        );
+        assert_eq!(cfg.prompt_for("default"), Some(DEFAULT_SYSTEM_PROMPT));
         assert_eq!(cfg.prompt_for("strict"), None);
         assert_eq!(cfg.wake_words, vec!["福酱".to_string()]);
         assert!(!cfg.require_at);
@@ -367,6 +371,40 @@ mod tests {
     fn defaults_when_empty_or_null() {
         assert_defaults(&AgentConfig::from_value(&json!({})));
         assert_defaults(&AgentConfig::from_value(&Value::Null));
+    }
+
+    #[test]
+    fn default_prompt_keeps_identity_and_asks_for_plain_qq_chat() {
+        assert!(DEFAULT_SYSTEM_PROMPT.starts_with("你是福酱，西南科技大学 ACM 群助手。"));
+        for needle in [
+            "完整句",
+            "客服套话",
+            "给你几版，按风格挑",
+            "可以复制转发的正文",
+            "多种风格",
+            "多个候选",
+            "纯文本",
+            "Markdown 粗体",
+            "引用块",
+            "代码和技术内容可以正常使用 Markdown",
+        ] {
+            assert!(DEFAULT_SYSTEM_PROMPT.contains(needle), "missing {needle}");
+        }
+    }
+
+    #[test]
+    fn configured_prompts_outweigh_the_code_default() {
+        let top = AgentConfig::from_value(&json!({ "system_prompt": "只要顶层" }));
+        assert_eq!(top.system_prompt, "只要顶层");
+        assert_eq!(top.resolve_persona(None), ("default", "只要顶层"));
+        let over = AgentConfig::from_value(&json!({
+            "system_prompt": "只要顶层",
+            "personas": { "default": { "system_prompt": "人设默认" } }
+        }));
+        assert_eq!(over.system_prompt, "人设默认");
+        assert_eq!(over.resolve_persona(None), ("default", "人设默认"));
+        let blank = AgentConfig::from_value(&json!({ "system_prompt": "  " }));
+        assert_eq!(blank.system_prompt, DEFAULT_SYSTEM_PROMPT);
     }
 
     #[test]
@@ -482,10 +520,7 @@ mod tests {
         let only_named = AgentConfig::from_value(&json!({
             "personas": { "strict": { "system_prompt": "be strict" } }
         }));
-        assert_eq!(
-            only_named.system_prompt,
-            "你是福酱，西南科技大学 ACM 群助手。"
-        );
+        assert_eq!(only_named.system_prompt, DEFAULT_SYSTEM_PROMPT);
         assert_eq!(only_named.prompt_for("strict"), Some("be strict"));
     }
 
