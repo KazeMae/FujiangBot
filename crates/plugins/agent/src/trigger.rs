@@ -52,7 +52,7 @@ fn has_direct_content(msg: &MessageEvent, body: &str) -> bool {
             .any(|segment| matches!(segment, Segment::Image { .. }))
 }
 
-fn mentions_self(msg: &MessageEvent) -> bool {
+pub(crate) fn mentions_self(msg: &MessageEvent) -> bool {
     msg.segments.iter().any(|segment| match segment {
         Segment::At {
             target: AtTarget::User(uid),
@@ -93,6 +93,12 @@ pub fn fit_reply(text: &str) -> String {
     out
 }
 
+pub(crate) const NO_REPLY: &str = "[NO_REPLY]";
+
+pub(crate) fn is_no_reply(text: &str) -> bool {
+    text.trim() == NO_REPLY
+}
+
 /// System prompt is injected per call and is not read from the session table.
 #[cfg(test)]
 pub fn build_messages(
@@ -118,7 +124,7 @@ pub fn build_messages(
     messages
 }
 
-fn message_text(msg: &MessageEvent) -> String {
+pub(crate) fn message_text(msg: &MessageEvent) -> String {
     let joined: String = msg
         .segments
         .iter()
@@ -249,6 +255,31 @@ mod tests {
             "天气",
         );
         assert_eq!(claim(&all, &wake, false, false), Claim::Miss);
+    }
+
+    #[test]
+    fn at_self_evaluate_strips_address_and_keeps_the_ask() {
+        let wake = words(&["福酱"]);
+        let at_and_text = ev(
+            9,
+            vec![
+                Segment::At {
+                    target: AtTarget::User(9),
+                },
+                Segment::text(" 评价一下"),
+            ],
+            "",
+        );
+        assert_eq!(
+            claim(&at_and_text, &wake, false, false),
+            Claim::Hit {
+                user_text: "评价一下".into()
+            }
+        );
+        // A leading "@福酱" in plain text is stripped before the wake-word check,
+        // so without an At segment this is not a hit.
+        let text_only = ev(9, vec![Segment::text("@福酱 评价一下")], "");
+        assert_eq!(claim(&text_only, &wake, false, false), Claim::Miss);
     }
 
     #[test]
@@ -488,5 +519,15 @@ mod tests {
         assert_eq!(claim(&none, &wake, true, false), Claim::Miss);
         let img = ev(9, vec![image()], "");
         assert_eq!(claim(&img, &wake, false, false), Claim::Miss);
+    }
+
+    #[test]
+    fn no_reply_is_only_the_exact_token() {
+        assert!(is_no_reply("[NO_REPLY]"));
+        assert!(is_no_reply("  [NO_REPLY]\n"));
+        assert!(!is_no_reply(""));
+        assert!(!is_no_reply("[NO_REPLY] 好"));
+        assert!(!is_no_reply("先不回"));
+        assert!(!is_no_reply("NO_REPLY"));
     }
 }

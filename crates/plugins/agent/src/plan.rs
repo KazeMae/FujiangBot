@@ -168,13 +168,17 @@ fn present_stored(session_key: &str, row: StoredTurn) -> ChatMessage {
 
 fn present_current(session_key: &str, snap: &UserSnap, user_text: &str) -> String {
     if session::is_group_key(session_key) {
-        speaker::render_user(
+        speaker::render_user_marked(
             Some(snap.user_id),
             snap.reply_id,
+            speaker::HostMarks {
+                at_self: snap.at_self,
+                reply_to_self: snap.reply_to_self,
+            },
             Untrusted {
                 nickname: snap.nickname.as_deref(),
                 card: snap.card.as_deref(),
-                quote: None,
+                quote: snap.quote.as_deref(),
                 body: user_text,
             },
         )
