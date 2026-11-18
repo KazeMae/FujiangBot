@@ -790,6 +790,7 @@ async fn persist_message(ctx: &BotContext, msg: &crate::event::MessageEvent) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{MessageEvent, Sender, Source};
     use crate::scope::PluginScope;
     use async_trait::async_trait;
 
@@ -896,6 +897,109 @@ mod tests {
         let idx = route_targets(listed, &ev, ".");
         let names: Vec<_> = idx.into_iter().map(|i| p[i].name).collect();
         assert_eq!(names, vec!["fun"]);
+    }
+
+    fn text_event(source: Source, raw: &str) -> Event {
+        Event::Message(MessageEvent {
+            id: 1,
+            time: 0,
+            self_id: 1,
+            sender: Sender {
+                user_id: 2,
+                nickname: None,
+                card: None,
+            },
+            source,
+            segments: vec![],
+            raw_text: raw.into(),
+        })
+    }
+
+    #[test]
+    fn command_route_puts_owner_before_message_plugins() {
+        let p = stubs();
+        let listed: Vec<&dyn Plugin> = p.iter().map(|s| s as &dyn Plugin).collect();
+        let ev = text_event(Source::Friend { id: 2 }, ".ping");
+        let names: Vec<_> = route_targets(listed, &ev, ".")
+            .into_iter()
+            .map(|i| p[i].name)
+            .collect();
+        assert_eq!(names, vec!["echo", "fun"]);
+    }
+
+    #[tokio::test]
+    async fn command_owner_stop_does_not_reach_later_plugins() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct Owner {
+            n: AtomicU32,
+        }
+        struct Later {
+            n: AtomicU32,
+        }
+        #[async_trait]
+        impl Plugin for Owner {
+            fn name(&self) -> &'static str {
+                "echo"
+            }
+            fn help(&self) -> &'static str {
+                ""
+            }
+            fn commands(&self) -> &'static [&'static str] {
+                &[".ping"]
+            }
+            fn interest(&self) -> Interest {
+                Interest::Commands
+            }
+            async fn handle(
+                &self,
+                _ctx: &BotContext,
+                _ev: &Event,
+                _scope: &PluginScope,
+            ) -> anyhow::Result<Flow> {
+                self.n.fetch_add(1, Ordering::SeqCst);
+                Ok(Flow::Stop)
+            }
+        }
+        #[async_trait]
+        impl Plugin for Later {
+            fn name(&self) -> &'static str {
+                "agent"
+            }
+            fn help(&self) -> &'static str {
+                ""
+            }
+            fn interest(&self) -> Interest {
+                Interest::Messages
+            }
+            async fn handle(
+                &self,
+                _ctx: &BotContext,
+                _ev: &Event,
+                _scope: &PluginScope,
+            ) -> anyhow::Result<Flow> {
+                self.n.fetch_add(1, Ordering::SeqCst);
+                Ok(Flow::Stop)
+            }
+        }
+
+        let ctx = test_ctx().await;
+        let owner = Arc::new(Owner {
+            n: AtomicU32::new(0),
+        });
+        let later = Arc::new(Later {
+            n: AtomicU32::new(0),
+        });
+        let d = Dispatcher::new(vec![later.clone(), owner.clone()]);
+        assert!(d.start_all(&ctx).await.is_empty());
+        d.handle(&ctx, &text_event(Source::Friend { id: 2 }, ".ping"))
+            .await;
+        assert_eq!(owner.n.load(Ordering::SeqCst), 1);
+        assert_eq!(later.n.load(Ordering::SeqCst), 0);
+        d.handle(&ctx, &text_event(Source::Friend { id: 2 }, "今天天气"))
+            .await;
+        assert_eq!(owner.n.load(Ordering::SeqCst), 1);
+        assert_eq!(later.n.load(Ordering::SeqCst), 1);
     }
 
     struct NoopMessenger;

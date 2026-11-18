@@ -105,14 +105,16 @@
 | 上下文预算与 LLM 交接摘要 | 500000、90% 摘要、模型上限、CAS、官方看图、摘要用量 | 已实现，待 PR 验收 | 有效预算是配置与已核实上限的较小值。官方 `https://api.deepseek.com` 的 `deepseek-flash` 按 2026-11-07 定价页为 100 万，看图页每图 1024 且多图相加。只适用于该主机名和该模型名，不是 OpenAI、Anthropic 或其它模型的 tile/detail 上界。预算含投影 JSON、工具 schema、已核实图像上界和发出的 `max_output_tokens` 4096。usage 按字段保留有效非负整数；缺字段记 `unknown_calls`，不把缺的 0 当成测得值。旧行迁移后标未确认。记账失败仍走 CompactFail |
 | 工作区绑定与独立 owner | 每次调用真实 resolve；个人与群目录按发言人分开；bash/code 默认不广告 | 生产关闭。未设 `FUJIANG_WORKSPACE_MVP` 则不启动 | 在线 QQ 未验收。同一宿主用户之外没有第二套 UID。owner 锁和重开仍在。详见 `docs/workspace-rootfs.md`。 |
 | 工作区运行时 | 宿主 `/usr` `/etc` `/var` 只读绑定，bwrap 单 UID，网络与宿主共享 | 默认关闭。`FUJIANG_WORKSPACE_MVP` 指向宿主目录才打开 | 只有 `/work` 可写。沙箱内 apt/dpkg 安装已取消。详见 `docs/workspace-rootfs.md`。 |
-| 历史图片查看工具 | `view_image` 按占位符回看本会话或引用消息里的图片 | 已实现，待 PR 验收 | 只在 `vision_enabled` 且图像 token 上界已核定时出现。每次最多 3 张，每轮最多 6 张。会话外或已归档拒绝。QQ/NapCat 链接过期后的 `get_message` 刷新未验收。 |
+| 历史图片查看工具 | `view_image` 按占位符回看本会话或引用消息里的图片 | 已实现，随 v0.4.0 部署；在线刷新未验收 | 只在 `vision_enabled` 且图像 token 上界已核定时出现。每次最多 3 张，每轮最多 6 张。会话外或已归档拒绝。QQ/NapCat 链接过期后的 `get_message` 刷新未验收。 |
+| 私聊直接对话触发 | 私聊普通文字或有效带图，未被命令或其他插件处理后直接交给 agent，无需 @ 或回复；群聊原规则不变 | 本分支待合入，不自动部署 | `require_at` 只约束群里的唤醒词路径。生产需部署含此改动的二进制后才会生效，不靠改配置。 |
 
 前置：agent 热路径改动优先落在 `command.rs` / `plan.rs` / 新模块；单文件勿超 1000 行。
 
 ### 版本与部署
 
 - 功能合入 `main` 不自动部署。
-- 生产包 **v0.4.0**：PR #62（工作区、上下文摘要、身份显示、`view_image`）以及自 v0.3.0 起已合入尚未部署的 #47/#48/#52/#51/#57/#58/#59/#61；部署须用户确认。
+- 生产包 **v0.4.0**（提交 `0d9fb0e`，2026-11-17 部署）：含 PR #62（工作区、上下文摘要、身份显示、`view_image`）以及自 v0.3.0 起的 #47/#48/#52/#51/#57/#58/#59/#61。
+- PR #65（默认 QQ 纯文本系统提示）已于 2026-11-18 以 merge commit `9249040` 合入 `main`。生产二进制仍是 v0.4.0；同日已用管理员接口把线上 `system_prompt` 更新为该默认全文并只重载 agent，未改二进制、未改 DEPLOYED。实测回复风格仍待用户聊天确认。
 - 部署清单仍按 `docs/BRANCHING.md`：备份、只重启 fujiang、不碰 NapCat。
 
 ## 并行策略

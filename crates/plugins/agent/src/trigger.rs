@@ -12,7 +12,8 @@ pub(crate) const BUSY_REPLY: &str = "福酱刚才没想出来，稍后再试。"
 /// Whether this message is for the agent.
 ///
 /// Wake words match as substrings after leading `@token` prefixes are removed.
-/// `require_at` drops the wake-word path. A reply to the bot still counts.
+/// `require_at` drops the wake-word path in groups. A reply to the bot still counts.
+/// A private message with text or an image is a hit even without @, reply, or a wake word.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Claim {
     Miss,
@@ -34,12 +35,21 @@ pub fn claim(
     } else {
         at_self || woke || reply_from_self
     };
-    if !addressed {
+    let private_chat = !msg.source.is_group() && has_direct_content(msg, body);
+    if !addressed && !private_chat {
         return Claim::Miss;
     }
     Claim::Hit {
         user_text: prompt_text(body, wake_words),
     }
+}
+
+fn has_direct_content(msg: &MessageEvent, body: &str) -> bool {
+    !body.trim().is_empty()
+        || msg
+            .segments
+            .iter()
+            .any(|segment| matches!(segment, Segment::Image { .. }))
 }
 
 fn mentions_self(msg: &MessageEvent) -> bool {
@@ -167,13 +177,17 @@ fn prompt_text(body: &str, wake_words: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fujiang_core::{MessageEvent, Sender, Source};
+    use fujiang_core::{Media, MessageEvent, Sender, Source};
 
     fn words(list: &[&str]) -> Vec<String> {
         list.iter().map(|word| (*word).to_string()).collect()
     }
 
     fn ev(self_id: i64, segments: Vec<Segment>, raw: &str) -> MessageEvent {
+        ev_src(Source::Group { id: 7 }, self_id, segments, raw)
+    }
+
+    fn ev_src(source: Source, self_id: i64, segments: Vec<Segment>, raw: &str) -> MessageEvent {
         MessageEvent {
             id: 1,
             time: 0,
@@ -183,9 +197,20 @@ mod tests {
                 nickname: None,
                 card: None,
             },
-            source: Source::Group { id: 7 },
+            source,
             segments,
             raw_text: raw.to_string(),
+        }
+    }
+
+    fn private(self_id: i64, segments: Vec<Segment>, raw: &str) -> MessageEvent {
+        ev_src(Source::Friend { id: 42 }, self_id, segments, raw)
+    }
+
+    fn image() -> Segment {
+        Segment::Image {
+            src: Media::Url("https://example/a.png".into()),
+            summary: None,
         }
     }
 
@@ -359,5 +384,109 @@ mod tests {
         let bare = build_messages("  ", vec![], "在".into());
         assert_eq!(bare.len(), 1);
         assert_eq!(bare[0].role, Role::User);
+    }
+    #[test]
+    fn private_plain_text_hits_without_wake_or_at() {
+        let wake = words(&["福酱"]);
+        let text = private(9, vec![Segment::text("今天天气")], "");
+        assert_eq!(
+            claim(&text, &wake, false, false),
+            Claim::Hit {
+                user_text: "今天天气".into()
+            }
+        );
+        assert_eq!(
+            claim(&text, &wake, true, false),
+            Claim::Hit {
+                user_text: "今天天气".into()
+            }
+        );
+        let woke = private(9, vec![Segment::text("福酱在吗")], "");
+        assert_eq!(
+            claim(&woke, &wake, false, false),
+            Claim::Hit {
+                user_text: "在吗".into()
+            }
+        );
+        let blank = private(9, vec![Segment::text("   ")], "");
+        assert_eq!(claim(&blank, &wake, false, false), Claim::Miss);
+        let face = private(9, vec![Segment::Face { id: "1".into() }], "");
+        assert_eq!(claim(&face, &wake, false, false), Claim::Miss);
+    }
+
+    #[test]
+    fn private_image_hits_like_a_bare_mention() {
+        let wake = words(&["福酱"]);
+        let only = private(9, vec![image()], "");
+        assert_eq!(
+            claim(&only, &wake, false, false),
+            Claim::Hit {
+                user_text: "你好".into()
+            }
+        );
+        assert_eq!(
+            claim(&only, &wake, true, false),
+            Claim::Hit {
+                user_text: "你好".into()
+            }
+        );
+        let both = private(9, vec![image(), Segment::text("这是什么")], "");
+        assert_eq!(
+            claim(&both, &wake, false, false),
+            Claim::Hit {
+                user_text: "这是什么".into()
+            }
+        );
+        let file = private(
+            9,
+            vec![Segment::File {
+                src: Media::Url("https://example/a.bin".into()),
+                name: None,
+            }],
+            "",
+        );
+        assert_eq!(claim(&file, &wake, false, false), Claim::Miss);
+    }
+
+    #[test]
+    fn private_at_and_reply_still_hit() {
+        let wake = words(&["福酱"]);
+        let at = private(
+            9,
+            vec![
+                Segment::At {
+                    target: AtTarget::User(9),
+                },
+                Segment::text("还在吗"),
+            ],
+            "",
+        );
+        assert_eq!(
+            claim(&at, &wake, true, false),
+            Claim::Hit {
+                user_text: "还在吗".into()
+            }
+        );
+        let quoted = private(
+            9,
+            vec![Segment::Reply { id: 5 }, Segment::text("接着说")],
+            "",
+        );
+        assert_eq!(
+            claim(&quoted, &wake, true, true),
+            Claim::Hit {
+                user_text: "接着说".into()
+            }
+        );
+    }
+
+    #[test]
+    fn group_plain_text_still_misses_without_address() {
+        let wake = words(&["福酱"]);
+        let none = ev(9, vec![Segment::text("今天天气")], "");
+        assert_eq!(claim(&none, &wake, false, false), Claim::Miss);
+        assert_eq!(claim(&none, &wake, true, false), Claim::Miss);
+        let img = ev(9, vec![image()], "");
+        assert_eq!(claim(&img, &wake, false, false), Claim::Miss);
     }
 }

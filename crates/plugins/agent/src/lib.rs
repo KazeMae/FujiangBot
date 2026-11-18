@@ -1,4 +1,4 @@
-//! Chat plugin. `.agent` edits the session. A wake calls the LLM and returns [`Flow::Stop`].
+//! Chat plugin. `.agent` edits the session. A claimed chat call returns [`Flow::Stop`].
 
 mod client;
 mod command;
@@ -24,6 +24,10 @@ mod workspace_store;
 #[cfg(test)]
 #[path = "guard_tests.rs"]
 mod guard_tests;
+
+#[cfg(test)]
+#[path = "handle_guard_tests.rs"]
+mod handle_guard_tests;
 
 pub use client::{ChatMessage, LlmClient, LlmError, Role};
 pub use config::{AgentConfig, RateLimit};
