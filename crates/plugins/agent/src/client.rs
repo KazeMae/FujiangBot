@@ -310,6 +310,7 @@ pub(crate) struct PriorCall {
     pub output: String,
     pub images: Vec<ImagePart>,
     pub image_note: String,
+    pub reasoning_texts: Vec<String>,
 }
 
 impl PriorCall {
@@ -326,7 +327,14 @@ impl PriorCall {
             output: output.into(),
             images: Vec::new(),
             image_note: String::new(),
+            reasoning_texts: Vec::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_reasoning_texts(mut self, reasoning_texts: Vec<String>) -> Self {
+        self.reasoning_texts = reasoning_texts;
+        self
     }
 
     pub(crate) fn from_call(call: &FunctionCall, output: impl Into<String>) -> Self {
@@ -364,7 +372,10 @@ pub(crate) struct FunctionTool<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModelOutput {
     Text(String),
-    Calls(Vec<FunctionCall>),
+    Calls {
+        reasoning_texts: Vec<String>,
+        calls: Vec<FunctionCall>,
+    },
 }
 
 #[derive(Serialize)]
@@ -404,6 +415,18 @@ enum InputItem<'a> {
         call_id: &'a str,
         output: &'a str,
     },
+    Reasoning {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        content: Vec<ReasoningText<'a>>,
+    },
+}
+
+#[derive(Serialize)]
+struct ReasoningText<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: &'a str,
 }
 
 #[derive(Serialize)]
@@ -467,6 +490,19 @@ fn responses_request<'a>(
         }
     }
     for call in prior {
+        if !call.reasoning_texts.is_empty() {
+            input.push(InputItem::Reasoning {
+                kind: "reasoning",
+                content: call
+                    .reasoning_texts
+                    .iter()
+                    .map(|text| ReasoningText {
+                        kind: "reasoning_text",
+                        text,
+                    })
+                    .collect(),
+            });
+        }
         input.push(InputItem::FunctionCall {
             kind: "function_call",
             call_id: &call.call_id,
@@ -669,17 +705,64 @@ fn parse_responses(body: &str) -> Result<String, LlmError> {
     text_from_response(&value)
 }
 
-fn parse_model_output(body: &str) -> Result<ModelOutput, LlmError> {
+pub(crate) fn parse_model_output(body: &str) -> Result<ModelOutput, LlmError> {
     let value: Value =
         serde_json::from_str(body).map_err(|err| LlmError::Decode(err.to_string()))?;
     let calls = function_calls(&value)?;
     if !calls.is_empty() {
-        return Ok(ModelOutput::Calls(calls));
+        return Ok(ModelOutput::Calls {
+            reasoning_texts: reasoning_texts(&value),
+            calls,
+        });
     }
     text_from_response(&value).map(ModelOutput::Text)
 }
 
-fn text_from_response(value: &Value) -> Result<String, LlmError> {
+fn reasoning_texts(value: &Value) -> Vec<String> {
+    let Some(output) = value.get("output").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut texts = Vec::new();
+    for item in output {
+        if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+            continue;
+        }
+        push_reasoning_content(&mut texts, item.get("content"));
+    }
+    texts
+}
+
+fn push_reasoning_content(texts: &mut Vec<String>, content: Option<&Value>) {
+    match content {
+        Some(Value::String(text)) => push_reasoning_text(texts, text),
+        Some(Value::Array(parts)) => {
+            for part in parts {
+                match part {
+                    Value::String(text) => push_reasoning_text(texts, text),
+                    Value::Object(_) => {
+                        let typ = part.get("type").and_then(Value::as_str);
+                        if typ.is_some() && typ != Some("reasoning_text") {
+                            continue;
+                        }
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            push_reasoning_text(texts, text);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_reasoning_text(texts: &mut Vec<String>, text: &str) {
+    if !text.is_empty() {
+        texts.push(text.to_string());
+    }
+}
+
+pub(crate) fn text_from_response(value: &Value) -> Result<String, LlmError> {
     if let Some(text) = value.get("output_text").and_then(Value::as_str) {
         if !text.is_empty() {
             return Ok(text.to_string());
@@ -801,3 +884,7 @@ pub(crate) fn rendered_request(
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "client_reasoning_tests.rs"]
+mod reasoning_tests;

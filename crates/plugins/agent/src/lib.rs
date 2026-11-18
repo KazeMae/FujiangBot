@@ -47,7 +47,7 @@ use crate::command::{
 };
 use crate::plan::{plan_faced, ChatPlan};
 use crate::session::{save_faced, session_key, snap_of};
-use crate::trigger::{claim, fit_reply, llm_reply, Claim, BUSY_REPLY};
+use crate::trigger::{claim, fit_reply, is_no_reply, llm_reply, Claim, BUSY_REPLY};
 
 #[cfg(test)]
 pub(crate) use plan::{BLACKLIST_TIP, SESSION_LIMIT_TIP, USER_LIMIT_TIP};
@@ -146,12 +146,13 @@ impl Plugin for AgentPlugin {
             self.on_command(ctx, msg, &cfg, rest).await;
             return Ok(Flow::Stop);
         }
-        let reply_from_self = quoted_bot(ctx, msg).await;
+        let quoted = quoted_target(ctx, msg).await;
+        let reply_from_self = quoted.to_self(msg.self_id).unwrap_or(false);
         let Claim::Hit { user_text } = claim(msg, &cfg.wake_words, cfg.require_at, reply_from_self)
         else {
             return Ok(Flow::Continue);
         };
-        self.answer(ctx, msg, &cfg, user_text).await;
+        self.answer(ctx, msg, &cfg, user_text, quoted).await;
         Ok(Flow::Stop)
     }
 }
@@ -237,6 +238,7 @@ impl AgentPlugin {
         msg: &MessageEvent,
         cfg: &AgentConfig,
         user_text: String,
+        quoted: QuotedTarget,
     ) {
         let user_text = history_image::stamp(ctx, msg, user_text).await;
         let Some(pool) = self.pool.lock().await.clone() else {
@@ -245,7 +247,9 @@ impl AgentPlugin {
         };
         let key = session_key(msg.source);
         let now = session::unix_now();
-        let snap = snap_of(msg);
+        let mut snap = snap_of(msg);
+        snap.reply_to_self = quoted.to_self(msg.self_id);
+        snap.quote = quoted.text;
         let prepared = LlmClient::from_config(cfg, ctx.http.clone());
         let plan = plan_faced(&pool, cfg, &key, &snap, &user_text, now, prepared.is_ok()).await;
         let (client, messages, skipped) = match (prepared, plan) {
@@ -371,6 +375,9 @@ impl AgentPlugin {
             }
         };
         let saved = fit_reply(&reply);
+        if is_no_reply(&saved) {
+            return;
+        }
         let shown = fit_reply(&vision::show_reply(&reply, skipped));
         if shown.is_empty() {
             say(ctx, msg, BUSY_REPLY).await;
@@ -389,14 +396,34 @@ impl AgentPlugin {
     }
 }
 
-async fn quoted_bot(ctx: &BotContext, msg: &MessageEvent) -> bool {
+struct QuotedTarget {
+    text: Option<String>,
+    author_id: Option<i64>,
+}
+
+impl QuotedTarget {
+    fn none() -> Self {
+        Self {
+            text: None,
+            author_id: None,
+        }
+    }
+
+    fn to_self(&self, self_id: i64) -> Option<bool> {
+        self.author_id.map(|author| author == self_id)
+    }
+}
+
+async fn quoted_target(ctx: &BotContext, msg: &MessageEvent) -> QuotedTarget {
     let Some(id) = msg.reply_id() else {
-        return false;
+        return QuotedTarget::none();
     };
     match ctx.messenger().await.get_message(id).await {
-        // sender.user_id is the author. self_id is this account on every event.
-        Ok(prev) => prev.sender.user_id == msg.self_id,
-        Err(_) => false,
+        Ok(prev) => QuotedTarget {
+            text: Some(crate::trigger::message_text(&prev)),
+            author_id: Some(prev.sender.user_id),
+        },
+        Err(_) => QuotedTarget::none(),
     }
 }
 

@@ -687,6 +687,15 @@ impl Script {
             kind,
         }
     }
+
+    fn with_steps(steps: Vec<Value>) -> Self {
+        Self {
+            hits: Arc::new(AtomicUsize::new(0)),
+            bodies: Arc::new(Mutex::new(Vec::new())),
+            steps: Arc::new(steps),
+            kind: Kind::Text,
+        }
+    }
 }
 
 async fn spawn_app(script: Script) -> String {
@@ -904,6 +913,8 @@ mod memo_tests;
 mod memory_tests;
 #[path = "qq_read_tests.rs"]
 mod qq_read_tests;
+#[path = "reasoning_loop_tests.rs"]
+mod reasoning_loop_tests;
 #[path = "schedule_tests.rs"]
 mod schedule_tests;
 #[path = "skills_tests.rs"]

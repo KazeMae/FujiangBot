@@ -564,7 +564,10 @@ where
                     unknown_calls,
                 );
             }
-            ModelOutput::Calls(found) => {
+            ModelOutput::Calls {
+                reasoning_texts,
+                calls: found,
+            } => {
                 if used >= max_rounds {
                     warn!(max_tool_rounds = max_rounds, "agent tool round cap");
                     return tool_turn(
@@ -576,6 +579,7 @@ where
                     );
                 }
                 let opened_now = opened.clone();
+                let prior_start = prior.len();
                 for call in found {
                     let args = match parse_arguments(&call.arguments) {
                         Ok(value) => value,
@@ -771,6 +775,9 @@ where
                         }
                     };
                     prior.push(prior_call(call, value));
+                }
+                if prior_start < prior.len() {
+                    prior[prior_start].reasoning_texts = reasoning_texts;
                 }
                 used = used.saturating_add(1);
             }

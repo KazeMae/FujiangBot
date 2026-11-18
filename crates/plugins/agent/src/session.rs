@@ -161,6 +161,9 @@ pub struct UserSnap {
     pub nickname: Option<String>,
     pub card: Option<String>,
     pub reply_id: Option<i64>,
+    pub at_self: Option<bool>,
+    pub reply_to_self: Option<bool>,
+    pub quote: Option<String>,
 }
 
 impl UserSnap {
@@ -171,6 +174,9 @@ impl UserSnap {
             nickname: None,
             card: None,
             reply_id: None,
+            at_self: None,
+            reply_to_self: None,
+            quote: None,
         }
     }
 }
@@ -181,6 +187,9 @@ pub fn snap_of(msg: &MessageEvent) -> UserSnap {
         nickname: msg.sender.nickname.clone(),
         card: msg.sender.card.clone(),
         reply_id: msg.reply_id(),
+        at_self: Some(crate::trigger::mentions_self(msg)),
+        reply_to_self: None,
+        quote: None,
     }
 }
 

@@ -90,6 +90,7 @@ async fn seed(pool: &sqlx::SqlitePool, key: &str) {
             nickname: Some("旧称".into()),
             card: Some("旧牌".into()),
             reply_id: Some(1101),
+            ..session::UserSnap::bare(11)
         },
         &"x".repeat(62_000),
         "旧回复",
@@ -104,6 +105,7 @@ async fn seed(pool: &sqlx::SqlitePool, key: &str) {
             nickname: Some("近称".into()),
             card: Some("近牌".into()),
             reply_id: Some(2202),
+            ..session::UserSnap::bare(22)
         },
         "近期",
         "近期回复",
@@ -324,7 +326,7 @@ async fn keeps_history(mode: Mode) {
     };
     let hits = state.hits.clone();
     let base = serve(state).await;
-    let mut cfg = cfg(&base, 70_000);
+    let mut cfg = cfg(&base, 72_000);
     if matches!(mode, Mode::Hang) {
         cfg.timeout_secs = 1;
     }
@@ -456,7 +458,7 @@ async fn zero_history_turns_keeps_one_exchange() {
         key: key.to_string(),
     };
     let base = serve(state).await;
-    let mut cfg = cfg(&base, 70_000);
+    let mut cfg = cfg(&base, 72_000);
     cfg.max_history_turns = 0;
     let messages = speak(&pool, &cfg, key).await;
     let out = before_turn(&pool, &cfg, &client(&cfg), key, messages, &[], host()).await;
@@ -697,7 +699,7 @@ async fn compact_keeps_the_original_image_on_the_returned_turn() {
     let hits = state.hits.clone();
     let bodies = state.bodies.clone();
     let base = serve(state).await;
-    let mut cfg = cfg(&base, 70_000);
+    let mut cfg = cfg(&base, 72_000);
     cfg.image_token_upper_bound = Some(1_024);
     let url = "data:image/png;base64,\"quoted\\path";
     let mut messages = speak(&pool, &cfg, key).await;
@@ -707,7 +709,7 @@ async fn compact_keeps_the_original_image_on_the_returned_turn() {
         .images
         .push(ImagePart::new(url.into()));
     let n = client(&cfg).request_bytes(&messages, &[], &[]).unwrap();
-    assert!((63_000..=70_000).contains(&n));
+    assert!((63_000..=72_000).contains(&n), "n={n}");
     let current_text = messages.last().unwrap().content.clone();
     let out = before_turn(&pool, &cfg, &client(&cfg), key, messages, &[], host()).await;
     let Ok(messages) = out else {
