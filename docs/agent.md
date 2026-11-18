@@ -8,11 +8,12 @@ agent 编进 fujiang 本体，随进程启动。有人在群里或私聊里叫�
 
 - 消息 @ 了这个账号。
 - 消息回复了这个账号发出的上一条。
-- `require_at` 为 false，并且正文里出现 `wake_words` 中的某个词。匹配按子串。插件先去掉正文开头连续的 `@名字`。
+- 在群里，`require_at` 为 false，并且正文里出现 `wake_words` 中的某个词。匹配按子串。插件先去掉正文开头连续的 `@名字`。
+- 私聊里，只要有普通文字或图片段，就会接话。不需要 @、回复或唤醒词。`require_at` 不影响私聊。空白、表情、文件等既没有文字也没有图片的消息不会叫到它。
 
-`require_at` 为 true 时，只认 @ 和回复。这时单独出现唤醒词不算叫到。
+`require_at` 为 true 时，群里只认 @ 和回复。这时单独出现唤醒词不算叫到。
 
-`.agent` 不走上面的条件。这条命令不调用模型，也不计入每小时次数。`require_at` 管不到它。命令必须是消息文本的第一个词。@ 如果是单独的消息段，文本仍然可以从 `.agent` 开始。
+`.agent` 不走上面的条件。这条命令不调用模型，也不计入每小时次数。`require_at` 管不到它。命令必须是消息文本的第一个词。@ 如果是单独的消息段，文本仍然可以从 `.agent` 开始。其他插件先认领并返回 Stop 的命令，agent 也不会再接。
 
 唤醒词要靠优先级排到 fun 前面。在 `[plugins.configs.agent]` 里把 `priority` 设为 10。fun 的默认优先级是 0。命令由命令主人先分发，不靠这个数字。
 
@@ -126,7 +127,7 @@ QQ 选择是真实 SQLite metadata，测试不打 NapCat。在线 QQ 未验收�
 | `tools` | `[]` | 额外工具。每项有 `name`、`description`、`parameters`。和已启用内置工具的函数名相同时，这一项不发出去 |
 | `system_prompt` | 以「你是福酱，西南科技大学 ACM 群助手。」开头，并约定在 QQ 里用简洁自然的纯文本接话。完整默认文案见下方示例 | `default` 人设的系统提示。配置里的非空值盖过代码默认；`personas.default.system_prompt` 再盖过这一项 |
 | `wake_words` | `["福酱"]` | 唤醒词。空数组表示没有唤醒词 |
-| `require_at` | `false` | 为 true 时，唤醒词不算叫到 |
+| `require_at` | `false` | 为 true 时，群里唤醒词不算叫到。私聊不受这项限制 |
 | `vision_enabled` | `false` | 为 true 时取当前消息里的图片。官方 `deepseek-flash` 可以发。其他模型要已核实的 `image_token_upper_bound`，否则只拒绝这一张图的请求。缺省或类型不对时是 false |
 | `image_token_upper_bound` | 无 | 管理员核实的单图视觉 token 上界。官方 `deepseek-flash` 缺省按 1024，写更小也不会低于 1024 |
 | `max_image_bytes` | `5242880` | 单张图片的字节上限。超过这个数就回复一句中文，不调用模型。缺省、`0` 或类型不对时是 5242880 |

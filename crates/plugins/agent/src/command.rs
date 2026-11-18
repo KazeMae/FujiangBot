@@ -8,7 +8,7 @@ use crate::tools::{self, ToolSpec};
 use crate::trigger::fit_reply;
 
 pub(crate) const HELP: &str =
-    "对话。@我、消息里带唤醒词（默认「福酱」），或回复我的消息，我会接话。\n\
+    "对话。私聊里直接发文字或图就会接话。群里@我、消息里带唤醒词（默认「福酱」），或回复我的消息，我会接话。\n\
 同一群共用一份上下文，私聊各自一份。\n\
 .agent              本说明\n\
 .agent reset        清空当前群或私聊的对话记录和摘要，人设保留\n\
@@ -23,7 +23,7 @@ pub(crate) const HELP: &str =
 .agent workspace personal   仅群里的当前发言人把自己的选择改成本人\n\
 .agent workspace group      群里恢复当前群\n\
 在配置里把 priority 设为 10，高于 fun。本插件接过的消息返回 Stop，fun 不会再处理同一条。\n\
-require_at 为 true 时，只认 @我或回复我，单独的唤醒词不算。";
+require_at 为 true 时，群里只认 @我或回复我，单独的唤醒词不算。私聊不受这项限制。";
 
 pub(crate) enum AgentCmd {
     Help,
