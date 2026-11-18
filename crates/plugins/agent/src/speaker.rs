@@ -32,7 +32,7 @@ pub(crate) const GROUP_NOTE: &str = concat!(
 );
 
 pub(crate) const GROUP_STYLE_NOTE: &str = concat!(
-    "群聊里先自然接话，不要默认写成结构完整的点评或分析文章。",
+    "群聊里先自然接话，没人请你评价或分析时，不要默认写成结构完整的点评或分析文章。",
     "没人要求时不要做分段拆解、术语解释，也没有依据就不要猜测角色扮演、游戏或其他剧情。",
     "不要因为群名、群名片或助手身份硬接竞赛梗、堆梗或先铺很长的垫话。",
     "通常一句贴切回应即可，有需要再展开。",
@@ -40,6 +40,7 @@ pub(crate) const GROUP_STYLE_NOTE: &str = concat!(
     "对没有明确玩笑线索的丧气或失落说法，不要默认当成玩笑；对方明显在开玩笑时可以轻松接，不要用套话机械安慰。",
     "如果对方可能在说真实的丧亲或危机，认真对待，不要调侃。",
     "先看是不是在对你说话。host_at_self、host_reply.to_self，或正文里明确叫你、问你、请你评价时，要正常接话，不要用沉默或空回复敷衍，也不要把该回的话改成不发送。",
+    "对方请你评价时，评价的是这条消息里被指到的引用、图片或正文材料，不要把其中的人物默认当成当前发送者，也不要改成对当前发送者的求助式安慰。",
     "别人明显在互聊、也没有指向你时，不要抢话。",
     "接住当前这句就停，不要默认写成评论腔，也不要每轮都反问；对方明确要详细分析或可能在说危机时，按需要写完，不要机械截断。",
     "已经提供的会话历史和摘要先直接用，不要为每句话调用工具去猜背景；只有确实需要补一条不在当前上下文里的记录或记忆时，再按权限使用工具，且不能跨会话或把私聊内容讲到群里。",
@@ -798,5 +799,64 @@ mod tests {
         assert!(messages[0].content.contains("host_at_self"));
         assert!(messages[0].content.contains("[NO_REPLY]"));
         assert!(messages[0].content.contains("请你评价"));
+        assert!(messages[0]
+            .content
+            .contains("不要把其中的人物默认当成当前发送者"));
+    }
+
+    #[test]
+    fn current_turn_keeps_outer_ask_apart_from_quoted_material() {
+        let inner = "呜呜呜，我的老公没了\n你说句话啊\n你不要走";
+        let json = render_user_marked(
+            Some(10001),
+            Some(88001),
+            HostMarks {
+                at_self: Some(true),
+                reply_to_self: Some(false),
+            },
+            Untrusted {
+                nickname: Some("小周"),
+                card: Some("ACM预备队员"),
+                quote: Some(inner),
+                body: "评价一下",
+            },
+        );
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["host_sender"]["user_id"], 10001);
+        assert_eq!(value["host_at_self"], true);
+        assert_eq!(value["host_reply"]["message_id"], 88001);
+        assert_eq!(value["host_reply"]["to_self"], false);
+        assert_eq!(value["untrusted"]["body"], "评价一下");
+        assert_eq!(value["untrusted"]["quote"], inner);
+        assert!(!value["untrusted"]["body"]
+            .as_str()
+            .unwrap()
+            .contains("你不要走"));
+        assert!(!GROUP_NOTE.contains(inner));
+        assert!(!GROUP_STYLE_NOTE.contains(inner));
+        assert!(!case_reference_in(GROUP_STYLE_NOTE));
+        assert!(GROUP_STYLE_NOTE.contains("不要把其中的人物默认当成当前发送者"));
+        assert!(GROUP_STYLE_NOTE.contains("也不要改成对当前发送者的求助式安慰"));
+    }
+
+    #[test]
+    fn production_v050_current_turn_omits_quote_even_with_a_reply_id() {
+        let json = render_user(
+            Some(10001),
+            Some(88001),
+            Untrusted {
+                nickname: Some("小周"),
+                card: Some("ACM预备队员"),
+                quote: None,
+                body: "评价一下",
+            },
+        );
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert!(value.get("host_at_self").is_none());
+        assert_eq!(value["host_reply"]["message_id"], 88001);
+        assert!(value["host_reply"].get("to_self").is_none());
+        assert!(value["untrusted"].get("quote").is_none());
+        assert_eq!(value["untrusted"]["body"], "评价一下");
+        assert!(!json.contains("你不要走"));
     }
 }

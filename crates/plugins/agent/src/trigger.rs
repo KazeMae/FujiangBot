@@ -258,6 +258,31 @@ mod tests {
     }
 
     #[test]
+    fn at_self_evaluate_strips_address_and_keeps_the_ask() {
+        let wake = words(&["福酱"]);
+        let at_and_text = ev(
+            9,
+            vec![
+                Segment::At {
+                    target: AtTarget::User(9),
+                },
+                Segment::text(" 评价一下"),
+            ],
+            "",
+        );
+        assert_eq!(
+            claim(&at_and_text, &wake, false, false),
+            Claim::Hit {
+                user_text: "评价一下".into()
+            }
+        );
+        // A leading "@福酱" in plain text is stripped before the wake-word check,
+        // so without an At segment this is not a hit.
+        let text_only = ev(9, vec![Segment::text("@福酱 评价一下")], "");
+        assert_eq!(claim(&text_only, &wake, false, false), Claim::Miss);
+    }
+
+    #[test]
     fn wake_word_is_a_substring_after_leading_mentions() {
         let wake = words(&["福酱"]);
         let mid = ev(9, vec![Segment::text("请问福酱今天天气")], "");

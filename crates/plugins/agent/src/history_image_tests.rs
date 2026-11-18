@@ -166,6 +166,22 @@ fn placeholders_keep_trigger_and_quoted_images_as_text() {
 }
 
 #[test]
+fn evaluate_ask_with_quoted_image_keeps_ask_and_adds_placeholder() {
+    let quoted = vec![image("shot")];
+    let text = with_placeholders(
+        "评价一下",
+        9001,
+        &[Segment::text("评价一下")],
+        Some((88001, &quoted)),
+    );
+    assert_eq!(text, "评价一下 [引用图片#88001:1]");
+    assert_eq!(
+        with_placeholders("评价一下", 9001, &[Segment::text("评价一下")], None),
+        "评价一下"
+    );
+}
+
+#[test]
 fn quoted_segments_reject_another_session() {
     let current = Source::Group { id: 7 };
     let other = ev(8, Source::Group { id: 9 }, vec![image("a")]);
