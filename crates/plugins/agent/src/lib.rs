@@ -520,7 +520,11 @@ mod tests {
         };
         assert_eq!(
             messages[0].content,
-            format!("默认人设\n\n{}", crate::speaker::GROUP_NOTE)
+            format!(
+                "默认人设\n\n{}\n\n{}",
+                crate::speaker::GROUP_NOTE,
+                crate::speaker::GROUP_STYLE_NOTE
+            )
         );
 
         let loud = AgentConfig::from_value(&json!({
@@ -547,6 +551,9 @@ mod tests {
         };
         assert!(messages[0].content.starts_with("默认人设\n\n"));
         assert!(messages[0].content.contains(crate::speaker::GROUP_NOTE));
+        assert!(messages[0]
+            .content
+            .contains(crate::speaker::GROUP_STYLE_NOTE));
         assert!(messages[0]
             .content
             .contains("\n\n可用工具：\nmemo.list：列出备忘\n"));
@@ -609,7 +616,11 @@ mod tests {
         assert_eq!(messages[0].role, Role::System);
         assert_eq!(
             messages[0].content,
-            format!("严格人设\n\n{}", crate::speaker::GROUP_NOTE)
+            format!(
+                "严格人设\n\n{}\n\n{}",
+                crate::speaker::GROUP_NOTE,
+                crate::speaker::GROUP_STYLE_NOTE
+            )
         );
         assert_eq!(
             messages[1].content,
