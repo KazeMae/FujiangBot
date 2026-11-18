@@ -108,7 +108,7 @@
 | 历史图片查看工具 | `view_image` 按占位符回看本会话或引用消息里的图片 | 已实现，随 v0.4.0 部署；在线刷新未验收 | 只在 `vision_enabled` 且图像 token 上界已核定时出现。每次最多 3 张，每轮最多 6 张。会话外或已归档拒绝。QQ/NapCat 链接过期后的 `get_message` 刷新未验收。 |
 | 私聊直接对话触发 | 私聊普通文字或有效带图，未被命令或其他插件处理后直接交给 agent，无需 @ 或回复；群聊原规则不变 | 已随 v0.5.0 / PR #66 部署 | `require_at` 只约束群里的唤醒词路径。不靠改配置。 |
 | 群聊自然接话 | 群聊默认自然接话；默认人设不再重复「通常一句即可」，并收紧文案与玩笑/危机口吻 | 本分支/本 PR，未部署 | 本轮仍未上线。生产仍是 v0.5.0，线上仍是旧 244 字 `system_prompt` 覆盖代码默认。二进制部署后，群会话经 `append_group_note` 带上 `GROUP_STYLE_NOTE`。默认人设全文需另把线上 `system_prompt` 更新为新默认或清空。须用户确认后才部署。 |
-| 思考模式工具续传 | 把 Responses `reasoning_text` 按官方格式回传到后续工具请求 | 本分支/本 PR，未部署 | 不关闭生产 thinking。不是 Chat Completions 的 `reasoning_content`。须用户确认后才部署。 |
+| 思考模式工具续传 | 把 Responses `reasoning_text` 按官方格式回传到后续工具请求；同一轮多个 function_call 先连续回传全部 call，再回传 output | 本分支/本 PR，未部署 | 不关闭生产 thinking。不是 Chat Completions 的 `reasoning_content`。多工具 400 的线上根因须真实请求验证后才能定论。须用户确认后才部署。 |
 | 群聊指向与静默 | 宿主写出 `host_at_self` / `host_reply.to_self` / 引用正文；被点名要回；`[NO_REPLY]` 才不发送 | 本分支/本 PR，未部署 | 别人互聊且未指向本帐号时本来就不会进模型。空输出仍是忙，不是静默。不加随机抢话。须用户确认后才部署。 |
 
 前置：agent 热路径改动优先落在 `command.rs` / `plan.rs` / 新模块；单文件勿超 1000 行。

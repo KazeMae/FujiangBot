@@ -143,7 +143,7 @@ fn missing_optional_fields_and_plain_text_content_still_parse() {
 }
 
 #[test]
-fn multi_tool_keeps_one_reasoning_then_adjacent_call_output_pairs() {
+fn multi_tool_keeps_one_reasoning_then_all_calls_before_outputs() {
     let first = PriorCall::bare("c1", "rank_list", "{}", r#"{"a":1}"#)
         .with_reasoning_texts(vec!["think-1".into(), "think-2".into()]);
     let second = PriorCall::bare("c2", "memo_list", "{}", r#"{"b":2}"#);
@@ -164,17 +164,95 @@ fn multi_tool_keeps_one_reasoning_then_adjacent_call_output_pairs() {
             "user",
             "reasoning",
             "function_call",
-            "function_call_output",
             "function_call",
+            "function_call_output",
             "function_call_output"
         ]
     );
     assert_eq!(input[1]["content"].as_array().unwrap().len(), 2);
     assert_eq!(input[2]["call_id"], "c1");
-    assert_eq!(input[3]["call_id"], "c1");
-    assert_eq!(input[4]["call_id"], "c2");
+    assert_eq!(input[3]["call_id"], "c2");
+    assert_eq!(input[4]["type"], "function_call_output");
+    assert_eq!(input[4]["call_id"], "c1");
     assert_eq!(input[5]["call_id"], "c2");
-    assert!(input[4].get("content").is_none());
+    assert!(input[3].get("content").is_none());
+    let reasoning_items = input
+        .iter()
+        .filter(|item| item.get("type") == Some(&serde_json::json!("reasoning")))
+        .count();
+    assert_eq!(reasoning_items, 1);
+}
+
+#[test]
+fn two_reasoning_turns_stay_separate_and_do_not_repeat_texts_per_call() {
+    let first =
+        PriorCall::bare("c1", "rank_list", "{}", "a").with_reasoning_texts(vec!["think-a".into()]);
+    let second = PriorCall::bare("c2", "memo_list", "{}", "b");
+    let third =
+        PriorCall::bare("c3", "rank_get", "{}", "c").with_reasoning_texts(vec!["think-b".into()]);
+    let body = rendered_request(&client(), &[user("查")], &[first, second, third], &[]);
+    let types: Vec<&str> = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            item.get("type")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| item.get("role").and_then(serde_json::Value::as_str))
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(
+        types,
+        [
+            "user",
+            "reasoning",
+            "function_call",
+            "function_call",
+            "function_call_output",
+            "function_call_output",
+            "reasoning",
+            "function_call",
+            "function_call_output"
+        ]
+    );
+    let input = body["input"].as_array().unwrap();
+    assert_eq!(input[1]["content"][0]["text"], "think-a");
+    assert_eq!(input[6]["content"][0]["text"], "think-b");
+}
+
+#[test]
+fn without_reasoning_each_call_stays_next_to_its_output() {
+    let body = rendered_request(
+        &client(),
+        &[user("查")],
+        &[
+            PriorCall::bare("c1", "rank_list", "{}", "a"),
+            PriorCall::bare("c2", "memo_list", "{}", "b"),
+        ],
+        &[],
+    );
+    let types: Vec<&str> = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            item.get("type")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| item.get("role").and_then(serde_json::Value::as_str))
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(
+        types,
+        [
+            "user",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output"
+        ]
+    );
 }
 
 #[test]

@@ -489,38 +489,7 @@ fn responses_request<'a>(
             }),
         }
     }
-    for call in prior {
-        if !call.reasoning_texts.is_empty() {
-            input.push(InputItem::Reasoning {
-                kind: "reasoning",
-                content: call
-                    .reasoning_texts
-                    .iter()
-                    .map(|text| ReasoningText {
-                        kind: "reasoning_text",
-                        text,
-                    })
-                    .collect(),
-            });
-        }
-        input.push(InputItem::FunctionCall {
-            kind: "function_call",
-            call_id: &call.call_id,
-            name: &call.name,
-            arguments: &call.arguments,
-        });
-        input.push(InputItem::FunctionCallOutput {
-            kind: "function_call_output",
-            call_id: &call.call_id,
-            output: &call.output,
-        });
-        if !call.images.is_empty() {
-            input.push(InputItem::UserParts {
-                role: "user",
-                content: held_parts(&call.image_note, &call.images, project_images),
-            });
-        }
-    }
+    push_prior_items(&mut input, prior, project_images);
     let tools = tools
         .iter()
         .map(|tool| WireFunction {
@@ -542,6 +511,79 @@ fn responses_request<'a>(
         max_output_tokens,
         stream: false,
         tools,
+    }
+}
+
+fn push_prior_items<'a>(
+    input: &mut Vec<InputItem<'a>>,
+    prior: &'a [PriorCall],
+    project_images: bool,
+) {
+    let mut index = 0;
+    while index < prior.len() {
+        if prior[index].reasoning_texts.is_empty() {
+            push_call_pair(input, &prior[index], project_images);
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < prior.len() && prior[index].reasoning_texts.is_empty() {
+            index += 1;
+        }
+        let group = &prior[start..index];
+        input.push(InputItem::Reasoning {
+            kind: "reasoning",
+            content: group[0]
+                .reasoning_texts
+                .iter()
+                .map(|text| ReasoningText {
+                    kind: "reasoning_text",
+                    text,
+                })
+                .collect(),
+        });
+        for call in group {
+            input.push(InputItem::FunctionCall {
+                kind: "function_call",
+                call_id: &call.call_id,
+                name: &call.name,
+                arguments: &call.arguments,
+            });
+        }
+        for call in group {
+            input.push(InputItem::FunctionCallOutput {
+                kind: "function_call_output",
+                call_id: &call.call_id,
+                output: &call.output,
+            });
+            if !call.images.is_empty() {
+                input.push(InputItem::UserParts {
+                    role: "user",
+                    content: held_parts(&call.image_note, &call.images, project_images),
+                });
+            }
+        }
+    }
+}
+
+fn push_call_pair<'a>(input: &mut Vec<InputItem<'a>>, call: &'a PriorCall, project_images: bool) {
+    input.push(InputItem::FunctionCall {
+        kind: "function_call",
+        call_id: &call.call_id,
+        name: &call.name,
+        arguments: &call.arguments,
+    });
+    input.push(InputItem::FunctionCallOutput {
+        kind: "function_call_output",
+        call_id: &call.call_id,
+        output: &call.output,
+    });
+    if !call.images.is_empty() {
+        input.push(InputItem::UserParts {
+            role: "user",
+            content: held_parts(&call.image_note, &call.images, project_images),
+        });
     }
 }
 
