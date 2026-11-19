@@ -869,6 +869,53 @@ mod tests {
         assert_eq!(find_command_owner(&p, "活着？", "."), None);
     }
 
+    fn stubs_with_lai_zhi() -> [Stub; 3] {
+        [
+            Stub {
+                name: "agent",
+                cmds: &[".agent"],
+                prefixes: &[],
+                interest: Interest::Messages,
+            },
+            Stub {
+                name: "echo",
+                cmds: &[".ping"],
+                prefixes: &[],
+                interest: Interest::Commands,
+            },
+            Stub {
+                name: "fun",
+                cmds: &[".learn", ".star", ".tag"],
+                prefixes: &[".添加", ".删除", "来只"],
+                interest: Interest::Messages,
+            },
+        ]
+    }
+
+    #[test]
+    fn lai_zhi_is_fun_command_owner() {
+        let p = stubs_with_lai_zhi();
+        assert_eq!(find_command_owner(&p, "来只猫", "."), Some("fun"));
+        assert_eq!(find_command_owner(&p, "来只hmc", "."), Some("fun"));
+        assert_eq!(find_command_owner(&p, "来只 hmc", "."), Some("fun"));
+        assert_eq!(find_command_owner(&p, "活着？", "."), None);
+    }
+
+    #[test]
+    fn lai_zhi_routes_fun_before_agent_even_if_agent_is_listed_first() {
+        let p = stubs_with_lai_zhi();
+        let listed: Vec<&dyn Plugin> = p.iter().map(|s| s as &dyn Plugin).collect();
+        for raw in ["来只猫", "来只hmc", "来只 hmc"] {
+            let ev = text_event(Source::Friend { id: 2 }, raw);
+            let names: Vec<_> = route_targets(listed.iter().copied(), &ev, ".")
+                .into_iter()
+                .map(|i| p[i].name)
+                .collect();
+            assert_eq!(names.first().copied(), Some("fun"), "{raw}");
+            assert!(names.contains(&"agent"), "{raw}");
+        }
+    }
+
     #[test]
     fn respects_custom_bot_prefix() {
         let p = stubs();

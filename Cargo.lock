@@ -649,6 +649,7 @@ dependencies = [
  "fujiang-core",
  "fujiang-store",
  "rand 0.8.7",
+ "reqwest",
  "serde_json",
  "tokio",
  "tracing",

@@ -551,10 +551,10 @@ fujiang-core = { path = "../../fujiang-core" }
 | contest | Commands | `.remind` | 拉比赛、开赛前提醒、每日提醒 | `update_minutes` |
 | rank | Commands | — | 刷 rating / 榜；`.rank -urk/-urt` 也走 scope | `update_minutes` |
 | problem | Commands | — | 无 | `daily_reset_hour` |
-| fun | **Messages** | `.添加` `.删除` | 无 | `allow_mutate` / `admins` / `delete_files_on_album_del` |
+| fun | **Messages** | `.添加` `.删除` `来只` | 无 | `allow_mutate` / `admins` / `delete_files_on_album_del` |
 | luck | Commands | — | 无 | 仅开关 |
 
-fun 仍声明 `.learn` `.star` `.tag` 等命令，这些走命令主人；「来只」「学话触发」走 `Messages`。
+fun 仍声明 `.learn` `.star` `.tag` 等命令，这些走命令主人；「来只」同时声明为命令前缀，因此也走命令主人，私聊里不会被更高优先级的 agent 抢走。学话触发仍走 `Messages`，但 agent 在命中学话时让出，由 fun 回复。
 
 ---
 

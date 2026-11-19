@@ -58,7 +58,9 @@ impl Plugin for FunPlugin {
     }
 
     fn command_prefixes(&self) -> &'static [&'static str] {
-        &[".添加", ".删除"]
+        // "来只" is a natural command, not a dotted token. Declaring it here
+        // makes fun the command owner so agent (priority 10) does not run first.
+        &[".添加", ".删除", "来只"]
     }
 
     fn interest(&self) -> Interest {
@@ -116,6 +118,7 @@ impl Plugin for FunPlugin {
         }
 
         if let Some(name) = line.strip_prefix("来只") {
+            let name = name.trim();
             if !name.is_empty() {
                 match ctx.store.random_by_tag(name).await? {
                     Some(path) if path.exists() => {
@@ -459,3 +462,6 @@ async fn reply_visual(
         }
     }
 }
+
+#[cfg(test)]
+mod handle_tests;
