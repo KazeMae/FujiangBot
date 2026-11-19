@@ -528,7 +528,7 @@ dependencies = [
 
 [[package]]
 name = "fujiang"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "fujiang-adapter"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -574,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "fujiang-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -592,7 +592,7 @@ dependencies = [
 
 [[package]]
 name = "fujiang-plugin-agent"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -614,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "fujiang-plugin-contest"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -631,7 +631,7 @@ dependencies = [
 
 [[package]]
 name = "fujiang-plugin-echo"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -642,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "fujiang-plugin-fun"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -657,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "fujiang-plugin-luck"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -668,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "fujiang-plugin-memo"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -681,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "fujiang-plugin-problem"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -698,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "fujiang-plugin-rank"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -714,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "fujiang-store"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "chrono",
