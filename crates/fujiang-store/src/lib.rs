@@ -548,6 +548,18 @@ impl Store {
         Ok(row.map(|r| r.get::<String, _>(0)))
     }
 
+    /// Whether `line` would trigger 学话, including the first-token fallback.
+    pub async fn learn_hit(&self, group_id: Option<i64>, line: &str) -> anyhow::Result<bool> {
+        if self.learn_random(group_id, line).await?.is_some() {
+            return Ok(true);
+        }
+        let first = line.split_whitespace().next().unwrap_or("");
+        if first.is_empty() || first == line {
+            return Ok(false);
+        }
+        Ok(self.learn_random(group_id, first).await?.is_some())
+    }
+
     // --- stars ---
 
     pub async fn star_list(&self) -> anyhow::Result<Vec<Star>> {
@@ -698,6 +710,20 @@ mod tests {
         let n = store.learn_del(None, "hi", Some(1)).await.unwrap();
         assert_eq!(n, 1);
         assert_eq!(store.learn_list(None, Some("hi")).await.unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn learn_hit_matches_full_line_and_first_token() {
+        let (store, dir) = open_tmp().await;
+        store
+            .learn_add("活着？", "打赢牢大啦！", 0, None)
+            .await
+            .unwrap();
+        assert!(store.learn_hit(None, "活着？").await.unwrap());
+        assert!(store.learn_hit(None, "活着？ 啊").await.unwrap());
+        assert!(!store.learn_hit(None, "来只hmc").await.unwrap());
+        assert!(!store.learn_hit(Some(9), "无关").await.unwrap());
         let _ = std::fs::remove_dir_all(dir);
     }
 

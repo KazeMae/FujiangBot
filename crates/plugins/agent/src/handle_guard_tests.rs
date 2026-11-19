@@ -118,3 +118,34 @@ async fn agent_command_stops_before_a_chat_turn() {
     let ev = Event::Message(msg(Source::Friend { id: 42 }, 42, 9, ".agent status"));
     assert_eq!(handle(ev).await, Flow::Stop);
 }
+
+#[tokio::test]
+async fn private_lai_zhi_is_left_for_fun() {
+    for text in ["来只hmc", "来只 hmc"] {
+        let ev = Event::Message(msg(Source::Friend { id: 42 }, 42, 9, text));
+        assert_eq!(handle(ev).await, Flow::Continue, "{text}");
+    }
+}
+
+#[tokio::test]
+async fn private_learn_trigger_is_left_for_fun() {
+    let ctx = test_ctx().await;
+    ctx.store
+        .learn_add("活着？", "打赢牢大啦！", 1, None)
+        .await
+        .unwrap();
+    let ev = Event::Message(msg(Source::Friend { id: 42 }, 42, 9, "活着？"));
+    let scope = fujiang_core::PluginScope::for_plugin("agent");
+    let flow = super::AgentPlugin::default()
+        .handle(&ctx, &ev, &scope)
+        .await
+        .unwrap();
+    assert_eq!(flow, Flow::Continue);
+}
+
+#[tokio::test]
+async fn private_plain_chat_is_still_claimed() {
+    // No session pool, so answer() only sends the busy reply. It must still Stop.
+    let ev = Event::Message(msg(Source::Friend { id: 42 }, 42, 9, "今天天气"));
+    assert_eq!(handle(ev).await, Flow::Stop);
+}

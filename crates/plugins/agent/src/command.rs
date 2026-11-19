@@ -22,7 +22,7 @@ pub(crate) const HELP: &str =
 .agent workspace    查看当前真实会话绑定的工作区。执行器默认不可用\n\
 .agent workspace personal   仅群里的当前发言人把自己的选择改成本人\n\
 .agent workspace group      群里恢复当前群\n\
-在配置里把 priority 设为 10，高于 fun。本插件接过的消息返回 Stop，fun 不会再处理同一条。\n\
+在配置里把 priority 设为 10，高于 fun。本插件接过的消息返回 Stop。来只和学话仍先交给 fun。\n\
 require_at 为 true 时，群里只认 @我或回复我，单独的唤醒词不算。私聊不受这项限制。";
 
 pub(crate) enum AgentCmd {

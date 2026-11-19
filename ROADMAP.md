@@ -107,17 +107,17 @@
 | 工作区运行时 | 宿主 `/usr` `/etc` `/var` 只读绑定，bwrap 单 UID，网络与宿主共享 | 默认关闭。`FUJIANG_WORKSPACE_MVP` 指向宿主目录才打开 | 只有 `/work` 可写。沙箱内 apt/dpkg 安装已取消。详见 `docs/workspace-rootfs.md`。 |
 | 历史图片查看工具 | `view_image` 按占位符回看本会话或引用消息里的图片 | 已实现，随 v0.4.0 部署；在线刷新未验收 | 只在 `vision_enabled` 且图像 token 上界已核定时出现。每次最多 3 张，每轮最多 6 张。会话外或已归档拒绝。QQ/NapCat 链接过期后的 `get_message` 刷新未验收。 |
 | 私聊直接对话触发 | 私聊普通文字或有效带图，未被命令或其他插件处理后直接交给 agent，无需 @ 或回复；群聊原规则不变 | 已随 v0.5.0 / PR #66 部署 | `require_at` 只约束群里的唤醒词路径。不靠改配置。 |
-| 群聊自然接话 | 群聊默认自然接话；默认人设不再重复「通常一句即可」，并收紧文案与玩笑/危机口吻 | 已合入 main（PR #68），待随 v0.6.0 部署 | 生产仍是 v0.5.0。部署新二进制后，群会话经 `append_group_note` 带上 `GROUP_STYLE_NOTE`。默认人设全文要把线上 `system_prompt` 更新为新默认或清空。 |
-| 思考模式工具续传 | 把 Responses `reasoning_text` 按官方格式回传到后续工具请求；同一轮多个 function_call 先连续回传全部 call，再回传 output | 已合入 main（PR #68），待随 v0.6.0 部署 | 不关闭生产 thinking。不是 Chat Completions 的 `reasoning_content`。已有分组回传的实测样本，不是穷尽证明。 |
-| 群聊指向与静默 | 宿主写出 `host_at_self` / `host_reply.to_self` / 引用正文；被点名要回；请评价时评价被指到的材料，不把引用人物当成当前发送者，不用沉默或求助安慰代替；`[NO_REPLY]` 才不发送 | 已合入 main（PR #68），待随 v0.6.0 部署 | 别人互聊且未指向本帐号时本来就不会进模型。空输出仍是忙，不是静默。不加随机抢话。v0.5.0 当前回合不回传引用正文。 |
+| 群聊自然接话 | 群聊默认自然接话；默认人设不再重复「通常一句即可」，并收紧文案与玩笑/危机口吻 | 已随 v0.6.0 部署 | 群会话经 `append_group_note` 带上 `GROUP_STYLE_NOTE`。线上 `system_prompt` 已更新为 388 字新默认。 |
+| 思考模式工具续传 | 把 Responses `reasoning_text` 按官方格式回传到后续工具请求；同一轮多个 function_call 先连续回传全部 call，再回传 output | 已随 v0.6.0 部署 | 不关闭生产 thinking。不是 Chat Completions 的 `reasoning_content`。已有分组回传的实测样本，不是穷尽证明。 |
+| 群聊指向与静默 | 宿主写出 `host_at_self` / `host_reply.to_self` / 引用正文；被点名要回；请评价时评价被指到的材料，不把引用人物当成当前发送者，不用沉默或求助安慰代替；`[NO_REPLY]` 才不发送 | 已随 v0.6.0 部署 | 别人互聊且未指向本帐号时本来就不会进模型。空输出仍是忙，不是静默。不加随机抢话。 |
 
 前置：agent 热路径改动优先落在 `command.rs` / `plan.rs` / 新模块；单文件勿超 1000 行。
 
 ### 版本与部署
 
 - 功能合入 `main` 不自动部署。
-- 生产包仍是 **v0.5.0**（提交 `3293903e038df37b08b68dda6ef331856be382f3`，2026-11-18 部署）：含 PR #65（默认 QQ 纯文本系统提示）和 PR #66（私聊普通消息直接交给 agent）。线上仍是 PR65 的 244 字自定义 `system_prompt`，该值仍覆盖代码默认。
-- 待部署包 **v0.6.0**：含 PR #68（群聊自然接话、思考模式多工具续传、群聊指向与引用材料评价、`[NO_REPLY]` 不发送路径，merge `e703a48`）。部署须替换二进制；经用户批准后把线上 `system_prompt` 最小更新为新默认，并保留 `vision_enabled`、模型、环境与其它无关配置，不开启工作区，不重启 NapCat。
+- 生产包是 **v0.6.0**（提交 `c47a41b20e8798163fa6f7b463f6a94a21534825`，2026-11-18 21:46 部署）：含 PR #68。线上 `system_prompt` 为 388 字新默认；`vision_enabled`、模型与其它无关配置保留，工作区未开，NapCat 未重启。2026-11-19 13:19 仅用既有 `llm.env` 导出环境后重启过福酱（PID 50848），未改配置或密钥文件。
+- 未部署：私聊「来只<tag>」和学话被 agent（priority 10，PR #66 私聊直出）抢先 `Stop`，图库不会发图，学话也不会回复。回退 `system_prompt` 不能恢复。本地分支 `fix/fun-natural-commands-before-agent` 把「来只」声明为 fun 命令前缀、抽图时去掉 tag 两侧空白，并让 agent 在学话命中时让出。不打版本，待审后合入再部署。
 - 部署清单仍按 `docs/BRANCHING.md`：备份、只重启 fujiang、不碰 NapCat。
 
 ## 并行策略

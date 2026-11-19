@@ -21,6 +21,11 @@ mod workspace_backend;
 mod workspace_runner;
 mod workspace_store;
 
+fn is_tag_draw_line(line: &str) -> bool {
+    line.strip_prefix("来只")
+        .is_some_and(|name| !name.trim().is_empty())
+}
+
 #[cfg(test)]
 #[path = "guard_tests.rs"]
 mod guard_tests;
@@ -152,6 +157,15 @@ impl Plugin for AgentPlugin {
         else {
             return Ok(Flow::Continue);
         };
+        // Fun owns 来只 and 学话. Yield so they still run when this plugin is first.
+        if is_tag_draw_line(&msg.command_line())
+            || ctx
+                .store
+                .learn_hit(msg.source.group_id(), &msg.command_line())
+                .await?
+        {
+            return Ok(Flow::Continue);
+        }
         self.answer(ctx, msg, &cfg, user_text, quoted).await;
         Ok(Flow::Stop)
     }
